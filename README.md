@@ -16,8 +16,11 @@ A command-line tool for exploring huge AnnData stores (`.h5ad` and `.zarr`) with
 ## Installation
 
 ```bash
-pip install adata-cli
+pip install pyadata-cli
 ```
+
+The command is `adata`. The distribution is named `pyadata-cli` because
+`adata-cli` was already taken on PyPI by an unrelated project.
 
 From source with [uv](https://docs.astral.sh/uv/):
 ```bash
