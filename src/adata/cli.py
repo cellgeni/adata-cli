@@ -24,13 +24,22 @@ from adata.commands import export_image as export_image_cmd
 
 app = typer.Typer(
     help="Streaming CLI for huge AnnData .h5ad and .zarr stores "
-    "(view, ls, subset, export, import)."
+    "(view, ls, subset, split, concat, export, import)."
 )
 # Use stderr for status/progress to keep stdout clean for data output
 # force_terminal=True ensures Rich output is visible even in non-TTY environments
 console = Console(stderr=True, force_terminal=True)
 # Results go to stdout so they can be piped; status and errors stay on stderr.
 out_console = Console()
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        from adata import __version__
+
+        out_console.print(__version__, highlight=False)
+        raise typer.Exit()
+
 
 # Create sub-apps for export and import
 export_app = typer.Typer(help="Export objects from an AnnData store.")
@@ -39,8 +48,22 @@ app.add_typer(export_app, name="export")
 app.add_typer(import_app, name="import")
 
 
+@app.callback()
+def _root(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        "-V",
+        help="Show the installed version and exit.",
+        callback=_version_callback,
+        is_eager=True,
+    ),
+) -> None:
+    """Streaming CLI for huge AnnData .h5ad and .zarr stores."""
+
+
 # ============================================================================
-# INFO command
+# VIEW command
 # ============================================================================
 @app.command("view")
 def view(
@@ -485,6 +508,11 @@ def split(
     chunk_rows: int = typer.Option(
         1024, "--chunk", "-C", help="Row chunk size for dense matrices"
     ),
+    zarr_format: Optional[int] = typer.Option(
+        None,
+        "--zarr-format",
+        help="Zarr spec version to write (defaults to the source store's)",
+    ),
 ) -> None:
     """
     Split a store into one file per distinct value of a column.
@@ -500,6 +528,10 @@ def split(
         console.print("[bold red]Error:[/] --axis must be 'obs' or 'var'.")
         raise typer.Exit(code=1)
 
+    if zarr_format is not None and zarr_format not in (2, 3):
+        console.print("[bold red]Error:[/] --zarr-format must be 2 or 3.")
+        raise typer.Exit(code=1)
+
     try:
         split_store(
             file=file,
@@ -512,6 +544,7 @@ def split(
             manifest=manifest,
             min_size=min_size,
             chunk_rows=chunk_rows,
+            zarr_format=zarr_format,
         )
     except Exception as e:
         console.print(f"[bold red]Error:[/] {e}")

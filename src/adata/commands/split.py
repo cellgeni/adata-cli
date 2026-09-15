@@ -60,12 +60,16 @@ def split_store(
     manifest: bool = True,
     min_size: int = 1,
     chunk_rows: int = 1024,
+    zarr_format: Optional[int] = None,
 ) -> List[Tuple[str, Path, int]]:
     """Split `file` into one store per distinct value of `column`.
 
     Returns ``(label, path, n_rows)`` for each group written. Groups smaller
     than `min_size` are skipped with a warning rather than producing tiny
     stores nobody asked for.
+
+    `zarr_format` overrides the Zarr version of the outputs; without it they
+    follow the source store's.
     """
     if axis not in ("obs", "var"):
         raise ValueError("--axis must be 'obs' or 'var'.")
@@ -75,7 +79,8 @@ def split_store(
 
     with open_store(file, "r") as store:
         groups, order = group_indices(store.root, axis, column)
-        zarr_format = store.zarr_format
+        if zarr_format is None:
+            zarr_format = store.zarr_format
 
     if not groups:
         raise ValueError(f"Column {column!r} produced no groups.")

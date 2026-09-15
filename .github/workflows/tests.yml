@@ -6,6 +6,8 @@ on:
   # Every pull request, not only those targeting main/dev -- a stacked PR
   # based on another feature branch would otherwise run no checks at all.
   pull_request:
+  # Reused by publish.yml, so a release cannot skip the suite.
+  workflow_call:
 
 concurrency:
   group: tests-${{ github.workflow }}-${{ github.ref }}

@@ -1,10 +1,14 @@
 [project]
-name = "adata-cli"
-version = "0.4.0.dev0"
+# The short name `adata-cli` was taken on PyPI by an unrelated project,
+# so the distribution is published as `pyadata-cli`. The import package
+# and the command are both still `adata`.
+name = "pyadata-cli"
+version = "0.5.0"
 description = "Streaming CLI for exploring and editing large AnnData .h5ad and .zarr stores"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Aljes Binkevich", email = "ab76@sanger.ac.uk" },
 ]
@@ -14,18 +18,22 @@ maintainers = [
 keywords = [
     "anndata",
     "h5ad",
+    "zarr",
     "bioinformatics",
     "single-cell",
+    "cli",
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Typing :: Typed",
 ]
 
 dependencies = [
@@ -38,10 +46,11 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/cellgeni/h5ad-cli"
-Repository = "https://github.com/cellgeni/h5ad-cli"
-Documentation = "README.md"
-Issues = "https://github.com/cellgeni/h5ad-cli/issues"
+Homepage = "https://github.com/cellgeni/adata-cli"
+Repository = "https://github.com/cellgeni/adata-cli"
+Documentation = "https://cellgeni.github.io/adata-cli/"
+Issues = "https://github.com/cellgeni/adata-cli/issues"
+Changelog = "https://github.com/cellgeni/adata-cli/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [
@@ -58,6 +67,7 @@ build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-name = "adata"
+
 
 [project.scripts]
 adata = "adata.cli:main"

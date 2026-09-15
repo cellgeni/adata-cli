@@ -31,7 +31,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: quay.io/cellgeni/h5ad-cli
+          images: quay.io/cellgeni/adata-cli
           tags: |
             type=ref,event=tag
             # push "latest" only for tags WITHOUT hyphens (excludes pre-releases like 1.0.0-beta):

@@ -11,9 +11,18 @@ A command-line tool for exploring huge AnnData stores (`.h5ad` and `.zarr`) with
 - Converts between HDF5 and Zarr (v2 and v3) in either direction
 - Rich terminal output with progress indicators, kept on stderr so results pipe cleanly
 
+**Documentation: [cellgeni.github.io/adata-cli](https://cellgeni.github.io/adata-cli/)**
+
 ## Installation
 
-Using [uv](https://docs.astral.sh/uv/) (recommended):
+```bash
+pip install pyadata-cli
+```
+
+The command is `adata`. The distribution is named `pyadata-cli` because
+`adata-cli` was already taken on PyPI by an unrelated project.
+
+From source with [uv](https://docs.astral.sh/uv/):
 ```bash
 git clone https://github.com/cellgeni/adata-cli.git
 cd adata-cli
@@ -69,12 +78,17 @@ adata split  data.h5ad --by sample -o per_sample/
 adata concat per_sample/*.h5ad -o merged.h5ad --join outer --label sample
 ```
 
-See [docs/GET_STARTED.md](docs/GET_STARTED.md) for a short tutorial.
+## Documentation
+
+- [Get started](docs/GET_STARTED.md) — a short tutorial
+- [Command reference](docs/COMMANDS.md) — every command and flag
+- [Element spec: HDF5](docs/ELEMENTS_h5ad.md) / [Zarr](docs/ELEMENTS_zarr.md) — the on-disk format, and what this tool does with it
+- [Changelog](CHANGELOG.md)
 
 ## Docker
 
 A docker image is available on QUAY: `quay.io/cellgeni/adata-cli:latest`. Pull and run with:
 
 ```bash
-docker run --rm -it -v /path/to/data:/data quay.io/cellgeni/adata-cli:latest adata view /data/your_file.h5ad
+docker run --rm -it -v /path/to/data:/data quay.io/cellgeni/adata-cli:latest view /data/your_file.h5ad
 ```
