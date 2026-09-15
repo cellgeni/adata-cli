@@ -109,15 +109,21 @@ jobs:
           ADATA_REQUIRE_VERSION_FIXTURES: "1"
         run: |
           uv run pytest -v -W default tests/test_anndata_versions.py \
-            -m integration
+            -m integration --junitxml=compat-results.xml
 
       - name: Confirm the compatibility cases actually ran
-        env:
-          ADATA_REQUIRE_VERSION_FIXTURES: "1"
+        if: always()
         run: |
-          # Belt and braces: assert a non-trivial number of cases passed, so a
-          # collection or marker mistake cannot pass as success either.
-          count=$(uv run pytest -q tests/test_anndata_versions.py -m integration \
-                  --collect-only 2>/dev/null | grep -c "::" || true)
-          echo "collected $count compatibility cases"
-          test "$count" -ge 100
+          # Belt and braces: a marker typo or a collection mistake would make
+          # the step above pass while executing nothing at all.
+          python - <<'EOF'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse("compat-results.xml").getroot()
+          suite = root.find("testsuite") if root.tag == "testsuites" else root
+          total = int(suite.get("tests", 0))
+          skipped = int(suite.get("skipped", 0))
+          ran = total - skipped
+          print(f"{ran} compatibility cases ran ({skipped} skipped of {total})")
+          if ran < 150:
+              sys.exit(f"expected at least 150 cases to run, got {ran}")
+          EOF
