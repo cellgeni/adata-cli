@@ -5,13 +5,12 @@ from typing import List, Optional
 
 from rich.console import Console
 
-from h5ad.formats.array import export_npy as export_npy_format
-from h5ad.formats.common import EXPORTABLE_TYPES, IMAGE_EXTENSIONS, TYPE_EXTENSIONS
-from h5ad.formats.dataframe import export_dataframe
-from h5ad.formats.image import export_image as export_image_format
-from h5ad.formats.json_data import export_json as export_json_format
-from h5ad.formats.sparse import export_mtx as export_mtx_format
-from h5ad.storage import open_store
+from adata.formats.array import export_npy as export_npy_format
+from adata.formats.dataframe import export_dataframe
+from adata.formats.image import export_image as export_image_format
+from adata.formats.json_data import export_json as export_json_format
+from adata.formats.sparse import export_mtx as export_mtx_format
+from adata.storage import open_store
 
 
 def export_table(
@@ -38,7 +37,7 @@ def export_table(
 def export_npy(
     file: Path,
     obj: str,
-    out: Path,
+    out: Optional[Path],
     chunk_elements: int,
     console: Console,
 ) -> None:
@@ -98,9 +97,6 @@ def export_image(file: Path, obj: str, out: Path, console: Console) -> None:
 
 
 __all__ = [
-    "EXPORTABLE_TYPES",
-    "IMAGE_EXTENSIONS",
-    "TYPE_EXTENSIONS",
     "export_image",
     "export_json",
     "export_mtx",

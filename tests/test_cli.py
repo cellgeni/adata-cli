@@ -6,38 +6,38 @@ from pathlib import Path
 import h5py
 import numpy as np
 from typer.testing import CliRunner
-from h5ad.cli import app
-from h5ad.commands.info import show_info
-from h5ad.commands.export import export_table
+from adata.cli import app
+from adata.commands.info import show_info
+from adata.commands.export import export_table
 from rich.console import Console
 
 
 runner = CliRunner()
 
 
-class TestInfoCommand:
+class TestViewCommand:
     """Tests for info command."""
 
-    def test_info_command_success(self, sample_h5ad_file):
+    def test_view_command_success(self, sample_h5ad_file):
         """Test info command on valid file."""
-        result = runner.invoke(app, ["info", str(sample_h5ad_file)])
+        result = runner.invoke(app, ["view", str(sample_h5ad_file)])
         assert result.exit_code == 0
         assert "5 × 4" in result.stdout
 
-    def test_info_command_nonexistent_file(self):
+    def test_view_command_nonexistent_file(self):
         """Test info command on non-existent file."""
-        result = runner.invoke(app, ["info", "nonexistent.h5ad"])
+        result = runner.invoke(app, ["view", "nonexistent.h5ad"])
         assert result.exit_code != 0
 
-    def test_info_function_direct(self, sample_h5ad_file):
+    def test_view_function_direct(self, sample_h5ad_file):
         """Test show_info function directly."""
         console = Console(stderr=True)
         # Should not raise exception
         show_info(sample_h5ad_file, console)
 
-    def test_info_tree_flag(self, sample_h5ad_file):
+    def test_view_tree_flag(self, sample_h5ad_file):
         """Test info command with --tree flag."""
-        result = runner.invoke(app, ["info", "--tree", str(sample_h5ad_file)])
+        result = runner.invoke(app, ["view", "--tree", str(sample_h5ad_file)])
         assert result.exit_code == 0
         # Should show type annotations in angle brackets
         # Output may go to stdout or stderr depending on console config
@@ -45,55 +45,55 @@ class TestInfoCommand:
         assert "<" in output
         assert ">" in output
 
-    def test_info_tree_short_flag(self, sample_h5ad_file):
+    def test_view_tree_short_flag(self, sample_h5ad_file):
         """Test info command with -t short flag."""
-        result = runner.invoke(app, ["info", "-t", str(sample_h5ad_file)])
+        result = runner.invoke(app, ["view", "-t", str(sample_h5ad_file)])
         assert result.exit_code == 0
         output = result.stdout + (result.stderr or "")
         assert "<" in output
 
-    def test_info_depth_flag(self, sample_h5ad_file):
+    def test_view_depth_flag(self, sample_h5ad_file):
         """Test info command with --depth flag."""
         result = runner.invoke(
-            app, ["info", "--tree", "--depth", "1", str(sample_h5ad_file)]
+            app, ["view", "--tree", "--depth", "1", str(sample_h5ad_file)]
         )
         assert result.exit_code == 0
         output = result.stdout + (result.stderr or "")
         assert "<" in output
 
-    def test_info_depth_short_flag(self, sample_h5ad_file):
+    def test_view_depth_short_flag(self, sample_h5ad_file):
         """Test info command with -d short flag."""
-        result = runner.invoke(app, ["info", "-t", "-d", "2", str(sample_h5ad_file)])
+        result = runner.invoke(app, ["view", "-t", "-d", "2", str(sample_h5ad_file)])
         assert result.exit_code == 0
         output = result.stdout + (result.stderr or "")
         assert "<" in output
 
-    def test_info_entry_positional(self, sample_h5ad_file):
+    def test_view_entry_positional(self, sample_h5ad_file):
         """Test info command with entry as positional argument."""
-        result = runner.invoke(app, ["info", str(sample_h5ad_file), "X"])
+        result = runner.invoke(app, ["view", str(sample_h5ad_file), "X"])
         assert result.exit_code == 0
         output = result.stdout + (result.stderr or "")
         assert "Path:" in output
         assert "Type:" in output
 
-    def test_info_entry_obs(self, sample_h5ad_file):
+    def test_view_entry_obs(self, sample_h5ad_file):
         """Test info command with obs entry."""
-        result = runner.invoke(app, ["info", str(sample_h5ad_file), "obs"])
+        result = runner.invoke(app, ["view", str(sample_h5ad_file), "obs"])
         assert result.exit_code == 0
         output = result.stdout + (result.stderr or "")
         assert "Path:" in output
         assert "dataframe" in output
 
-    def test_info_entry_nested_path(self, sample_h5ad_file):
+    def test_view_entry_nested_path(self, sample_h5ad_file):
         """Test info command with nested object path."""
-        result = runner.invoke(app, ["info", str(sample_h5ad_file), "uns/description"])
+        result = runner.invoke(app, ["view", str(sample_h5ad_file), "uns/description"])
         assert result.exit_code == 0
         output = result.stdout + (result.stderr or "")
         assert "Path:" in output
 
-    def test_info_entry_not_found(self, sample_h5ad_file):
+    def test_view_entry_not_found(self, sample_h5ad_file):
         """Test info command with non-existent object path."""
-        result = runner.invoke(app, ["info", str(sample_h5ad_file), "nonexistent"])
+        result = runner.invoke(app, ["view", str(sample_h5ad_file), "nonexistent"])
         assert result.exit_code == 0  # Doesn't exit with error, just shows message
         output = result.stdout + (result.stderr or "")
         assert "not found" in output
@@ -393,7 +393,7 @@ class TestExportDataframeCommand:
         assert rows[3] == ["cell3", "11.0", "BRC2243", "β-cell"]
         assert rows[4] == ["cell4", "nan", "nan", "nan"]
 
-    def test_export_dataframe_invalid_axis(self, sample_h5ad_file, temp_dir):
+    def test_export_dataframe_missing_entry(self, sample_h5ad_file, temp_dir):
         """Test export dataframe with invalid axis."""
         output = temp_dir / "table.csv"
         result = runner.invoke(
@@ -410,7 +410,7 @@ class TestExportDataframeCommand:
         assert result.exit_code == 1
         # Check both stdout and stderr since Console uses stderr=True
         output_text = result.stdout + result.stderr
-        assert "obs" in output_text or "var" in output_text
+        assert "not found" in output_text
 
     def test_export_table_function(self, sample_h5ad_file, temp_dir):
         """Test export_table function directly."""
@@ -565,11 +565,17 @@ class TestCLIIntegration:
         assert result.exit_code == 0
         assert "Streaming CLI" in result.stdout
 
-    def test_info_help(self):
-        """Test info command help."""
-        result = runner.invoke(app, ["info", "--help"])
+    def test_view_help(self):
+        """Test view command help."""
+        result = runner.invoke(app, ["view", "--help"])
         assert result.exit_code == 0
         assert "Show high-level information" in result.stdout
+
+    def test_info_alias_is_deprecated(self):
+        """The `info` alias still works but warns."""
+        result = runner.invoke(app, ["info", "--help"])
+        assert result.exit_code == 0
+        assert "Deprecated alias" in result.stdout
 
     def test_export_help(self):
         """Test export command help."""
@@ -582,7 +588,7 @@ class TestCLIIntegration:
         """Test export dataframe command help."""
         result = runner.invoke(app, ["export", "dataframe", "--help"])
         assert result.exit_code == 0
-        assert "Export a dataframe" in result.stdout
+        assert "Export any dataframe" in result.stdout
 
     def test_import_help(self):
         """Test import command help."""
@@ -595,4 +601,4 @@ class TestCLIIntegration:
         """Test subset command help."""
         result = runner.invoke(app, ["subset", "--help"])
         assert result.exit_code == 0
-        assert "Subset an h5ad" in result.stdout
+        assert "Subset an AnnData store" in result.stdout

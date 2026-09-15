@@ -7,8 +7,8 @@ import numpy as np
 from PIL import Image
 from rich.console import Console
 
-from h5ad.formats.common import _resolve
-from h5ad.storage import is_dataset
+from adata.formats.common import _resolve
+from adata.storage import is_dataset
 
 
 def export_image(root: Any, obj: str, out: Path, console: Console) -> None:

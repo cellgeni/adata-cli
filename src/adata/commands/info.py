@@ -1,12 +1,11 @@
 from pathlib import Path
 from typing import Any, Optional
 
-import rich
 from rich.console import Console
 from rich.tree import Tree
 
-from h5ad.core.info import axis_len, format_type_info, get_entry_type
-from h5ad.storage import is_dataset, is_group, open_store
+from adata.core.info import axis_len, format_type_info, get_entry_type
+from adata.storage import is_dataset, is_group, open_store
 
 # Preferred display order for top-level keys
 KEY_ORDER = ["X", "obs", "var", "obsm", "varm", "layers", "obsp", "varp", "uns"]
@@ -24,6 +23,7 @@ def show_info(
     show_types: bool = False,
     depth: Optional[int] = None,
     entry_path: Optional[str] = None,
+    out_console: Optional[Console] = None,
 ) -> None:
     """
     Show high-level information about the .h5ad file.
@@ -33,23 +33,28 @@ def show_info(
         show_types (bool): Show detailed type information for each entry
         depth (Optional[int]): Maximum recursion depth for type display (only with show_types=True)
         entry_path (Optional[str]): Specific entry path to inspect (e.g., 'obsm/X_pca')
+        out_console (Optional[Console]): Where results go. Defaults to stdout so
+            that output pipes cleanly; `console` keeps status and errors.
     """
+    out = out_console if out_console is not None else Console()
     with open_store(file, "r") as store:
         f = store.root
         # If a specific path is requested, show detailed info for that object
         if entry_path:
-            _show_object_info(f, entry_path, console)
+            _show_object_info(f, entry_path, out)
             return
 
         # Get n_obs and n_var
         n_obs = axis_len(f, "obs")
         n_var = axis_len(f, "var")
-        rich.print(
-            f"[bold cyan]An object with n_obs × n_var: {n_obs if n_obs is not None else '?'} × {n_var if n_var is not None else '?'}[/]"
+        out.print(
+            "[bold cyan]An object with n_obs × n_var: "
+            f"{n_obs if n_obs is not None else '?'} × "
+            f"{n_var if n_var is not None else '?'}[/]"
         )
 
         if show_types:
-            _show_types_tree(f, console, root_label=str(file), depth=depth)
+            _show_types_tree(f, out, root_label=str(file), depth=depth)
         else:
             # List top-level keys and their sub-keys (original behavior)
             for key in _sort_keys(list(f.keys())):
@@ -62,7 +67,7 @@ def show_info(
                         if k not in ("_index", "__categories", "obs_names", "var_names")
                     ]
                     if sub_keys and key != "X":
-                        rich.print(
+                        out.print(
                             f"\t[bold yellow]{key}:[/]\t"
                             + ", ".join(f"[bright_white]{sub}[/]" for sub in sub_keys)
                         )

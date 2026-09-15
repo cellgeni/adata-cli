@@ -8,7 +8,7 @@ import h5py
 import numpy as np
 from typer.testing import CliRunner
 
-from h5ad.cli import app
+from adata.cli import app
 
 
 runner = CliRunner()

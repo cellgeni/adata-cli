@@ -1,27 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 import numpy as np
 
-from h5ad.storage import is_dataset, is_group
-from h5ad.util.path import norm_path
-
-
-TYPE_EXTENSIONS = {
-    "dataframe": {".csv"},
-    "sparse-matrix": {".mtx"},
-    "dense-matrix": {".npy", ".png", ".jpg", ".jpeg", ".tif", ".tiff"},
-    "array": {".npy", ".png", ".jpg", ".jpeg", ".tif", ".tiff"},
-    "dict": {".json"},
-    "scalar": {".json"},
-    "categorical": {".csv"},
-    "awkward-array": {".json"},
-}
-
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
-
-EXPORTABLE_TYPES = set(TYPE_EXTENSIONS.keys())
+from adata.storage import is_dataset, is_group
+from adata.util.path import norm_path
 
 
 def _get_encoding_type(group: Any) -> str:

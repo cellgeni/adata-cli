@@ -6,15 +6,15 @@ This short walkthrough shows the basic workflow: inspect a store, export metadat
 
 Using uv (recommended):
 ```bash
-git clone https://github.com/cellgeni/h5ad-cli.git
-cd h5ad-cli
+git clone https://github.com/cellgeni/adata-cli.git
+cd adata-cli
 uv sync
 ```
 
 With pip:
 ```bash
-git clone https://github.com/cellgeni/h5ad-cli.git
-cd h5ad-cli
+git clone https://github.com/cellgeni/adata-cli.git
+cd adata-cli
 pip install .
 ```
 
@@ -36,7 +36,7 @@ wget -O visium.h5ad https://exampledata.scverse.org/squidpy/figshare/visium_hne_
 
 Now run `info` to see the file structure:
 ```bash
-uv run h5ad info visium.h5ad
+adata view visium.h5ad
 ```
 ```
 An object with n_obs × n_var: 2688 × 18078
@@ -52,7 +52,7 @@ pct_counts_in_top_50_genes, pct_counts_mt, total_counts, total_counts_mt
 
 To inspect a specific entry:
 ```bash
-uv run h5ad info visium.h5ad obsm/X_pca
+adata view visium.h5ad obsm/X_pca
 ```
 ```
 Path: obsm/X_pca
@@ -66,7 +66,7 @@ Details: Dense matrix 2688×50 (float32)
 View the first few lines of the `obs` dataframe:
 
 ```bash
-uv run h5ad export dataframe visium.h5ad obs --head 10
+adata export dataframe visium.h5ad obs --head 10
 ```
 ```csv
 _index,array_col,array_row,cluster,in_tissue,leiden,log1p_n_genes_by_counts,log1p_total_counts,log1p_total_counts_mt,n_counts,n_genes_by_counts,pct_counts_in_top_100_genes,pct_counts_in_top_200_genes,pct_counts_in_top_500_genes,pct_counts_in_top_50_genes,pct_counts_mt,total_counts,total_counts_mt
@@ -84,7 +84,7 @@ AAACGGTTGCGAACTG-1,59,67,Lateral_ventricle,1,Striatum,8.718663567048953,10.25400
 
 Export cell metadata to a CSV file:
 ```bash
-uv run h5ad export dataframe visium.h5ad obs --output cells.csv
+adata export dataframe visium.h5ad obs --output cells.csv
 wc -l cells.csv # 2689 cells.csv
 ```
 
@@ -121,12 +121,12 @@ wc -l barcodes.txt  # 257 barcodes.txt
 
 Now you can use this list to create a subset `.h5ad` file:
 ```bash
-uv run h5ad subset visium.h5ad --output cortex2.h5ad --obs barcodes.txt
+adata subset visium.h5ad --output cortex2.h5ad --obs barcodes.txt
 ```
 
 Check the result:
 ```bash
-uv run h5ad info cortex2.h5ad
+adata view cortex2.h5ad
 ```
 ```
 An object with n_obs × n_var: 257 × 18078
@@ -148,12 +148,12 @@ cut -d ',' -f 1-5 cells.csv > cells1to5.csv
 
 Now import it back into `cortex2.h5ad` with the `_index` column as index:
 ```bash
-uv run h5ad import dataframe visium.h5ad obs cells1to5.csv --index-column _index --output visium_obs1to5.h5ad
+adata import dataframe visium.h5ad obs cells1to5.csv --index-column _index --output visium_obs1to5.h5ad
 ```
 
 Check the updated `obs` structure:
 ```bash
-uv run h5ad info visium_obs1to5.h5ad
+adata view visium_obs1to5.h5ad
 ```
 ```
 An object with n_obs × n_var: 2688 × 18078
@@ -169,12 +169,12 @@ pct_dropout_by_counts, total_counts, variances, variances_norm
 
 You can also import the data into existing file:
 ```bash
-uv run h5ad import dataframe visium.h5ad obs cells1to5.csv --index-column _index --inplace
+adata import dataframe visium.h5ad obs cells1to5.csv --index-column _index --inplace
 ```
 
 Check the updated `obs` structure:
 ```bash
-uv run h5ad info visium.h5ad
+adata view visium.h5ad
 ```
 ```
 An object with n_obs × n_var: 2688 × 18078

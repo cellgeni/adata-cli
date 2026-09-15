@@ -25,6 +25,7 @@ class Store:
     backend: str
     root: Any
     path: Path
+    zarr_format: Optional[int] = None
 
     def close(self) -> None:
         if self.backend == "hdf5":
@@ -95,23 +96,52 @@ def detect_backend(path: Path) -> str:
     return "hdf5"
 
 
-def open_store(path: Path, mode: str) -> Store:
+def open_store(
+    path: Path,
+    mode: str,
+    zarr_format: Optional[int] = None,
+    require_anndata: bool = True,
+) -> Store:
+    """Open a store, auto-detecting the backend from `path`.
+
+    `zarr_format` selects the Zarr spec version for a store being created;
+    without it zarr-python uses its own default, which is v3. Callers writing a
+    derived store should pass the source store's format so a v2 input is not
+    silently upgraded.
+
+    Set `require_anndata=False` for format-agnostic commands such as `ls`,
+    which are expected to open plain HDF5 and Zarr stores and should not warn
+    about a missing AnnData root.
+    """
     path = Path(path)
     backend = detect_backend(path)
     if backend == "zarr":
         _require_zarr()
-        root = zarr.open_group(str(path), mode=mode)
+        kwargs = {}
+        if zarr_format is not None:
+            kwargs["zarr_format"] = zarr_format
+        root = zarr.open_group(str(path), mode=mode, **kwargs)
         if _is_writable_mode(mode):
             ensure_anndata_root_attrs(root)
-        else:
+        elif require_anndata:
             warn_if_missing_anndata_root_attrs(root, path=path)
-        return Store(backend="zarr", root=root, path=path)
+        return Store(
+            backend="zarr",
+            root=root,
+            path=path,
+            zarr_format=zarr_format_of(root),
+        )
     root = h5py.File(path, mode)
     if _is_writable_mode(mode):
         ensure_anndata_root_attrs(root)
-    else:
+    elif require_anndata:
         warn_if_missing_anndata_root_attrs(root, path=path)
     return Store(backend="hdf5", root=root, path=path)
+
+
+def zarr_format_of(obj: Any) -> Optional[int]:
+    """The Zarr spec version (2 or 3) backing `obj`, or None for HDF5."""
+    return getattr(getattr(obj, "metadata", None), "zarr_format", None)
 
 
 def _decode_attr(value: Any) -> Any:
@@ -175,7 +205,16 @@ def copy_attrs(src_attrs: Any, dst_attrs: Any, *, target_backend: str) -> None:
         dst_attrs[k] = _normalize_attr_value(v, target_backend)
 
 
-def dataset_create_kwargs(src: Any, *, target_backend: str) -> dict:
+def dataset_create_kwargs(
+    src: Any, *, target_backend: str, zarr_format: Optional[int] = None
+) -> dict:
+    """Derive creation kwargs that carry a source's layout onto a new dataset.
+
+    Chunking, compression and sharding are preserved where the target backend
+    can express them; codecs that do not survive the crossing are dropped
+    rather than forwarded into an error.
+    """
+    kw_target = zarr_format
     kw: dict = {}
     chunks = getattr(src, "chunks", None)
     if chunks is not None:
@@ -211,8 +250,18 @@ def dataset_create_kwargs(src: Any, *, target_backend: str) -> dict:
             filters = getattr(src, "filters", None)
         except Exception:
             filters = None
-        if filters is not None:
-            kw["filters"] = filters
+        if filters:
+            # A v2 string array carries VLenUTF8 in `filters`; a v3 array
+            # rejects it (`Expected an ArrayArrayCodec`) because its string
+            # dtype encodes variable length itself.
+            if not (_target_zarr_format(kw_target) == 3 and _is_string_src(src)):
+                kw["filters"] = filters
+        try:
+            shards = getattr(src, "shards", None)
+        except Exception:
+            shards = None
+        if shards is not None:
+            kw["shards"] = shards
         try:
             fill_value = getattr(src, "fill_value", None)
         except Exception:
@@ -220,6 +269,43 @@ def dataset_create_kwargs(src: Any, *, target_backend: str) -> dict:
         if fill_value is not None:
             kw["fill_value"] = fill_value
     return kw
+
+
+def _create_string_dataset(
+    parent: Any,
+    name: str,
+    data: Any,
+    **kwargs: Any,
+) -> Any:
+    """Create a spec-compliant variable-length UTF-8 array from `data`.
+
+    Text needs a different spelling on each backend and neither accepts the
+    other's: Zarr rejects the `object` dtype an h5py vlen dataset reports, and
+    h5py rejects Zarr's `<U` dtype. Both are routed to variable-length UTF-8
+    here, which is what `string-array` requires.
+    """
+    from adata.elements.strings import as_str_array, string_dtype_for
+
+    values = as_str_array(data)
+
+    if is_zarr_group(parent):
+        kwargs.pop("compressor", None)
+        kwargs.pop("filters", None)
+        arr = parent.create_array(
+            name,
+            shape=values.shape,
+            dtype=string_dtype_for("zarr"),
+            **kwargs,
+        )
+        if values.shape == ():
+            arr[()] = values.item()
+        else:
+            arr[...] = values
+        return arr
+
+    return parent.create_dataset(
+        name, data=values, dtype=string_dtype_for("hdf5"), **kwargs
+    )
 
 
 def create_dataset(
@@ -231,6 +317,27 @@ def create_dataset(
     dtype: Any = None,
     **kwargs: Any,
 ) -> Any:
+    """Create an array under `parent`, backend-agnostically.
+
+    String data is always written as variable-length UTF-8 regardless of how
+    it arrived, so callers can hand over bytes, `<U`, `object` or StringDType
+    without knowing what the destination backend needs.
+    """
+    from adata.elements.strings import is_string_dtype
+
+    if data is not None and dtype is None:
+        probe = data if hasattr(data, "dtype") else np.asarray(data)
+        if is_string_dtype(getattr(probe, "dtype", None)):
+            return _create_string_dataset(parent, name, probe, **kwargs)
+    elif data is None and dtype is not None and is_string_dtype(dtype):
+        from adata.elements.strings import string_dtype_for
+
+        backend = "zarr" if is_zarr_group(parent) else "hdf5"
+        dtype = string_dtype_for(backend)
+        if is_zarr_group(parent):
+            kwargs.pop("compressor", None)
+            kwargs.pop("filters", None)
+
     if is_zarr_group(parent):
         zarr_format = getattr(getattr(parent, "metadata", None), "zarr_format", None)
         if zarr_format == 3:
@@ -251,6 +358,16 @@ def create_dataset(
     return parent.create_dataset(name, shape=shape, dtype=dtype, **kwargs)
 
 
+def _target_zarr_format(zarr_format: Optional[int]) -> Optional[int]:
+    return zarr_format if zarr_format is not None else 3
+
+
+def _is_string_src(src: Any) -> bool:
+    from adata.elements.strings import is_string_dtype
+
+    return is_string_dtype(getattr(src, "dtype", None))
+
+
 def _chunk_step(shape: Sequence[int], chunks: Optional[Sequence[int]]) -> int:
     if chunks is not None and len(chunks) > 0 and chunks[0]:
         return int(chunks[0])
@@ -260,14 +377,25 @@ def _chunk_step(shape: Sequence[int], chunks: Optional[Sequence[int]]) -> int:
 
 
 def copy_dataset(src: Any, dst_group: Any, name: str) -> Any:
+    """Copy a dataset into `dst_group`, streaming it in chunks.
+
+    The destination dtype is resolved for the target backend rather than
+    reused: an h5py variable-length string dataset reports `object`, which Zarr
+    refuses to create, so copying one verbatim fails on every real store.
+    """
+    from adata.elements.strings import target_dtype
+
     shape = tuple(src.shape) if getattr(src, "shape", None) is not None else ()
     target_backend = "zarr" if is_zarr_group(dst_group) else "hdf5"
+    zformat = zarr_format_of(dst_group)
     ds = create_dataset(
         dst_group,
         name,
         shape=shape,
-        dtype=src.dtype,
-        **dataset_create_kwargs(src, target_backend=target_backend),
+        dtype=target_dtype(src.dtype, target_backend, zformat),
+        **dataset_create_kwargs(
+            src, target_backend=target_backend, zarr_format=zformat
+        ),
     )
     copy_attrs(src.attrs, ds.attrs, target_backend=target_backend)
 

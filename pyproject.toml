@@ -1,7 +1,7 @@
 [project]
-name = "h5ad"
-version = "0.3.1"
-description = "Streaming CLI utilities for exploring large AnnData .h5ad and .zarr files"
+name = "adata-cli"
+version = "0.4.0.dev0"
+description = "Streaming CLI for exploring and editing large AnnData .h5ad and .zarr stores"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
@@ -47,17 +47,25 @@ Issues = "https://github.com/cellgeni/h5ad-cli/issues"
 dev = [
     "pytest>=8.3.4",
     "pytest-cov>=6.0.0",
+    # Used only by tests/test_anndata_roundtrip.py, to check that what this
+    # tool reads and writes matches what anndata itself produces.
+    "anndata>=0.13",
 ]
 
 [build-system]
 requires = ["uv_build>=0.8.0,<0.9.0"]
 build-backend = "uv_build"
 
+[tool.uv.build-backend]
+module-name = "adata"
+
 [project.scripts]
-h5ad = "h5ad.cli:main"
+adata = "adata.cli:main"
+# Deprecated alias, removed in 1.0.0
+h5ad = "adata.cli:main_deprecated"
 
 [tool.coverage.run]
-source = ["src/h5ad"]
+source = ["src/adata"]
 omit = [
     "*/tests/*",
     "*/__pycache__/*",

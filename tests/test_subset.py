@@ -4,7 +4,7 @@ import pytest
 import h5py
 import numpy as np
 from pathlib import Path
-from h5ad.commands.subset import (
+from adata.commands.subset import (
     _read_name_file,
     indices_from_name_set,
     subset_axis_group,

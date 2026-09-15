@@ -8,10 +8,12 @@ from contextlib import nullcontext
 import numpy as np
 from rich.console import Console
 
-from h5ad.formats.common import _get_encoding_type, _resolve
-from h5ad.formats.validate import validate_dimensions
-from h5ad.storage import create_dataset, is_dataset, is_group, is_zarr_group
-from h5ad.util.path import norm_path
+from adata.elements import spec
+from adata.elements.write import write_sparse
+from adata.formats.common import _get_encoding_type, _resolve
+from adata.formats.validate import validate_dimensions
+from adata.storage import create_dataset, is_dataset, is_group, is_zarr_group
+from adata.util.path import norm_path
 
 
 def _read_mtx(
@@ -242,20 +244,9 @@ def import_mtx(
         parent = parent[part] if part in parent else parent.create_group(part)
     name = parts[-1]
 
-    if name in parent:
-        del parent[name]
-
-    group = parent.create_group(name)
-    group.attrs["encoding-type"] = "csr_matrix"
-    group.attrs["encoding-version"] = "0.1.0"
-    if is_zarr_group(group):
-        group.attrs["shape"] = list(shape)
-    else:
-        group.attrs["shape"] = np.array(shape, dtype=np.int64)
-
-    create_dataset(group, "data", data=data)
-    create_dataset(group, "indices", data=indices)
-    create_dataset(group, "indptr", data=indptr)
+    write_sparse(
+        parent, name, data, indices, indptr, shape, spec.CSR_MATRIX, replace=True
+    )
 
     console.print(
         f"[green]Imported[/] {shape[0]}×{shape[1]} sparse matrix ({nnz} non-zero) into '{obj}'"

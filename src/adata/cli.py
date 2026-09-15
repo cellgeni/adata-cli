@@ -1,4 +1,4 @@
-"""CLI for h5ad files with export and import subcommands."""
+"""CLI for AnnData stores (.h5ad / .zarr) with export and import subcommands."""
 
 from pathlib import Path
 from typing import Optional, Sequence, List
@@ -6,7 +6,8 @@ from typing import Optional, Sequence, List
 from rich.console import Console
 import typer
 
-from h5ad.commands import (
+from adata.commands import (
+    list_store,
     show_info,
     subset_h5ad,
     export_mtx,
@@ -15,18 +16,21 @@ from h5ad.commands import (
     export_table,
 )
 
-from h5ad.commands import export_image as export_image_cmd
+from adata.commands import export_image as export_image_cmd
 
 app = typer.Typer(
-    help="Streaming CLI for huge .h5ad and .zarr files (info, subset, export, import)."
+    help="Streaming CLI for huge AnnData .h5ad and .zarr stores "
+    "(view, ls, subset, export, import)."
 )
 # Use stderr for status/progress to keep stdout clean for data output
 # force_terminal=True ensures Rich output is visible even in non-TTY environments
 console = Console(stderr=True, force_terminal=True)
+# Results go to stdout so they can be piped; status and errors stay on stderr.
+out_console = Console()
 
 # Create sub-apps for export and import
-export_app = typer.Typer(help="Export objects from h5ad files.")
-import_app = typer.Typer(help="Import objects into h5ad files.")
+export_app = typer.Typer(help="Export objects from an AnnData store.")
+import_app = typer.Typer(help="Import objects into an AnnData store.")
 app.add_typer(export_app, name="export")
 app.add_typer(import_app, name="import")
 
@@ -34,8 +38,8 @@ app.add_typer(import_app, name="import")
 # ============================================================================
 # INFO command
 # ============================================================================
-@app.command()
-def info(
+@app.command("view")
+def view(
     file: Path = typer.Argument(
         ...,
         help="Path to the .h5ad/.zarr store",
@@ -62,18 +66,104 @@ def info(
     ),
 ) -> None:
     """
-    Show high-level information about the .h5ad file.
+    Show high-level information about an AnnData store.
 
     Use --tree to see a tree of all entries.
-    Use --entry to inspect a specific entry in detail.
+    Pass an entry path to inspect a specific entry in detail.
 
     Examples:
-        h5ad info data.h5ad
-        h5ad info --tree data.h5ad
-        h5ad info obsm/X_pca data.h5ad
+        adata view data.h5ad
+        adata view --tree data.h5ad
+        adata view data.h5ad obsm/X_pca
     """
     try:
-        show_info(file, console, show_types=tree, depth=depth, entry_path=entry)
+        show_info(
+            file,
+            console,
+            show_types=tree,
+            depth=depth,
+            entry_path=entry,
+            out_console=out_console,
+        )
+    except Exception as e:
+        console.print(f"[bold red]Error:[/] {e}")
+        raise typer.Exit(code=1)
+
+
+@app.command("info", hidden=True)
+def info(
+    file: Path = typer.Argument(
+        ...,
+        help="Path to the .h5ad/.zarr store",
+        exists=True,
+        readable=True,
+        dir_okay=True,
+        file_okay=True,
+    ),
+    entry: Optional[str] = typer.Argument(
+        None,
+        help="Entry path to inspect (e.g., 'obsm/X_pca', 'X', 'uns')",
+    ),
+    tree: bool = typer.Option(False, "--tree", "-t", help="Show a tree of all entries"),
+    depth: int = typer.Option(
+        None, "--depth", "-d", help="Maximum recursion depth for tree display"
+    ),
+) -> None:
+    """Deprecated alias for 'view'. Removed in 1.0.0."""
+    console.print(
+        "[yellow]Warning:[/] 'info' is deprecated and will be removed in 1.0.0; "
+        "use 'view' instead.",
+    )
+    view(file=file, entry=entry, tree=tree, depth=depth)
+
+
+# ============================================================================
+# LS command
+# ============================================================================
+@app.command("ls")
+def ls(
+    file: Path = typer.Argument(
+        ...,
+        help="Path to any .h5ad/.zarr/.h5 store",
+        exists=True,
+        readable=True,
+        dir_okay=True,
+        file_okay=True,
+    ),
+    entry: Optional[str] = typer.Argument(
+        None, help="Only list below this path (e.g. 'obsm', 'uns/spatial')"
+    ),
+    depth: Optional[int] = typer.Option(
+        None, "--depth", "-d", help="Maximum depth to descend"
+    ),
+    long: bool = typer.Option(
+        False, "--long", "-l", help="Show type, shape, dtype and encoding"
+    ),
+    plain: bool = typer.Option(
+        False, "-1", "--plain", help="One bare path per line, for piping"
+    ),
+) -> None:
+    """
+    List the contents of any HDF5 or Zarr store.
+
+    Makes no AnnData assumptions, so it also works on .loom and plain .h5
+    files. Use -1 to pipe paths into other tools.
+
+    Examples:
+        adata ls data.h5ad
+        adata ls data.h5ad --long
+        adata ls data.h5ad obsm --depth 1
+        adata ls data.h5ad -1 | grep spatial
+    """
+    try:
+        list_store(
+            file,
+            out_console,
+            entry_path=entry,
+            depth=depth,
+            long=long,
+            plain=plain,
+        )
     except Exception as e:
         console.print(f"[bold red]Error:[/] {e}")
         raise typer.Exit(code=1)
@@ -128,7 +218,7 @@ def subset(
         help="Row chunk size for dense matrices",
     ),
 ) -> None:
-    """Subset an h5ad by obs and/or var names."""
+    """Subset an AnnData store by obs and/or var names."""
     if obs is None and var is None:
         console.print(
             "[bold red]Error:[/] At least one of --obs or --var must be provided.",
@@ -170,7 +260,9 @@ def export_dataframe(
         dir_okay=True,
         file_okay=True,
     ),
-    entry: str = typer.Argument(..., help="Entry path to export ('obs' or 'var')"),
+    entry: str = typer.Argument(
+        ..., help="Path of the dataframe to export (e.g. 'obs', 'var', 'raw/var')"
+    ),
     output: Path = typer.Option(
         None, "--output", "-o", writable=True, help="Output CSV file path"
     ),
@@ -193,19 +285,16 @@ def export_dataframe(
     ),
 ) -> None:
     """
-    Export a dataframe (obs or var) to CSV.
+    Export any dataframe-encoded group to CSV.
+
+    Not limited to obs/var -- any path holding a dataframe works, including
+    ones under raw/, obsm/ or uns/.
 
     Examples:
-        h5ad export dataframe data.h5ad obs --output obs.csv
-        h5ad export dataframe data.h5ad var --output var.csv --columns gene_id,mean
-        h5ad export dataframe data.h5ad obs --head 100
+        adata export dataframe data.h5ad obs --output obs.csv
+        adata export dataframe data.h5ad var --columns gene_id,mean
+        adata export dataframe data.h5ad raw/var --head 100
     """
-
-    if entry not in ("obs", "var"):
-        console.print(
-            f"[bold red]Error:[/] Dataframe export is only supported for 'obs' or 'var' at this point, not '{entry}'.",
-        )
-        raise typer.Exit(code=1)
 
     col_list: Optional[List[str]] = None
     if columns:
@@ -239,8 +328,12 @@ def export_array(
     entry: str = typer.Argument(
         ..., help="Entry path to export (e.g., 'obsm/X_pca', 'varm/PCs', 'X')"
     ),
-    output: Path = typer.Option(
-        ..., "--output", "-o", help="Output .npy file path", writable=True
+    output: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output .npy file path (defaults to stdout)",
+        writable=True,
     ),
     chunk_elements: int = typer.Option(
         100_000,
@@ -252,10 +345,13 @@ def export_array(
     """
     Export a dense array or matrix to NumPy .npy format.
 
+    Writes to stdout when no --output is given. Writing to a file streams in
+    chunks; stdout is not seekable, so that path holds the array in memory.
+
     Examples:
-        h5ad export array data.h5ad obsm/X_pca pca.npy
-        h5ad export array data.h5ad X matrix.npy
-        h5ad export array data.h5ad varm/PCs loadings.npy
+        adata export array data.h5ad obsm/X_pca -o pca.npy
+        adata export array data.h5ad X -o matrix.npy
+        adata export array data.h5ad obsm/X_umap > umap.npy
     """
 
     try:
@@ -416,7 +512,7 @@ def export_image(
 # ============================================================================
 def _get_target_file(file: Path, output: Optional[Path], inplace: bool) -> Path:
     """Determine target path and copy/convert if needed."""
-    from h5ad.commands.import_data import _prepare_target_path
+    from adata.commands.import_data import _prepare_target_path
 
     return _prepare_target_path(file, output, inplace, console)
 
@@ -464,7 +560,7 @@ def import_dataframe(
         h5ad import dataframe data.h5ad obs cells.csv -o output.h5ad -i cell_id
         h5ad import dataframe data.h5ad var genes.csv --inplace -i gene_id
     """
-    from h5ad.commands.import_data import _import_csv
+    from adata.commands.import_data import _import_csv
 
     if entry not in ("obs", "var"):
         console.print(
@@ -526,7 +622,7 @@ def import_array(
         h5ad import array data.h5ad obsm/X_pca pca.npy -o output.h5ad
         h5ad import array data.h5ad X matrix.npy --inplace
     """
-    from h5ad.commands.import_data import _import_npy
+    from adata.commands.import_data import _import_npy
 
     if not inplace and output is None:
         console.print(
@@ -582,7 +678,7 @@ def import_sparse(
         h5ad import sparse data.h5ad X matrix.mtx -o output.h5ad
         h5ad import sparse data.h5ad layers/counts counts.mtx --inplace
     """
-    from h5ad.commands.import_data import _import_mtx
+    from adata.commands.import_data import _import_mtx
 
     if not inplace and output is None:
         console.print(
@@ -636,7 +732,7 @@ def import_dict(
         h5ad import dict data.h5ad uns/metadata config.json -o output.h5ad
         h5ad import dict data.h5ad uns settings.json --inplace
     """
-    from h5ad.commands.import_data import _import_json
+    from adata.commands.import_data import _import_json
 
     if not inplace and output is None:
         console.print(
@@ -655,3 +751,12 @@ def import_dict(
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
     app(standalone_mode=True)
+
+
+def main_deprecated(argv: Optional[Sequence[str]] = None) -> None:
+    """Entry point for the deprecated `h5ad` command name."""
+    console.print(
+        "[yellow]Warning:[/] the 'h5ad' command is deprecated and will be removed "
+        "in 1.0.0; use 'adata' instead.",
+    )
+    main(argv)
