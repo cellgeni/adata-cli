@@ -7,7 +7,7 @@ import h5py
 import numpy as np
 from typer.testing import CliRunner
 
-from h5ad.cli import app
+from adata.cli import app
 
 
 runner = CliRunner()
@@ -226,7 +226,7 @@ class TestExportValidation:
             ["export", "dataframe", str(sample_h5ad_file), "X", "--output", str(out)],
         )
         assert result.exit_code == 1
-        assert "obs" in result.output or "var" in result.output
+        assert "not a group" in result.output
 
     def test_sparse_matrix_array_export(self, sample_sparse_csr_h5ad, temp_dir):
         """Test that sparse matrix requires sparse export."""

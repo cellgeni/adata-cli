@@ -8,7 +8,7 @@ import h5py
 import numpy as np
 from typer.testing import CliRunner
 
-from h5ad.cli import app
+from adata.cli import app
 
 
 runner = CliRunner()
@@ -166,8 +166,8 @@ class TestImportDataframe:
         assert result.exit_code == 1
         assert "not found" in result.output.lower()
 
-    def test_import_dataframe_not_obs_var(self, sample_h5ad_file, temp_dir):
-        """Test that dataframe import is only allowed for obs/var."""
+    def test_import_dataframe_at_arbitrary_path(self, sample_h5ad_file, temp_dir):
+        """Dataframes can be imported anywhere, not just obs/var (issue #4)."""
         csv_file = temp_dir / "data.csv"
         csv_file.write_text("a,b\n1,2\n")
 
@@ -182,8 +182,11 @@ class TestImportDataframe:
                 "--inplace",
             ],
         )
-        assert result.exit_code == 1
-        assert "obs" in result.output or "var" in result.output
+        assert result.exit_code == 0, result.output
+
+        with h5py.File(sample_h5ad_file, "r") as f:
+            assert f["uns/data"].attrs["encoding-type"] == "dataframe"
+            assert "b" in f["uns/data"]
 
     def test_import_dataframe_requires_output_or_inplace(
         self, sample_h5ad_file, temp_dir

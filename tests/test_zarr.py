@@ -10,8 +10,8 @@ import pytest
 from typer.testing import CliRunner
 from rich.console import Console
 
-from h5ad.cli import app
-from h5ad.core.subset import subset_h5ad
+from adata.cli import app
+from adata.core.subset import subset_h5ad
 
 
 zarr = pytest.importorskip("zarr")
@@ -105,7 +105,7 @@ def test_info_zarr_auto_detect(temp_dir, zarr_format):
     except UnsupportedZarrFormat as exc:
         _skip_if_unsupported(exc, zarr_format)
 
-    result = runner.invoke(app, ["info", str(store_path)])
+    result = runner.invoke(app, ["view", str(store_path)])
     output = result.stdout + (result.stderr or "")
     assert result.exit_code == 0, output
     assert "5 × 4" in output

@@ -3,8 +3,8 @@
 import pytest
 import h5py
 import numpy as np
-from h5ad.info import axis_len, get_axis_group, get_entry_type, format_type_info
-from h5ad.read import decode_str_array, read_categorical_column, col_chunk_as_strings
+from adata.info import axis_len, get_axis_group, get_entry_type, format_type_info
+from adata.read import decode_str_array, read_categorical_column, col_chunk_as_strings
 
 
 class TestGetEntryType:
@@ -122,7 +122,7 @@ class TestAxisLen:
         with h5py.File(file_path, "w") as f:
             f.create_group("obs")
         with h5py.File(file_path, "r") as f:
-            with pytest.raises(KeyError, match="Index dataset 'obs_names' not found"):
+            with pytest.raises(KeyError, match="Could not find an index"):
                 axis_len(f, "obs")
 
 

@@ -4,7 +4,7 @@ import pytest
 import h5py
 import numpy as np
 from pathlib import Path
-from h5ad.commands.subset import (
+from adata.commands.subset import (
     _read_name_file,
     indices_from_name_set,
     subset_axis_group,
@@ -284,6 +284,30 @@ class TestSubsetSparseMatrixGroup:
 class TestSubsetH5ad:
     """Integration tests for subset_h5ad function."""
 
+    def test_subset_h5ad_creates_optional_empty_groups(
+        self, sample_h5ad_file, temp_dir
+    ):
+        """Subset output should include optional AnnData groups even if absent in source."""
+        obs_file = temp_dir / "obs_names.txt"
+        obs_file.write_text("cell_1\ncell_3\n")
+
+        output = temp_dir / "subset.h5ad"
+        console = Console(stderr=True)
+
+        subset_h5ad(
+            file=sample_h5ad_file,
+            output=output,
+            obs_file=obs_file,
+            var_file=None,
+            chunk_rows=1024,
+            console=console,
+        )
+
+        with h5py.File(output, "r") as f:
+            for key in ("layers", "obsm", "obsp", "varm", "varp"):
+                assert key in f
+                assert isinstance(f[key], h5py.Group)
+
     def test_subset_h5ad_obs_only(self, sample_h5ad_file, temp_dir):
         """Test subsetting h5ad file by obs only."""
         obs_file = temp_dir / "obs_names.txt"
@@ -438,7 +462,9 @@ class TestSubsetH5ad:
             conn.attrs["shape"] = np.array([4, 4], dtype=np.int64)
             conn.create_dataset("data", data=np.array([1.0, 2.0, 3.0, 4.0]))
             conn.create_dataset("indices", data=np.array([0, 1, 2, 3], dtype=np.int64))
-            conn.create_dataset("indptr", data=np.array([0, 1, 2, 3, 4], dtype=np.int64))
+            conn.create_dataset(
+                "indptr", data=np.array([0, 1, 2, 3, 4], dtype=np.int64)
+            )
 
         obs_file = temp_dir / "obs_names.txt"
         obs_file.write_text("cell_1\ncell_3\n")
@@ -562,7 +588,8 @@ class TestSubsetH5ad:
             obs = f.create_group("obs")
             obs.attrs["_index"] = "obs_names"
             obs.create_dataset(
-                "obs_names", data=np.array(["cell_1", "cell_2", "cell_3", "cell_4"], dtype="S")
+                "obs_names",
+                data=np.array(["cell_1", "cell_2", "cell_3", "cell_4"], dtype="S"),
             )
 
             var = f.create_group("var")

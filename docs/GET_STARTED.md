@@ -6,28 +6,31 @@ This short walkthrough shows the basic workflow: inspect a store, export metadat
 
 Using uv (recommended):
 ```bash
-git clone https://github.com/cellgeni/h5ad-cli.git
-cd h5ad-cli
+git clone https://github.com/cellgeni/adata-cli.git
+cd adata-cli
 uv sync
 ```
 
 With pip:
 ```bash
-git clone https://github.com/cellgeni/h5ad-cli.git
-cd h5ad-cli
+git clone https://github.com/cellgeni/adata-cli.git
+cd adata-cli
 pip install .
 ```
 
-Additionally, it might be useful to install `csvkit` for inspecting exported CSV files:
-```bash
-# with uv
-uv pip install csvkit
+Most of this tutorial needs nothing else. Step 4 shows an optional
+[duckdb](https://duckdb.org) workflow for filters too involved to express with
+`--obs-query`; install it only if you want to follow that part:
 
-# with pip
-pip install csvkit
+```bash
+# macOS
+brew install duckdb
+
+# or download a single static binary for any platform
+# https://duckdb.org/docs/installation/
 ```
 
-## 2 Inspect a files with `info` command
+## 2 Inspect a store with `view`
 
 Let's load an example `.h5ad` file:
 ```bash
@@ -36,7 +39,7 @@ wget -O visium.h5ad https://exampledata.scverse.org/squidpy/figshare/visium_hne_
 
 Now run `info` to see the file structure:
 ```bash
-uv run h5ad info visium.h5ad
+adata view visium.h5ad
 ```
 ```
 An object with n_obs × n_var: 2688 × 18078
@@ -52,7 +55,7 @@ pct_counts_in_top_50_genes, pct_counts_mt, total_counts, total_counts_mt
 
 To inspect a specific entry:
 ```bash
-uv run h5ad info visium.h5ad obsm/X_pca
+adata view visium.h5ad obsm/X_pca
 ```
 ```
 Path: obsm/X_pca
@@ -66,7 +69,7 @@ Details: Dense matrix 2688×50 (float32)
 View the first few lines of the `obs` dataframe:
 
 ```bash
-uv run h5ad export dataframe visium.h5ad obs --head 10
+adata export dataframe visium.h5ad obs --head 10
 ```
 ```csv
 _index,array_col,array_row,cluster,in_tissue,leiden,log1p_n_genes_by_counts,log1p_total_counts,log1p_total_counts_mt,n_counts,n_genes_by_counts,pct_counts_in_top_100_genes,pct_counts_in_top_200_genes,pct_counts_in_top_500_genes,pct_counts_in_top_50_genes,pct_counts_mt,total_counts,total_counts_mt
@@ -84,7 +87,7 @@ AAACGGTTGCGAACTG-1,59,67,Lateral_ventricle,1,Striatum,8.718663567048953,10.25400
 
 Export cell metadata to a CSV file:
 ```bash
-uv run h5ad export dataframe visium.h5ad obs --output cells.csv
+adata export dataframe visium.h5ad obs --output cells.csv
 wc -l cells.csv # 2689 cells.csv
 ```
 
@@ -112,21 +115,55 @@ awk -F ',' 'NR>1{print $4}' cells.csv | sort | uniq -c
 192 Thalamus_2
 ```
 
-To get all obs names in "Cortex_2", you can use `csvsql` from `csvkit`:
+### Filtering directly
+
+For a filter this simple, `--obs-query` does the whole job without an
+intermediate file:
+
 ```bash
-csvsql -d ',' -I --query "SELECT _index FROM cells WHERE cluster='Cortex_2'" cells.csv > barcodes.txt
-sed -i '1d' barcodes.txt # remove header
+adata subset visium.h5ad --output cortex2.h5ad --obs-query "cluster == Cortex_2"
+```
+
+The expression language covers `==`, `!=`, `<`, `<=`, `>`, `>=`, `in`,
+`not in`, `and`, `or`, `not` and parentheses, so most real filters fit:
+
+```bash
+adata subset visium.h5ad -o big_cortex.h5ad \
+    -q "cluster in Cortex_1,Cortex_2 and total_counts > 20000"
+```
+
+Only the columns the query mentions are read, so this does not touch the rest
+of the frame.
+
+### Filtering with duckdb
+
+When a filter needs more than that — a join against another table, an
+aggregate, a window function — export `obs` and let
+[duckdb](https://duckdb.org) do the query, then feed the resulting names back
+in:
+
+```bash
+duckdb -noheader -list -c \
+  "SELECT _index FROM 'cells.csv' WHERE cluster='Cortex_2'" > barcodes.txt
 wc -l barcodes.txt  # 257 barcodes.txt
 ```
 
-Now you can use this list to create a subset `.h5ad` file:
+duckdb reads the CSV in place — no import step — and `-noheader -list` gives
+one bare name per line, which is exactly the format `--obs` expects:
+
 ```bash
-uv run h5ad subset visium.h5ad --output cortex2.h5ad --obs barcodes.txt
+adata subset visium.h5ad --output cortex2.h5ad --obs barcodes.txt
+```
+
+It is also a quicker way to do the cluster tally above:
+
+```bash
+duckdb -c "SELECT cluster, count(*) FROM 'cells.csv' GROUP BY 1 ORDER BY 2 DESC"
 ```
 
 Check the result:
 ```bash
-uv run h5ad info cortex2.h5ad
+adata view cortex2.h5ad
 ```
 ```
 An object with n_obs × n_var: 257 × 18078
@@ -148,12 +185,12 @@ cut -d ',' -f 1-5 cells.csv > cells1to5.csv
 
 Now import it back into `cortex2.h5ad` with the `_index` column as index:
 ```bash
-uv run h5ad import dataframe visium.h5ad obs cells1to5.csv --index-column _index --output visium_obs1to5.h5ad
+adata import dataframe visium.h5ad obs cells1to5.csv --index-column _index --output visium_obs1to5.h5ad
 ```
 
 Check the updated `obs` structure:
 ```bash
-uv run h5ad info visium_obs1to5.h5ad
+adata view visium_obs1to5.h5ad
 ```
 ```
 An object with n_obs × n_var: 2688 × 18078
@@ -169,12 +206,12 @@ pct_dropout_by_counts, total_counts, variances, variances_norm
 
 You can also import the data into existing file:
 ```bash
-uv run h5ad import dataframe visium.h5ad obs cells1to5.csv --index-column _index --inplace
+adata import dataframe visium.h5ad obs cells1to5.csv --index-column _index --inplace
 ```
 
 Check the updated `obs` structure:
 ```bash
-uv run h5ad info visium.h5ad
+adata view visium.h5ad
 ```
 ```
 An object with n_obs × n_var: 2688 × 18078

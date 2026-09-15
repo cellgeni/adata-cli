@@ -18,7 +18,8 @@ It is intended to be GitHub-renderable Markdown (no Sphinx/MyST directives).
   - [DataFrame v0.2.0](#dataframe-v020)
   - [DataFrame v0.1.0 (legacy: anndata 0.7.x)](#dataframe-v010-legacy-anndata-07x)
   - [Legacy categorical columns (Series-level)](#legacy-categorical-columns-series-level)
-- [Mappings / dict](#mappings--dict)
+- [Mappings](#mappings)
+  - [Legacy mapping encoding (`dict` v0.1.0)](#legacy-mapping-encoding-dict-v010)
 - [Scalars](#scalars)
 - [Categorical arrays](#categorical-arrays)
 - [String arrays](#string-arrays)
@@ -154,25 +155,36 @@ In v0.1.0 DataFrames, a categorical column array (e.g. `obs/cell_type`) can be i
 
 (This differs from HDF5, which can store an object reference.)
 
-## Mappings / dict
+## Mappings
 
-### `encoding-type: dict`, `encoding-version: 0.1.0`
+Mappings are stored as Zarr **groups** on disk.
 
-- A mapping **MUST** be stored as a Zarr **group**.
-- Group attributes:
-  - `encoding-type: "dict"`
-  - `encoding-version: "0.1.0"`
-- Each entry in the group is another element (recursively).
+- This includes standard AnnData mappings such as `layers`, `obsm`, `varm`, `obsp`, `varp`, and `uns`.
+- Mappings are distinct from DataFrames and sparse arrays and do not require special mapping-specific attributes.
+- Mapping semantics are recursive: entries in `uns` can themselves be groups containing additional encoded elements.
 
-> **Legacy note**
+> **Legacy compatibility note**
 >
-> In anndata 0.7.x, groups used as mappings often had **no special attributes**.
+> In earlier conventions (commonly seen in older docs and some files), mappings could carry
+> `encoding-type: "dict"` and `encoding-version: "0.1.0"`.
+> Readers should still accept this legacy metadata when encountered.
+
+### Legacy mapping encoding (`dict` v0.1.0)
+
+For backward compatibility, older files may encode mappings with explicit mapping metadata:
+
+- `encoding-type: "dict"`
+- `encoding-version: "0.1.0"`
+
+This historical convention existed in earlier AnnData docs and files and should still be accepted by readers.
 
 ## Scalars
 
 ### `encoding-version: 0.2.0`
 
 Scalars are stored as **0-dimensional Zarr arrays**.
+
+These should typically only occur inside `uns` and are commonly used for saved parameters.
 
 - Numeric scalars:
   - `encoding-type: "numeric-scalar"`
@@ -269,6 +281,69 @@ Group members: arrays for the buffers (often named like `nodeX-*`).
 > **Experimental**
 >
 > This encoding is considered experimental in the anndata 0.9.x series and later.
+
+## What `adata-cli` does with these elements
+
+This tool reads every layout listed above, including the legacy 0.7.x forms,
+and always writes the current spec version shown in each section.
+
+| Element | Read | Written |
+|---|---|---|
+| `anndata` | yes | yes (0.1.0, stamped on every store it creates) |
+| `raw` | yes | yes (0.1.0; subset against its own var axis) |
+| `dict` | yes | yes (0.1.0, on every mapping group) |
+| `dataframe` | 0.2.0 and legacy 0.1.0 | 0.2.0, with `column-order` |
+| `array` | yes | yes (0.2.0) |
+| `csr_matrix` / `csc_matrix` | yes | yes (0.1.0); both are streamed, never loaded whole |
+| `categorical` | 0.2.0, plus both legacy layouts | 0.2.0, preserving `ordered` |
+| `string-array` | yes | yes (0.2.0), variable-length UTF-8 |
+| `nullable-integer` / `-boolean` / `-string-array` | yes | yes (0.1.0) |
+| `numeric-scalar` | yes | yes (0.2.0) |
+| `string` | yes | yes (0.2.0), as a 0-d dataset |
+| `null` | yes | yes (0.1.0) |
+| `awkward-array` | reported by `view` and `ls` | not written |
+
+### `null` (`encoding-version: 0.1.0`)
+
+Not in the upstream prose spec, but written by anndata 0.12+ for a `None`
+value in `uns`. In HDF5 it is a dataset with a null dataspace (`h5py.Empty`);
+in Zarr it is a 0-d boolean array. Both carry `encoding-type: null`.
+
+### Elements with no `encoding-type`
+
+Files written by anndata 0.7.x carry no encoding attributes at all. These are
+classified structurally: a group with `codes` and `categories` is a
+categorical, one with `values` and `mask` is a nullable array, one with
+`_index` in its attributes is a dataframe, and anything else is a mapping.
+Structural inference is only ever a fallback -- a declared `encoding-type`
+always wins.
+
+### Zarr v2 versus v3
+
+`zarr-python` 3 defaults to writing **v3**, and anndata 0.13 writes v3 by
+default too. Both versions are readable here, and a derived store keeps the
+source store's version rather than being silently upgraded; pass
+`--zarr-format 2|3` to choose explicitly.
+
+The differences that matter when copying between stores:
+
+| | v2 | v3 |
+|---|---|---|
+| Group metadata | `.zgroup` / `.zattrs` | `zarr.json` |
+| Array metadata | `.zarray` | `zarr.json` |
+| Variable-length text | `VLenUTF8` in `filters` | `VariableLengthUTF8` data type |
+| Compression | `compressor` (single) | `compressors` (a sequence) |
+| Sharding | not available | `shards` |
+
+A v2 string array's `VLenUTF8` filter cannot be forwarded to a v3 array -- it
+raises `Expected an ArrayArrayCodec`, because the v3 string data type encodes
+variable length itself. This tool drops the filter and resolves the dtype for
+the target rather than reusing the source's.
+
+Note also that `zarr-python` flags both `NullTerminatedBytes` (what `dtype="S"`
+produces) and `FixedLengthUTF32` (what `<U` produces) as having no v3
+specification, and warns that other Zarr libraries may not be able to read
+them. This is why text is always written as variable-length UTF-8.
 
 ## Sources
 

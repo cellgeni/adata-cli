@@ -1,0 +1,11 @@
+# GitHub Pages configuration. Plain Jekyll with a built-in theme -- no
+# generator to install, and the docs stay readable on github.com as markdown.
+title: adata-cli
+description: Streaming CLI for huge AnnData .h5ad and .zarr stores
+theme: jekyll-theme-cayman
+show_downloads: false
+
+# Site-relative links in the markdown files keep working on github.com too.
+exclude:
+  - Gemfile
+  - Gemfile.lock

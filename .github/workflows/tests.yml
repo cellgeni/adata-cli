@@ -3,8 +3,11 @@ name: Tests
 on:
   push:
     branches: [main, dev]
+  # Every pull request, not only those targeting main/dev -- a stacked PR
+  # based on another feature branch would otherwise run no checks at all.
   pull_request:
-    branches: [main, dev]
+  # Reused by publish.yml, so a release cannot skip the suite.
+  workflow_call:
 
 concurrency:
   group: tests-${{ github.workflow }}-${{ github.ref }}
@@ -17,27 +20,15 @@ jobs:
 
     permissions:
       contents: read
-      checks: write   # needed for EnricoMi/publish-unit-test-result-action on PRs
+      checks: write          # publish-unit-test-result-action writes a check run
+      pull-requests: write   # ...and comments the summary on the PR
 
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12"]  # add "3.13" if you want
-        module:
-          - name: cli
-            tests: tests/test_cli.py
-          - name: export
-            tests: tests/test_export.py
-          - name: import
-            tests: tests/test_import.py
-          - name: info-read
-            tests: tests/test_info_read.py
-          - name: subset
-            tests: tests/test_subset.py
-          - name: zarr
-            tests: tests/test_zarr.py
+        python-version: ["3.12", "3.13"]
 
-    name: tests (${{ matrix.module.name }})
+    name: tests (py${{ matrix.python-version }})
 
     steps:
       - uses: actions/checkout@v4
@@ -57,29 +48,30 @@ jobs:
 
       - name: Run tests with coverage
         run: |
-          uv run pytest -v -W default ${{ matrix.module.tests }} \
-            --cov=h5ad \
+          uv run pytest -v -W default tests/ -m "not integration" \
+            --cov=adata \
             --cov-report=term-missing \
             --cov-report=xml \
             --cov-report=html \
-            --junitxml=pytest-results-${{ matrix.module.name }}.xml
+            --cov-fail-under=90 \
+            --junitxml=pytest-results-py${{ matrix.python-version }}.xml
 
       - name: Publish test results summary
         uses: EnricoMi/publish-unit-test-result-action@v2
         if: always()
         with:
-          files: pytest-results-${{ matrix.module.name }}.xml
-          check_name: Test Results (${{ matrix.module.name }})
+          files: pytest-results-py${{ matrix.python-version }}.xml
+          check_name: Test Results (py${{ matrix.python-version }})
 
       - name: Upload coverage artifacts
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: coverage-${{ matrix.module.name }}
+          name: coverage-py${{ matrix.python-version }}
           path: |
             coverage.xml
             htmlcov/
-            pytest-results-${{ matrix.module.name }}.xml
+            pytest-results-py${{ matrix.python-version }}.xml
           retention-days: 30
 
       - name: Upload coverage to Codecov
@@ -88,3 +80,50 @@ jobs:
         with:
           files: coverage.xml
           fail_ci_if_error: false
+
+  # Builds a store with each pinned anndata release and checks the CLI against
+  # it. Split out because it assembles six environments with uv, which needs
+  # the network and is far slower than the unit suite.
+  compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    name: anndata 0.8-0.13 compatibility
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (frozen)
+        run: uv sync --extra dev --frozen
+
+      - name: Run compatibility tests
+        env:
+          # A store that will not build must fail this job, not skip it --
+          # otherwise a broken pin leaves it green having checked nothing.
+          ADATA_REQUIRE_VERSION_FIXTURES: "1"
+        run: |
+          uv run pytest -v -W default tests/test_anndata_versions.py \
+            -m integration --junitxml=compat-results.xml
+
+      - name: Confirm the compatibility cases actually ran
+        if: always()
+        run: |
+          # Belt and braces: a marker typo or a collection mistake would make
+          # the step above pass while executing nothing at all.
+          python - <<'EOF'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse("compat-results.xml").getroot()
+          suite = root.find("testsuite") if root.tag == "testsuites" else root
+          total = int(suite.get("tests", 0))
+          skipped = int(suite.get("skipped", 0))
+          ran = total - skipped
+          print(f"{ran} compatibility cases ran ({skipped} skipped of {total})")
+          if ran < 150:
+              sys.exit(f"expected at least 150 cases to run, got {ran}")
+          EOF
