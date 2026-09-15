@@ -19,7 +19,8 @@ jobs:
 
     permissions:
       contents: read
-      checks: write   # needed for EnricoMi/publish-unit-test-result-action on PRs
+      checks: write          # publish-unit-test-result-action writes a check run
+      pull-requests: write   # ...and comments the summary on the PR
 
     strategy:
       fail-fast: false
