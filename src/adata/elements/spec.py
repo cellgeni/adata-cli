@@ -10,7 +10,7 @@ See docs/ELEMENTS_h5ad.md and docs/ELEMENTS_zarr.md for the full spec.
 
 from __future__ import annotations
 
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 ANNDATA = "anndata"
 RAW = "raw"
@@ -95,6 +95,25 @@ def encoding_type(obj: Any) -> Optional[str]:
     return encoding_of(obj)[0]
 
 
+def set_attrs(obj: Any, values: Dict[str, Any]) -> None:
+    """Set several attributes in as few writes as the backend allows.
+
+    On Zarr each assignment persists the whole metadata document through its
+    sync-over-async bridge, so setting attributes one at a time costs a round
+    trip each. HDF5 has no such batch API and falls back to assignment.
+    """
+    if not values:
+        return
+
+    put = getattr(obj.attrs, "put", None)
+    if callable(put):
+        put({**dict(obj.attrs), **values})
+        return
+
+    for key, value in values.items():
+        obj.attrs[key] = value
+
+
 def set_encoding(obj: Any, enc_type: str, version: Optional[str] = None) -> None:
     """Stamp ``encoding-type``/``encoding-version`` on a group or dataset.
 
@@ -103,5 +122,4 @@ def set_encoding(obj: Any, enc_type: str, version: Optional[str] = None) -> None
     """
     if version is None:
         version = CURRENT_VERSION[enc_type]
-    obj.attrs["encoding-type"] = enc_type
-    obj.attrs["encoding-version"] = version
+    set_attrs(obj, {"encoding-type": enc_type, "encoding-version": version})
