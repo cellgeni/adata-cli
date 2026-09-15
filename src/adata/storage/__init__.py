@@ -26,11 +26,24 @@ class Store:
     root: Any
     path: Path
     zarr_format: Optional[int] = None
+    #: Whether to rewrite the Zarr consolidated metadata index on close.
+    consolidate: bool = False
 
     def close(self) -> None:
         if self.backend == "hdf5":
             try:
                 self.root.close()
+            except Exception:
+                return
+            return
+
+        if self.consolidate and zarr is not None:
+            # anndata writes a consolidated metadata index at the root. New
+            # members land on disk regardless, but every reader that honours
+            # the index -- anndata included -- keeps using the stale copy and
+            # cannot see them, so the write looks like a silent no-op.
+            try:
+                zarr.consolidate_metadata(self.root.store, path=self.root.path)
             except Exception:
                 return
 
@@ -117,11 +130,19 @@ def open_store(
     backend = detect_backend(path)
     if backend == "zarr":
         _require_zarr()
-        kwargs = {}
+        kwargs: dict = {}
         if zarr_format is not None:
             kwargs["zarr_format"] = zarr_format
+
+        writable = _is_writable_mode(mode)
+        if writable:
+            # Work against the real hierarchy: a consolidated index is a
+            # snapshot, so members added through it are invisible even to the
+            # handle that created them.
+            kwargs["use_consolidated"] = False
+
         root = zarr.open_group(str(path), mode=mode, **kwargs)
-        if _is_writable_mode(mode):
+        if writable:
             ensure_anndata_root_attrs(root)
         elif require_anndata:
             warn_if_missing_anndata_root_attrs(root, path=path)
@@ -130,6 +151,7 @@ def open_store(
             root=root,
             path=path,
             zarr_format=zarr_format_of(root),
+            consolidate=writable,
         )
     root = h5py.File(path, mode)
     if _is_writable_mode(mode):

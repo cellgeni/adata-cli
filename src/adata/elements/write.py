@@ -39,10 +39,19 @@ def write_mapping(parent: Any, name: str, replace: bool = False) -> Any:
 def write_string_array(
     parent: Any, name: str, values: Iterable[Any], replace: bool = False
 ) -> Any:
-    """Write a `string-array`: variable-length UTF-8 on either backend."""
+    """Write a `string-array`: variable-length UTF-8 on either backend.
+
+    Multi-dimensional input keeps its shape; `list()`-ing it first would
+    silently flatten a 2-D array of labels into a vector.
+    """
     if replace:
         _replace(parent, name)
-    ds = create_dataset(parent, name, data=np.asarray(list(values), dtype=object))
+    data = (
+        values
+        if isinstance(values, np.ndarray)
+        else np.asarray(list(values), dtype=object)
+    )
+    ds = create_dataset(parent, name, data=data)
     spec.set_encoding(ds, spec.STRING_ARRAY)
     return ds
 
