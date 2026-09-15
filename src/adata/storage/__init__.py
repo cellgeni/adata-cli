@@ -234,7 +234,11 @@ def copy_attrs(src_attrs: Any, dst_attrs: Any, *, target_backend: str) -> None:
 
 
 def dataset_create_kwargs(
-    src: Any, *, target_backend: str, zarr_format: Optional[int] = None
+    src: Any,
+    *,
+    target_backend: str,
+    zarr_format: Optional[int] = None,
+    dst_parent: Any = None,
 ) -> dict:
     """Derive creation kwargs that carry a source's layout onto a new dataset.
 
@@ -242,7 +246,11 @@ def dataset_create_kwargs(
     can express them; codecs that do not survive the crossing are dropped
     rather than forwarded into an error.
     """
+    # Prefer the destination's own version over anything the caller guessed,
+    # so a call site that forgets to pass one still behaves correctly.
     kw_target = zarr_format
+    if dst_parent is not None:
+        kw_target = zarr_format_of(dst_parent)
     kw: dict = {}
     chunks = getattr(src, "chunks", None)
     if chunks is not None:
@@ -259,7 +267,11 @@ def dataset_create_kwargs(
             kw["fillvalue"] = src.fillvalue
     if target_backend == "zarr" and is_zarr_array(src):
         src_zarr_format = getattr(getattr(src, "metadata", None), "zarr_format", None)
-        same_version = src_zarr_format == _target_zarr_format(kw_target)
+        target_format = _target_zarr_format(kw_target)
+        # Only when both versions are known and equal can codecs travel.
+        same_version = (
+            target_format is not None and src_zarr_format == target_format
+        )
 
         # Codecs only travel between stores of the same Zarr version: v2 holds
         # numcodecs objects, v3 holds its own codec classes, and neither
@@ -294,7 +306,7 @@ def dataset_create_kwargs(
             shards = getattr(src, "shards", None)
         except Exception:
             shards = None
-        if shards is not None and _target_zarr_format(kw_target) == 3:
+        if shards is not None and target_format == 3:
             kw["shards"] = shards
 
         try:
@@ -394,7 +406,13 @@ def create_dataset(
 
 
 def _target_zarr_format(zarr_format: Optional[int]) -> Optional[int]:
-    return zarr_format if zarr_format is not None else 3
+    """The destination's Zarr version, or None when the caller did not say.
+
+    Deliberately not defaulting to 3: guessing meant v3-only options such as
+    sharding were forwarded into v2 arrays, which reject them outright.
+    Unknown means "carry nothing version-specific".
+    """
+    return zarr_format
 
 
 def _is_string_src(src: Any) -> bool:

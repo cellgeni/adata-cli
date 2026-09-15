@@ -72,6 +72,20 @@ def offline() -> bool:
     return os.environ.get("ADATA_SKIP_VERSION_FIXTURES", "").strip() not in ("", "0")
 
 
+def must_build() -> bool:
+    """Whether a store that fails to build should fail the test.
+
+    Locally a broken environment is a nuisance and skipping is reasonable. In
+    CI it is the whole point of the job: turning a failed build into a skip
+    would let a bad release pin, or a fixture script that no longer runs
+    anywhere, leave the job green having checked nothing.
+    """
+    override = os.environ.get("ADATA_REQUIRE_VERSION_FIXTURES", "").strip()
+    if override not in ("", "0"):
+        return True
+    return os.environ.get("CI", "").strip().lower() in ("1", "true")
+
+
 def build(release: Release, fmt: str, out_dir: Path) -> Path:
     """Write one reference store, returning its path."""
     out_dir.mkdir(parents=True, exist_ok=True)

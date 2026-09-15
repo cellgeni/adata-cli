@@ -134,7 +134,9 @@ def _copy_rows(
         return copy_tree(src_ds, dst_parent, name)
 
     target_backend = _target_backend(dst_parent)
-    kw = dataset_create_kwargs(src_ds, target_backend=target_backend)
+    kw = dataset_create_kwargs(
+        src_ds, target_backend=target_backend, dst_parent=dst_parent
+    )
     kw = _clamp_chunks(kw, len(indices))
     ds = create_dataset(
         dst_parent,
@@ -146,17 +148,32 @@ def _copy_rows(
     return ds
 
 
-def _clamp_chunks(kw: dict, n_rows: int) -> dict:
-    """Shrink a forwarded chunk shape to fit the subset.
+def _clamp_chunks(kw: dict, *out_shape: int) -> dict:
+    """Shrink a forwarded chunk shape to fit the subset's dimensions.
 
-    h5py rejects a chunk larger than the dataset, so a chunked source column
-    subset below its own chunk size would otherwise fail outright.
+    h5py rejects a chunk larger than the dataset, so a chunked source subset
+    below its own chunk size would otherwise fail outright.
+
+    Zarr additionally requires a shard to be a whole number of chunks, so a
+    clamped chunk invalidates the source's shard geometry. Sharding is a
+    storage-layout choice rather than data, so it is dropped and left to the
+    backend rather than recomputed into something arbitrary.
     """
     chunks = kw.get("chunks")
-    if isinstance(chunks, (tuple, list)) and len(chunks) >= 1 and n_rows > 0:
-        clamped = (min(int(chunks[0]), n_rows),) + tuple(int(c) for c in chunks[1:])
-        kw = dict(kw)
-        kw["chunks"] = clamped
+    if not isinstance(chunks, (tuple, list)) or not chunks:
+        return kw
+
+    original = tuple(int(c) for c in chunks)
+    clamped = tuple(
+        min(c, out_shape[i]) if i < len(out_shape) and out_shape[i] > 0 else c
+        for i, c in enumerate(original)
+    )
+    if clamped == original:
+        return kw
+
+    kw = dict(kw)
+    kw["chunks"] = clamped
+    kw.pop("shards", None)
     return kw
 
 
@@ -224,10 +241,10 @@ def subset_dense_matrix(
     out_var = len(var_idx) if var_idx is not None else n_var
 
     target_backend = _target_backend(dst_parent)
-    kw = dataset_create_kwargs(src, target_backend=target_backend)
-    chunks = kw.get("chunks")
-    if isinstance(chunks, (tuple, list)) and len(chunks) >= 2:
-        kw["chunks"] = (min(int(chunks[0]), out_obs), min(int(chunks[1]), out_var))
+    kw = dataset_create_kwargs(
+        src, target_backend=target_backend, dst_parent=dst_parent
+    )
+    kw = _clamp_chunks(kw, out_obs, out_var)
 
     dst = create_dataset(
         dst_parent,

@@ -103,4 +103,21 @@ jobs:
         run: uv sync --extra dev --frozen
 
       - name: Run compatibility tests
-        run: uv run pytest -v -W default tests/test_anndata_versions.py -m integration
+        env:
+          # A store that will not build must fail this job, not skip it --
+          # otherwise a broken pin leaves it green having checked nothing.
+          ADATA_REQUIRE_VERSION_FIXTURES: "1"
+        run: |
+          uv run pytest -v -W default tests/test_anndata_versions.py \
+            -m integration
+
+      - name: Confirm the compatibility cases actually ran
+        env:
+          ADATA_REQUIRE_VERSION_FIXTURES: "1"
+        run: |
+          # Belt and braces: assert a non-trivial number of cases passed, so a
+          # collection or marker mistake cannot pass as success either.
+          count=$(uv run pytest -q tests/test_anndata_versions.py -m integration \
+                  --collect-only 2>/dev/null | grep -c "::" || true)
+          echo "collected $count compatibility cases"
+          test "$count" -ge 100

@@ -32,6 +32,7 @@ from tests.reference_stores import (
     RELEASES,
     ReferenceCache,
     ReferenceUnavailable,
+    must_build,
     offline,
     uv_available,
 )
@@ -66,11 +67,20 @@ def fmt(request) -> str:
 
 @pytest.fixture
 def store(cache, release, fmt) -> Path:
-    """A reference store, or a skip explaining why it could not be built."""
+    """A reference store for this release and format.
+
+    A build failure fails the test wherever these fixtures are required -- CI,
+    or ADATA_REQUIRE_VERSION_FIXTURES=1 -- so a broken pin cannot quietly
+    reduce the whole job to skips. Elsewhere it degrades to a skip, since a
+    local environment problem should not block unrelated work.
+    """
     try:
         return cache.get(release, fmt)
     except ReferenceUnavailable as exc:
-        pytest.skip(f"could not build {release.label} ({fmt}): {exc}")
+        message = f"could not build {release.label} ({fmt}): {exc}"
+        if must_build():
+            pytest.fail(message)
+        pytest.skip(message)
 
 
 def _out(result) -> str:

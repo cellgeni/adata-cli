@@ -305,3 +305,91 @@ def test_store_close_is_safe_to_call_twice(temp_dir):
     store = open_store(temp_dir / "x.h5ad", "w")
     store.close()
     store.close()
+
+
+# ---------------------------------------------------------------------------
+# regressions from review of #9
+
+
+def test_target_format_is_taken_from_the_destination(temp_dir):
+    """Callers that forget to pass a format must still get correct kwargs.
+
+    Defaulting an unknown target to v3 meant v3-only options -- sharding
+    especially -- were forwarded into v2 arrays, which reject them.
+    """
+    src_path = temp_dir / "v3.zarr"
+    with open_store(src_path, "w", zarr_format=3) as store:
+        ew.write_dense(store.root, "a", np.arange(64).reshape(8, 8))
+
+    dst_path = temp_dir / "v2.zarr"
+    with open_store(src_path, "r") as src, open_store(
+        dst_path, "w", zarr_format=2
+    ) as dst:
+        kwargs = dataset_create_kwargs(
+            src.root["a"], target_backend="zarr", dst_parent=dst.root
+        )
+        assert "shards" not in kwargs
+        assert "compressors" not in kwargs and "compressor" not in kwargs
+
+        # With no destination and no format, nothing version-specific travels.
+        blind = dataset_create_kwargs(src.root["a"], target_backend="zarr")
+        assert "shards" not in blind
+
+
+@pytest.mark.parametrize("target", [2, 3])
+def test_subsetting_a_sharded_v3_store(temp_dir, target):
+    """A shard must survive or be dropped, never break array creation.
+
+    Zarr requires a shard to be a whole number of chunks, so clamping the
+    chunk to the subset size invalidates the source's shard geometry.
+    """
+    src_path = temp_dir / "src.zarr"
+    with open_store(src_path, "w", zarr_format=3) as store:
+        root = store.root
+        ew.write_dataframe_header(root, "obs", [f"c{i}" for i in range(8)], [])
+        ew.write_dataframe_header(root, "var", [f"g{i}" for i in range(4)], [])
+        ew.ensure_anndata_skeleton(root)
+        from adata.storage import create_dataset
+
+        matrix = create_dataset(
+            root, "X", shape=(8, 4), dtype="float32",
+            chunks=(4, 2), shards=(8, 4),
+        )
+        matrix[...] = np.arange(32, dtype="float32").reshape(8, 4)
+        spec.set_encoding(matrix, spec.ARRAY)
+
+    names = temp_dir / "keep.txt"
+    names.write_text("c0\nc2\nc4\n")
+    out = temp_dir / f"out{target}.zarr"
+
+    from adata.core.subset import subset_h5ad
+    from rich.console import Console
+
+    subset_h5ad(
+        file=src_path, output=out, obs_file=names, var_file=None,
+        console=Console(stderr=True), zarr_format=target,
+    )
+
+    with open_store(out, "r") as store:
+        assert store.zarr_format == target
+        assert store.root["X"].shape == (3, 4)
+        expected = np.arange(32, dtype="float32").reshape(8, 4)[[0, 2, 4]]
+        assert np.array_equal(store.root["X"][...], expected)
+
+
+def test_clamping_a_chunk_drops_an_incompatible_shard():
+    from adata.core.subset import _clamp_chunks
+
+    kept = _clamp_chunks({"chunks": (4, 2), "shards": (8, 4)}, 100, 100)
+    assert kept["shards"] == (8, 4), "an unclamped chunk keeps its shard"
+
+    dropped = _clamp_chunks({"chunks": (4, 2), "shards": (8, 4)}, 3, 4)
+    assert dropped["chunks"] == (3, 2)
+    assert "shards" not in dropped
+
+
+def test_clamping_handles_one_dimensional_chunks():
+    from adata.core.subset import _clamp_chunks
+
+    assert _clamp_chunks({"chunks": (100,)}, 5)["chunks"] == (5,)
+    assert _clamp_chunks({}, 5) == {}
