@@ -9,6 +9,7 @@ from rich.console import Console
 
 from adata.formats.array import import_npy
 from adata.formats.dataframe import import_dataframe
+from adata.formats.image import import_image
 from adata.formats.json_data import import_json
 from adata.formats.sparse import import_mtx
 from adata.storage import copy_path, copy_store_contents, detect_backend, open_store
@@ -88,6 +89,8 @@ def _import_csv(
     input_file: Path,
     index_column: Optional[str],
     console: Console,
+    categorical: Optional[list] = None,
+    auto_categorical: bool = True,
 ) -> None:
     with open_store(file, "a") as store:
         import_dataframe(
@@ -96,6 +99,8 @@ def _import_csv(
             input_file=input_file,
             index_column=index_column,
             console=console,
+            categorical=categorical,
+            auto_categorical=auto_categorical,
         )
 
 
@@ -117,6 +122,16 @@ def _import_mtx(
 ) -> None:
     with open_store(file, "a") as store:
         import_mtx(store.root, obj=obj, input_file=input_file, console=console)
+
+
+def _import_image(
+    file: Path,
+    obj: str,
+    input_file: Path,
+    console: Console,
+) -> None:
+    with open_store(file, "a") as store:
+        import_image(store.root, obj=obj, input_file=input_file, console=console)
 
 
 def _import_json(

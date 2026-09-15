@@ -19,6 +19,7 @@ from rich.progress import (
 
 from adata.elements import spec
 from adata.elements.write import set_shape_attr, write_mapping
+from adata.core.select import read_names, select_indices
 from adata.elements.read import (
     decode_str_array,
     element_len,
@@ -469,6 +470,42 @@ def subset_raw_group(
             copy_tree(src_raw[key], raw_dst, key)
 
 
+def _select_axis(
+    src: Any,
+    axis: str,
+    name_file: Optional[Path],
+    query: Optional[str],
+    console: Console,
+) -> Optional[np.ndarray]:
+    """Resolve an axis selection from a name list or a query, or None for all."""
+    if name_file is None and query is None:
+        return None
+
+    if name_file is not None and query is not None:
+        raise ValueError(f"Give either --{axis} or --{axis}-query, not both.")
+
+    if query is not None:
+        console.print(f"[cyan]Evaluating {axis} query...[/]")
+        indices = select_indices(src, axis, query)
+        console.print(f"[green]Selected {len(indices)} {axis}[/]")
+        if len(indices) == 0:
+            raise ValueError(f"The {axis} query matched no rows.")
+        return indices
+
+    keep = _read_name_file(name_file)
+    console.print(f"[cyan]Found {len(keep)} {axis} names to keep[/]")
+    names_ds, _ = resolve_index(src[axis], axis)
+    indices, missing = indices_from_name_set(names_ds, keep)
+    if missing:
+        console.print(
+            f"[yellow]Warning: {len(missing)} {axis} names not found in file[/]"
+        )
+    console.print(
+        f"[green]Selected {len(indices)} {axis} (of {element_len(names_ds)})[/]"
+    )
+    return indices
+
+
 def subset_h5ad(
     file: Path,
     output: Optional[Path],
@@ -478,18 +515,23 @@ def subset_h5ad(
     chunk_rows: int = 1024,
     console: Console,
     inplace: bool = False,
+    obs_query: Optional[str] = None,
+    var_query: Optional[str] = None,
+    obs_indices: Optional[np.ndarray] = None,
+    var_indices: Optional[np.ndarray] = None,
+    zarr_format: Optional[int] = None,
+    quiet: bool = False,
 ) -> None:
-    obs_keep: Optional[Set[str]] = None
-    if obs_file is not None:
-        obs_keep = _read_name_file(obs_file)
-        console.print(f"[cyan]Found {len(obs_keep)} obs names to keep[/]")
+    """Write a copy of `file` narrowed to the selected obs and/or var.
 
-    var_keep: Optional[Set[str]] = None
-    if var_file is not None:
-        var_keep = _read_name_file(var_file)
-        console.print(f"[cyan]Found {len(var_keep)} var names to keep[/]")
-
-    if obs_keep is None and var_keep is None:
+    Selection comes from a name file, a query, or indices computed by a caller
+    such as `split`. Exactly one source per axis.
+    """
+    has_selection = any(
+        x is not None
+        for x in (obs_file, var_file, obs_query, var_query, obs_indices, var_indices)
+    )
+    if not has_selection:
         raise ValueError("At least one of --obs or --var must be provided.")
 
     if not inplace and output is None:
@@ -508,40 +550,33 @@ def subset_h5ad(
     else:
         dst_path = output
 
+    if zarr_format is None and detect_backend(file) == "zarr":
+        with open_store(file, "r") as probe:
+            zarr_format = probe.zarr_format
+
     with console.status("[magenta]Opening files...[/]"):
-        with open_store(file, "r") as src_store, open_store(dst_path, "w") as dst_store:
+        with open_store(file, "r") as src_store, open_store(
+            dst_path, "w", zarr_format=zarr_format
+        ) as dst_store:
             src = src_store.root
             dst = dst_store.root
 
-            obs_idx = None
-            if obs_keep is not None:
-                console.print("[cyan]Matching obs names...[/]")
-                obs_group = src["obs"]
-                obs_names_ds, _ = resolve_index(obs_group, "obs")
+            obs_idx = (
+                obs_indices
+                if obs_indices is not None
+                else _select_axis(src, "obs", obs_file, obs_query, console)
+            )
+            var_idx = (
+                var_indices
+                if var_indices is not None
+                else _select_axis(src, "var", var_file, var_query, console)
+            )
 
-                obs_idx, missing_obs = indices_from_name_set(obs_names_ds, obs_keep)
-                if missing_obs:
-                    console.print(
-                        f"[yellow]Warning: {len(missing_obs)} obs names not found in file[/]"
-                    )
-                console.print(
-                    f"[green]Selected {len(obs_idx)} obs (of {element_len(obs_names_ds)})[/]"
-                )
-
-            var_idx = None
-            if var_keep is not None:
-                console.print("[cyan]Matching var names...[/]")
-                var_group = src["var"]
-                var_names_ds, _ = resolve_index(var_group, "var")
-
-                var_idx, missing_var = indices_from_name_set(var_names_ds, var_keep)
-                if missing_var:
-                    console.print(
-                        f"[yellow]Warning: {len(missing_var)} var names not found in file[/]"
-                    )
-                console.print(
-                    f"[green]Selected {len(var_idx)} var (of {element_len(var_names_ds)})[/]"
-                )
+            # raw/ has its own var axis, so it is matched by name rather than
+            # by reusing these indices.
+            var_keep: Optional[Set[str]] = None
+            if var_idx is not None and "var" in src:
+                var_keep = set(read_names(src, "var", var_idx))
 
             tasks: List[str] = []
             if "obs" in src:

@@ -43,9 +43,31 @@ Run help at any level (e.g. `adata --help`, `adata export --help`).
 
 - `view` – AnnData-aware inspection: store layout, shapes, and encodings; supports drilling into paths like `obsm/X_pca` or `uns`.
 - `ls` – list the contents of any HDF5 or Zarr store as a tree, with no AnnData assumptions (works on `.loom` and plain `.h5`); `-1` emits bare paths for piping.
-- `subset` – stream and write a filtered copy based on obs/var name lists, preserving dense and sparse matrix encodings.
+- `create` – write a new, empty AnnData store for `import` to fill in.
+- `subset` – stream and write a filtered copy, selected by obs/var name lists (`--obs`/`--var`) or by expression (`--obs-query`/`--var-query`).
+- `split` – write one store per distinct value of an annotation column, with a CSV manifest.
+- `concat` – concatenate stores along the obs axis, with `--join inner|outer` and merge strategies for var and uns.
 - `export` – extract data from a store; subcommands: `dataframe` (any dataframe group to CSV), `array` (dense to `.npy`), `sparse` (CSR/CSC to `.mtx`), `dict` (JSON), `image` (PNG). Results go to stdout when no `--output` is given.
-- `import` – write new data into a store; subcommands: `dataframe` (CSV → obs/var), `array` (`.npy`), `sparse` (`.mtx`), `dict` (JSON).
+- `import` – write new data into a store at any path; subcommands: `dataframe` (CSV), `array` (`.npy`), `sparse` (`.mtx`), `dict` (JSON), `image` (PNG/JPEG/TIFF).
+
+### Building a store from scratch
+
+```bash
+adata create out.h5ad --obs-names cells.txt --var-names genes.txt
+adata import sparse    out.h5ad X            counts.mtx --inplace
+adata import dataframe out.h5ad obs          cells.csv  --inplace -i cell_id
+adata import array     out.h5ad obsm/X_umap  umap.npy   --inplace
+adata import dict      out.h5ad uns/params   params.json --inplace
+```
+
+### Filtering without a name list
+
+```bash
+adata subset data.h5ad -o cortex.h5ad --obs-query "cluster == Cortex_2"
+adata subset data.h5ad -o big.h5ad    -q "n_counts > 1000 and cluster in A,B"
+adata split  data.h5ad --by sample -o per_sample/
+adata concat per_sample/*.h5ad -o merged.h5ad --join outer --label sample
+```
 
 See [docs/GET_STARTED.md](docs/GET_STARTED.md) for a short tutorial.
 

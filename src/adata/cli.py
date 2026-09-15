@@ -7,6 +7,10 @@ from rich.console import Console
 import typer
 
 from adata.commands import (
+    MERGE_STRATEGIES,
+    concat_stores,
+    create_store,
+    split_store,
     list_store,
     show_info,
     subset_h5ad,
@@ -118,6 +122,75 @@ def info(
 
 
 # ============================================================================
+# CREATE command
+# ============================================================================
+@app.command("create")
+def create(
+    output: Path = typer.Argument(
+        ...,
+        help="Path of the store to create (.h5ad or .zarr)",
+        dir_okay=True,
+        file_okay=True,
+    ),
+    n_obs: Optional[int] = typer.Option(
+        None, "--n-obs", help="Number of observations (cells)"
+    ),
+    n_var: Optional[int] = typer.Option(
+        None, "--n-var", help="Number of variables (genes)"
+    ),
+    obs_names: Optional[Path] = typer.Option(
+        None,
+        "--obs-names",
+        help="File of obs names, one per line (sets --n-obs)",
+        exists=True,
+        readable=True,
+    ),
+    var_names: Optional[Path] = typer.Option(
+        None,
+        "--var-names",
+        help="File of var names, one per line (sets --n-var)",
+        exists=True,
+        readable=True,
+    ),
+    zarr_format: Optional[int] = typer.Option(
+        None, "--zarr-format", help="Zarr spec version to write (2 or 3)"
+    ),
+    force: bool = typer.Option(
+        False, "--force", "-f", help="Overwrite an existing store"
+    ),
+) -> None:
+    """
+    Create a new, empty AnnData store.
+
+    The result is a valid AnnData object straight away; fill it in with
+    `adata import`. Give each axis either a size or a file of names.
+
+    Examples:
+        adata create out.h5ad --n-obs 5000 --n-var 2000
+        adata create out.zarr --obs-names cells.txt --var-names genes.txt
+        adata import sparse out.h5ad X counts.mtx --inplace
+    """
+    if zarr_format is not None and zarr_format not in (2, 3):
+        console.print("[bold red]Error:[/] --zarr-format must be 2 or 3.")
+        raise typer.Exit(code=1)
+
+    try:
+        create_store(
+            output,
+            console,
+            n_obs=n_obs,
+            n_var=n_var,
+            obs_names=obs_names,
+            var_names=var_names,
+            zarr_format=zarr_format,
+            force=force,
+        )
+    except Exception as e:
+        console.print(f"[bold red]Error:[/] {e}")
+        raise typer.Exit(code=1)
+
+
+# ============================================================================
 # LS command
 # ============================================================================
 @app.command("ls")
@@ -209,6 +282,17 @@ def subset(
         exists=True,
         readable=True,
     ),
+    obs_query: Optional[str] = typer.Option(
+        None,
+        "--obs-query",
+        "-q",
+        help="Keep obs matching an expression, e.g. \"cluster == Cortex_2\"",
+    ),
+    var_query: Optional[str] = typer.Option(
+        None,
+        "--var-query",
+        help="Keep var matching an expression, e.g. \"highly_variable == True\"",
+    ),
     chunk_rows: int = typer.Option(
         1024,
         "--chunk",
@@ -217,11 +301,29 @@ def subset(
         "-r",
         help="Row chunk size for dense matrices",
     ),
+    zarr_format: Optional[int] = typer.Option(
+        None,
+        "--zarr-format",
+        help="Zarr spec version to write (defaults to the source store's)",
+    ),
 ) -> None:
-    """Subset an AnnData store by obs and/or var names."""
-    if obs is None and var is None:
+    """
+    Subset an AnnData store by obs and/or var.
+
+    Select either by name list (--obs/--var) or by expression
+    (--obs-query/--var-query). Expressions support ==, !=, <, <=, >, >=, in,
+    not in, and, or, not, and parentheses.
+
+    Examples:
+        adata subset data.h5ad -o out.h5ad --obs barcodes.txt
+        adata subset data.h5ad -o out.h5ad --obs-query "cluster == Cortex_2"
+        adata subset data.h5ad -o out.h5ad -q "n_counts > 1000 and cluster in A,B"
+        adata subset data.h5ad -o out.h5ad --var-query "highly_variable == True"
+    """
+    if obs is None and var is None and obs_query is None and var_query is None:
         console.print(
-            "[bold red]Error:[/] At least one of --obs or --var must be provided.",
+            "[bold red]Error:[/] Provide at least one of --obs, --var, "
+            "--obs-query or --var-query.",
         )
         raise typer.Exit(code=1)
 
@@ -241,6 +343,175 @@ def subset(
             chunk_rows=chunk_rows,
             console=console,
             inplace=inplace,
+            obs_query=obs_query,
+            var_query=var_query,
+            zarr_format=zarr_format,
+        )
+    except Exception as e:
+        console.print(f"[bold red]Error:[/] {e}")
+        raise typer.Exit(code=1)
+
+
+# ============================================================================
+# CONCAT command
+# ============================================================================
+@app.command("concat")
+def concat(
+    files: List[Path] = typer.Argument(
+        ...,
+        help="Two or more .h5ad/.zarr stores to concatenate",
+        exists=True,
+        readable=True,
+        dir_okay=True,
+        file_okay=True,
+    ),
+    output: Path = typer.Option(
+        ..., "--output", "-o", help="Output .h5ad/.zarr path", dir_okay=True
+    ),
+    join: str = typer.Option(
+        "inner",
+        "--join",
+        "-j",
+        help="Align var by intersection ('inner') or union ('outer')",
+    ),
+    label: Optional[str] = typer.Option(
+        None, "--label", help="Add an obs column recording which input each cell came from"
+    ),
+    keys: Optional[str] = typer.Option(
+        None,
+        "--keys",
+        help="Comma separated names for the inputs (defaults to their filenames)",
+    ),
+    index_unique: Optional[str] = typer.Option(
+        None,
+        "--index-unique",
+        help="Delimiter used to suffix obs names with their key, e.g. '-'",
+    ),
+    merge: Optional[str] = typer.Option(
+        None,
+        "--merge",
+        help="How to reconcile var columns: same, unique, first, only (default: drop)",
+    ),
+    uns_merge: Optional[str] = typer.Option(
+        None,
+        "--uns-merge",
+        help="How to reconcile uns: same, unique, first, only (default: drop)",
+    ),
+    fill_value: float = typer.Option(
+        0.0, "--fill-value", help="Value for dense cells introduced by an outer join"
+    ),
+    chunk_rows: int = typer.Option(
+        1024, "--chunk", "-C", help="Row chunk size while streaming"
+    ),
+    zarr_format: Optional[int] = typer.Option(
+        None, "--zarr-format", help="Zarr spec version to write (2 or 3)"
+    ),
+) -> None:
+    """
+    Concatenate stores along the obs axis.
+
+    Streams each input in turn, so memory use is set by --chunk rather than by
+    the size of the inputs. obsp, varp and raw are not carried over.
+
+    Examples:
+        adata concat a.h5ad b.h5ad -o merged.h5ad
+        adata concat *.h5ad -o merged.h5ad --join outer --label sample
+        adata concat a.h5ad b.h5ad -o m.h5ad --keys a,b --index-unique - --uns-merge same
+    """
+    for name, value in (("--merge", merge), ("--uns-merge", uns_merge)):
+        if value is not None and value not in MERGE_STRATEGIES:
+            console.print(
+                f"[bold red]Error:[/] {name} must be one of: "
+                f"{', '.join(MERGE_STRATEGIES)}"
+            )
+            raise typer.Exit(code=1)
+
+    try:
+        concat_stores(
+            files,
+            output,
+            console,
+            join=join,
+            label=label,
+            keys=[k.strip() for k in keys.split(",")] if keys else None,
+            index_unique=index_unique,
+            merge=merge,
+            uns_merge=uns_merge,
+            fill_value=fill_value,
+            chunk_rows=chunk_rows,
+            zarr_format=zarr_format,
+        )
+    except Exception as e:
+        console.print(f"[bold red]Error:[/] {e}")
+        raise typer.Exit(code=1)
+
+
+# ============================================================================
+# SPLIT command
+# ============================================================================
+@app.command("split")
+def split(
+    file: Path = typer.Argument(
+        ...,
+        help="Input .h5ad/.zarr",
+        exists=True,
+        readable=True,
+        dir_okay=True,
+        file_okay=True,
+    ),
+    by: str = typer.Option(
+        ..., "--by", "-b", help="Column to split on (e.g. 'sample', 'cell_type')"
+    ),
+    output_dir: Path = typer.Option(
+        ..., "--output-dir", "-o", help="Directory to write the split stores into"
+    ),
+    axis: str = typer.Option(
+        "obs", "--axis", help="Axis the column belongs to ('obs' or 'var')"
+    ),
+    suffix: Optional[str] = typer.Option(
+        None,
+        "--suffix",
+        help="Output extension (defaults to the source store's format)",
+    ),
+    min_size: int = typer.Option(
+        1, "--min-size", help="Skip groups with fewer rows than this"
+    ),
+    manifest: bool = typer.Option(
+        True, "--manifest/--no-manifest", help="Write a CSV manifest of the outputs"
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show what would be written without writing it"
+    ),
+    chunk_rows: int = typer.Option(
+        1024, "--chunk", "-C", help="Row chunk size for dense matrices"
+    ),
+) -> None:
+    """
+    Split a store into one file per distinct value of a column.
+
+    Streams the source, so it works on stores far larger than memory.
+
+    Examples:
+        adata split data.h5ad --by sample -o per_sample/
+        adata split data.h5ad --by cell_type -o clusters/ --dry-run
+        adata split data.h5ad --by cluster -o out/ --min-size 50
+    """
+    if axis not in ("obs", "var"):
+        console.print("[bold red]Error:[/] --axis must be 'obs' or 'var'.")
+        raise typer.Exit(code=1)
+
+    try:
+        split_store(
+            file=file,
+            column=by,
+            output_dir=output_dir,
+            console=console,
+            axis=axis,
+            suffix=suffix,
+            dry_run=dry_run,
+            manifest=manifest,
+            min_size=min_size,
+            chunk_rows=chunk_rows,
         )
     except Exception as e:
         console.print(f"[bold red]Error:[/] {e}")
@@ -528,7 +799,7 @@ def import_dataframe(
         file_okay=True,
     ),
     entry: str = typer.Argument(
-        ..., help="Entry path to create/replace ('obs' or 'var')"
+        ..., help="Dataframe path to create/replace (e.g. 'obs', 'var', 'raw/var')"
     ),
     input_file: Path = typer.Argument(
         ..., help="Input CSV file", exists=True, readable=True
@@ -552,21 +823,30 @@ def import_dataframe(
         "-i",
         help="Column to use as index. Defaults to first column.",
     ),
+    categorical: Optional[str] = typer.Option(
+        None,
+        "--categorical",
+        help="Comma separated columns to force to categorical",
+    ),
+    auto_categorical: bool = typer.Option(
+        True,
+        "--auto-categorical/--no-auto-categorical",
+        help="Infer categoricals from low-cardinality string columns",
+    ),
 ) -> None:
     """
-    Import a CSV file into obs or var.
+    Import a CSV file as a dataframe.
+
+    String columns with few distinct values become categoricals; pass
+    --no-auto-categorical to keep them as plain strings, or --categorical to
+    force specific ones.
 
     Examples:
-        h5ad import dataframe data.h5ad obs cells.csv -o output.h5ad -i cell_id
-        h5ad import dataframe data.h5ad var genes.csv --inplace -i gene_id
+        adata import dataframe data.h5ad obs cells.csv -o out.h5ad -i cell_id
+        adata import dataframe data.h5ad var genes.csv --inplace -i gene_id
+        adata import dataframe data.h5ad obs cells.csv --inplace --categorical batch
     """
     from adata.commands.import_data import _import_csv
-
-    if entry not in ("obs", "var"):
-        console.print(
-            f"[bold red]Error:[/] Entry must be 'obs' or 'var', not '{entry}'.",
-        )
-        raise typer.Exit(code=1)
 
     if not inplace and output is None:
         console.print(
@@ -577,7 +857,20 @@ def import_dataframe(
 
     try:
         target = _get_target_file(file, output, inplace)
-        _import_csv(target, entry, input_file, index_column, console)
+        cat_list = (
+            [c.strip() for c in categorical.split(",") if c.strip()]
+            if categorical
+            else None
+        )
+        _import_csv(
+            target,
+            entry,
+            input_file,
+            index_column,
+            console,
+            categorical=cat_list,
+            auto_categorical=auto_categorical,
+        )
     except Exception as e:
         console.print(f"[bold red]Error:[/] {e}")
         raise typer.Exit(code=1)
@@ -744,6 +1037,57 @@ def import_dict(
     try:
         target = _get_target_file(file, output, inplace)
         _import_json(target, obj, input_file, console)
+    except Exception as e:
+        console.print(f"[bold red]Error:[/] {e}")
+        raise typer.Exit(code=1)
+
+
+@import_app.command("image")
+def import_image_cmd(
+    file: Path = typer.Argument(
+        ...,
+        help="Path to the source .h5ad/.zarr store",
+        exists=True,
+        readable=True,
+        dir_okay=True,
+        file_okay=True,
+    ),
+    entry: str = typer.Argument(
+        ..., help="Entry path to create/replace (e.g. 'uns/spatial/hires')"
+    ),
+    input_file: Path = typer.Argument(
+        ..., help="Input image file (.png, .jpg, .tiff)", exists=True, readable=True
+    ),
+    output: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output .h5ad/.zarr path. Required unless --inplace.",
+        dir_okay=True,
+        file_okay=True,
+    ),
+    inplace: bool = typer.Option(
+        False, "--inplace", help="Modify source file directly."
+    ),
+) -> None:
+    """
+    Import an image file as a dense array.
+
+    Examples:
+        adata import image data.h5ad uns/spatial/hires tissue.png --inplace
+    """
+    from adata.commands.import_data import _import_image
+
+    if not inplace and output is None:
+        console.print(
+            "[bold red]Error:[/] Output file is required. "
+            "Use --output/-o or --inplace.",
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        target = _get_target_file(file, output, inplace)
+        _import_image(target, entry, input_file, console)
     except Exception as e:
         console.print(f"[bold red]Error:[/] {e}")
         raise typer.Exit(code=1)

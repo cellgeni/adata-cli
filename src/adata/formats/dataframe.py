@@ -11,10 +11,12 @@ from rich.console import Console
 
 from adata.core.read import col_chunk_as_strings
 from adata.formats.common import _resolve
+from adata.util.path import norm_path
 from adata.elements.read import dataframe_columns, element_len, resolve_index
 from adata.formats.validate import validate_dimensions
 from adata.elements.write import (
     write_categorical,
+    write_mapping,
     write_dataframe_header,
     write_dense,
     write_string_array,
@@ -185,26 +187,26 @@ def import_dataframe(
     categorical: Optional[List[str]] = None,
     auto_categorical: bool = True,
 ) -> None:
-    """Replace `obs` or `var` with the contents of a CSV file.
+    """Replace a dataframe at `obj` with the contents of a CSV file.
 
-    Columns that parse cleanly as integers or floats become numeric arrays;
-    the rest become either a `categorical` or a `string-array`. `categorical`
-    names columns to force, and `auto_categorical` applies the heuristic to
-    the remainder.
+    `obj` is any dataframe path, not only "obs" or "var". Columns that parse
+    cleanly as integers or floats become numeric arrays; the rest become
+    either a `categorical` or a `string-array`. `categorical` names columns to
+    force, and `auto_categorical` applies the heuristic to the remainder.
     """
-    if obj not in ("obs", "var"):
-        raise ValueError(
-            f"CSV import is only supported for 'obs' or 'var', not '{obj}'."
-        )
-
+    obj = norm_path(obj)
     rows, data_columns, index_values, _ = _read_csv(input_file, index_column)
     n_rows = len(rows)
 
     validate_dimensions(root, obj, (n_rows,), console)
 
-    index_name = "_index"
+    parts = obj.split("/")
+    parent = root
+    for part in parts[:-1]:
+        parent = parent[part] if part in parent else write_mapping(parent, part)
+
     group = write_dataframe_header(
-        root, obj, index_values, data_columns, index_name=index_name
+        parent, parts[-1], index_values, data_columns, index_name="_index"
     )
 
     forced = set(categorical or ())
