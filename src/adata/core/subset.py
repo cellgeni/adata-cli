@@ -571,7 +571,12 @@ def subset_h5ad(
         with open_store(file, "r") as probe:
             zarr_format = probe.zarr_format
 
-    with console.status("[magenta]Opening files...[/]"):
+    # Rich allows only one live display per console, and the progress bar
+    # below is a second one. The spinner is therefore stopped explicitly once
+    # the selection is known, rather than left running around it.
+    status = console.status("[magenta]Opening files...[/]")
+    status.start()
+    try:
         with open_store(file, "r") as src_store, open_store(
             dst_path, "w", zarr_format=zarr_format
         ) as dst_store:
@@ -594,6 +599,8 @@ def subset_h5ad(
             var_keep: Optional[Set[str]] = None
             if var_idx is not None and "var" in src:
                 var_keep = set(read_names(src, "var", var_idx))
+
+            status.stop()
 
             tasks: List[str] = []
             if "obs" in src:
@@ -745,6 +752,8 @@ def subset_h5ad(
                     )
 
             _ensure_optional_anndata_groups(dst)
+    finally:
+        status.stop()
 
     if inplace:
         if file.exists():

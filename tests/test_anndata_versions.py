@@ -37,7 +37,9 @@ from tests.reference_stores import (
     uv_available,
 )
 
-pytestmark = pytest.mark.integration
+# Building six environments on a cold uv cache is slow, so these get much
+# longer than the suite-wide limit.
+pytestmark = [pytest.mark.integration, pytest.mark.timeout(1800)]
 
 runner = CliRunner()
 
