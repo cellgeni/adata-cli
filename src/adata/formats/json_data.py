@@ -9,6 +9,7 @@ import numpy as np
 from rich.console import Console
 
 from adata.core.read import decode_str_array
+from adata.elements import spec
 from adata.formats.common import _check_json_exportable, _resolve
 from adata.elements.write import (
     write_dense,
@@ -78,6 +79,12 @@ def _pyify(value: Any, max_elements: int) -> Any:
 
 
 def _dataset_to_jsonable(ds: Any, max_elements: int) -> Any:
+    if spec.encoding_type(ds) == spec.NULL:
+        # A null is a placeholder -- an h5py.Empty or a 0-d zarr bool -- whose
+        # stored value is meaningless. Reading it would emit that placeholder
+        # rather than restoring the None it represents.
+        return None
+
     if ds.shape == ():
         v = ds[()]
         return _pyify(v, max_elements=max_elements)
@@ -181,7 +188,9 @@ def _write_json_list(parent: Any, name: str, value: list) -> None:
         return
 
     if arr is not None and arr.dtype.kind in ("U", "S", "O", "T"):
-        write_string_array(parent, name, arr.reshape(-1).tolist(), replace=True)
+        # Pass the shaped array through: flattening would turn a nested list
+        # such as [["a","b"],["c","d"]] into a length-4 vector.
+        write_string_array(parent, name, arr, replace=True)
         return
 
     write_scalar(parent, name, json.dumps(value), replace=True)
