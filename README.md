@@ -88,5 +88,5 @@ adata concat per_sample/*.h5ad -o merged.h5ad --join outer --label sample
 A docker image is available on QUAY: `quay.io/cellgeni/adata-cli:latest`. Pull and run with:
 
 ```bash
-docker run --rm -it -v /path/to/data:/data quay.io/cellgeni/adata-cli:latest adata view /data/your_file.h5ad
+docker run --rm -it -v /path/to/data:/data quay.io/cellgeni/adata-cli:latest view /data/your_file.h5ad
 ```

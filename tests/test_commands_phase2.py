@@ -693,3 +693,68 @@ def test_import_dataframe_validates_raw_var_against_raw(tmp_path):
     )
     assert result.exit_code == 0, _out(result)
     assert list(ad.read_h5ad(src).raw.var["x"]) == [1, 2, 3, 4]
+
+
+# ---------------------------------------------------------------------------
+# regressions from review of #8
+
+
+@pytest.mark.parametrize("version", [2, 3])
+def test_split_zarr_format_selects_the_output_version(tmp_path, version):
+    """COMMANDS.md advertised this before it existed."""
+    src = tmp_path / "src.h5ad"
+    ad.AnnData(
+        X=np.ones((4, 2), dtype="float32"),
+        obs=pd.DataFrame(
+            {"grp": pd.Categorical(["a", "b", "a", "b"])},
+            index=[f"c{i}" for i in range(4)],
+        ),
+        var=pd.DataFrame(index=["g1", "g2"]),
+    ).write_h5ad(src)
+
+    out_dir = tmp_path / "parts"
+    result = runner.invoke(
+        app,
+        ["split", str(src), "--by", "grp", "-o", str(out_dir),
+         "--suffix", ".zarr", "--zarr-format", str(version)],
+    )
+    assert result.exit_code == 0, _out(result)
+
+    part = out_dir / "a.zarr"
+    if version == 2:
+        assert (part / ".zgroup").exists(), "v2 writes .zgroup"
+    else:
+        assert (part / "zarr.json").exists(), "v3 writes zarr.json"
+    assert ad.read_zarr(part).shape == (2, 2)
+
+
+def test_split_defaults_to_the_source_zarr_version(tmp_path):
+    src = tmp_path / "src.zarr"
+    ad.AnnData(
+        X=np.ones((2, 2), dtype="float32"),
+        obs=pd.DataFrame(
+            {"grp": pd.Categorical(["a", "b"])}, index=["c0", "c1"]
+        ),
+        var=pd.DataFrame(index=["g1", "g2"]),
+    ).write_zarr(src)
+
+    import zarr
+
+    source_version = zarr.open_group(str(src)).metadata.zarr_format
+    out_dir = tmp_path / "parts"
+    assert runner.invoke(
+        app, ["split", str(src), "--by", "grp", "-o", str(out_dir)]
+    ).exit_code == 0
+
+    part = out_dir / "a.zarr"
+    assert zarr.open_group(str(part)).metadata.zarr_format == source_version
+
+
+def test_split_rejects_a_bad_zarr_format(tmp_path, sample):
+    result = runner.invoke(
+        app,
+        ["split", str(sample), "--by", "batch", "-o", str(tmp_path / "o"),
+         "--zarr-format", "9"],
+    )
+    assert result.exit_code == 1
+    assert "must be 2 or 3" in _out(result)
