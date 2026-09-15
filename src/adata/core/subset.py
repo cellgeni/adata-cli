@@ -597,10 +597,16 @@ def subset_h5ad(
                 tasks.extend([f"varp:{k}" for k in src["varp"].keys()])
             if "uns" in src:
                 tasks.append("uns")
-            if "raw" in src:
+            # anndata writes a placeholder `raw` even when there is none, and
+            # on Zarr that placeholder is an array rather than a group.
+            if "raw" in src and is_group(src["raw"]):
                 tasks.append("raw")
+            elif "raw" in src:
+                tasks.append("copy:raw")
 
-            passthrough = [k for k in src.keys() if k not in HANDLED_KEYS]
+            passthrough = [
+                k for k in src.keys() if k not in HANDLED_KEYS
+            ]
             if passthrough:
                 console.print(
                     "[yellow]Copying unrecognised top-level "

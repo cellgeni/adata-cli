@@ -10,6 +10,7 @@ Skipped when anndata is not installed.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -281,3 +282,126 @@ def test_sparse_subset_matches_scipy(tmp_path, layout):
     assert got.shape == (len(keep_obs), len(keep_var))
     assert abs(got.X - expected).nnz == 0
     assert type(got.X).__name__ == f"{layout}_matrix"
+
+
+# ---------------------------------------------------------------------------
+# regressions from review of #6
+
+
+@pytest.mark.parametrize("fmt", ["h5ad", "zarr"])
+def test_json_import_keeps_nested_string_arrays_rectangular(tmp_path, fmt):
+    """A nested string list was flattened into a vector on import."""
+    store = tmp_path / f"base.{fmt}"
+    obj = ad.AnnData(
+        X=np.ones((2, 2), dtype="float32"),
+        obs=pd.DataFrame(index=["c1", "c2"]),
+        var=pd.DataFrame(index=["g1", "g2"]),
+    )
+    obj.write_zarr(store) if fmt == "zarr" else obj.write_h5ad(store)
+
+    payload = tmp_path / "nested.json"
+    payload.write_text('{"grid": [["a","b"],["c","d"]], "nums": [[1,2],[3,4]]}')
+
+    result = runner.invoke(
+        app, ["import", "dict", str(store), "uns/t", str(payload), "--inplace"]
+    )
+    assert result.exit_code == 0, result.stdout + (result.stderr or "")
+
+    uns = _read(store).uns["t"]
+    assert uns["grid"].shape == (2, 2), "a 2x2 string grid must not flatten"
+    assert uns["nums"].shape == (2, 2)
+    assert [list(row) for row in uns["grid"]] == [["a", "b"], ["c", "d"]]
+
+
+@pytest.mark.parametrize("fmt", ["h5ad", "zarr"])
+def test_json_null_survives_a_full_round_trip(tmp_path, fmt):
+    """Exporting a `null` element emitted its storage placeholder, not None.
+
+    The placeholder differs per backend -- an h5py.Empty, or a 0-d zarr bool --
+    so neither serialised back to JSON null.
+    """
+    store = tmp_path / f"base.{fmt}"
+    obj = ad.AnnData(
+        X=np.ones((2, 2), dtype="float32"),
+        obs=pd.DataFrame(index=["c1", "c2"]),
+        var=pd.DataFrame(index=["g1", "g2"]),
+    )
+    obj.write_zarr(store) if fmt == "zarr" else obj.write_h5ad(store)
+
+    source = {
+        "grid": [["a", "b"], ["c", "d"]],
+        "nums": [[1, 2], [3, 4]],
+        "nothing": None,
+        "title": "run",
+    }
+    payload = tmp_path / "payload.json"
+    payload.write_text(json.dumps(source))
+
+    assert runner.invoke(
+        app, ["import", "dict", str(store), "uns/t", str(payload), "--inplace"]
+    ).exit_code == 0
+
+    out = tmp_path / "out.json"
+    result = runner.invoke(
+        app, ["export", "dict", str(store), "uns/t", "-o", str(out)]
+    )
+    assert result.exit_code == 0, result.stdout + (result.stderr or "")
+
+    assert json.loads(out.read_text()) == source, "JSON must round-trip exactly"
+    assert _read(store).uns["t"]["nothing"] is None
+
+
+def test_writes_into_a_consolidated_zarr_store_are_visible(tmp_path):
+    """Edits to an anndata-written .zarr reported success but vanished.
+
+    anndata writes a consolidated metadata index at the root. New members do
+    land on disk, but every reader that honours the index -- anndata included
+    -- keeps reading the stale snapshot, so the write looks like a no-op.
+    Stores the CLI writes itself are not consolidated, which is why this only
+    showed up against anndata's output.
+    """
+    zarr = pytest.importorskip("zarr")
+
+    store = tmp_path / "base.zarr"
+    ad.AnnData(
+        X=np.ones((2, 2), dtype="float32"),
+        obs=pd.DataFrame(index=["c1", "c2"]),
+        var=pd.DataFrame(index=["g1", "g2"]),
+    ).write_zarr(store)
+
+    root = json.loads((store / "zarr.json").read_text())
+    assert root.get("consolidated_metadata"), "fixture must be consolidated"
+
+    payload = tmp_path / "p.json"
+    payload.write_text('{"answer": 42}')
+    result = runner.invoke(
+        app, ["import", "dict", str(store), "uns/t", str(payload), "--inplace"]
+    )
+    assert result.exit_code == 0, result.stdout + (result.stderr or "")
+
+    # Visible through the consolidated index, not just on disk.
+    assert "t" in list(zarr.open_group(str(store))["uns"].keys())
+    assert int(ad.read_zarr(store).uns["t"]["answer"]) == 42
+
+
+def test_subset_of_a_consolidated_zarr_store_round_trips(tmp_path):
+    """The same staleness would affect any command that writes a .zarr."""
+    store = tmp_path / "base.zarr"
+    ad.AnnData(
+        X=np.ones((4, 2), dtype="float32"),
+        obs=pd.DataFrame(index=[f"c{i}" for i in range(4)]),
+        var=pd.DataFrame(index=["g1", "g2"]),
+    ).write_zarr(store)
+
+    names = tmp_path / "keep.txt"
+    names.write_text("c0\nc2\n")
+    out = tmp_path / "sub.zarr"
+
+    result = runner.invoke(
+        app, ["subset", str(store), "-o", str(out), "--obs", str(names)]
+    )
+    assert result.exit_code == 0, result.stdout + (result.stderr or "")
+
+    got = ad.read_zarr(out)
+    assert got.shape == (2, 2)
+    assert list(got.obs_names) == ["c0", "c2"]
