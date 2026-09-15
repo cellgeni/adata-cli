@@ -86,13 +86,41 @@ def _apply_index_unique(
 def _resolve_keys(
     files: Sequence[Path], keys: Optional[Sequence[str]]
 ) -> List[str]:
+    """Name each input, defaulting to its filename stem.
+
+    Keys must be distinct: `--label` writes them as categorical categories,
+    which have to be unique, and `--index-unique` uses them to disambiguate obs
+    names. Duplicates would otherwise produce an output that reports success
+    but cannot be read back.
+    """
     if keys is None:
-        return [f.stem if f.suffix else f.name for f in files]
+        resolved = [f.stem if f.suffix else f.name for f in files]
+        duplicates = _duplicates(resolved)
+        if duplicates:
+            raise ValueError(
+                f"Inputs in different directories share the filename(s) "
+                f"{', '.join(duplicates)}, so the default keys are not unique. "
+                "Pass --keys to name them explicitly."
+            )
+        return resolved
+
     if len(keys) != len(files):
         raise ValueError(
             f"--keys has {len(keys)} entries but {len(files)} inputs were given."
         )
+    duplicates = _duplicates(keys)
+    if duplicates:
+        raise ValueError(
+            f"--keys must be unique; repeated: {', '.join(duplicates)}."
+        )
     return list(keys)
+
+
+def _duplicates(values: Sequence[str]) -> List[str]:
+    seen: Dict[str, int] = {}
+    for value in values:
+        seen[value] = seen.get(value, 0) + 1
+    return sorted(v for v, n in seen.items() if n > 1)
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +175,8 @@ _MISSING = _Missing()
 
 
 def _equal(a: Any, b: Any) -> bool:
+    if isinstance(a, _Incomparable) or isinstance(b, _Incomparable):
+        return False
     try:
         if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
             return np.array_equal(np.asarray(a), np.asarray(b))
@@ -436,23 +466,129 @@ def _concat_dense(
         row_offset += n_src_rows
 
 
+def _inverse_column_map(col_map: np.ndarray, n_cols: int) -> np.ndarray:
+    """Invert a source->target column map into target->source, -1 where absent."""
+    inverse = np.full(n_cols, -1, dtype=np.int64)
+    present = col_map >= 0
+    inverse[col_map[present]] = np.nonzero(present)[0]
+    return inverse
+
+
+def _concat_csc(
+    dst_parent: Any,
+    name: str,
+    sources: List[Any],
+    col_maps: List[np.ndarray],
+    row_counts: List[int],
+    n_rows: int,
+    n_cols: int,
+) -> None:
+    """Concatenate CSC matrices row-wise, keeping the CSC encoding.
+
+    A CSC matrix is stored by column, so concatenating along obs means, for
+    each target column, appending each input's row indices in turn with that
+    input's row offset added. Because every input's column is already sorted
+    and the offsets increase, the result is sorted without a re-sort.
+    """
+    from adata.core.subset import _append, _growable
+    from adata.elements.write import set_shape_attr
+
+    group = dst_parent.create_group(name)
+    spec.set_encoding(group, spec.CSC_MATRIX)
+    set_shape_attr(group, (n_rows, n_cols))
+
+    dtype = np.result_type(*[s["data"].dtype for s in sources])
+    out_data = _growable(group, "data", dtype)
+    out_indices = _growable(group, "indices", np.int64)
+    indptr = [0]
+    nnz = 0
+
+    inverses = [_inverse_column_map(cm, n_cols) for cm in col_maps]
+    indptrs = [np.asarray(s["indptr"][...], dtype=np.int64) for s in sources]
+    row_offsets = np.cumsum([0] + list(row_counts[:-1]))
+
+    for target_col in range(n_cols):
+        rows: List[np.ndarray] = []
+        values: List[np.ndarray] = []
+        for source, src_indptr, inverse, offset in zip(
+            sources, indptrs, inverses, row_offsets
+        ):
+            src_col = int(inverse[target_col])
+            if src_col < 0:
+                continue
+            lo, hi = int(src_indptr[src_col]), int(src_indptr[src_col + 1])
+            if hi <= lo:
+                continue
+            rows.append(np.asarray(source["indices"][lo:hi], dtype=np.int64) + offset)
+            values.append(np.asarray(source["data"][lo:hi]))
+
+        if rows:
+            _append(out_indices, np.concatenate(rows))
+            _append(out_data, np.concatenate(values).astype(dtype))
+            nnz += int(sum(len(r) for r in rows))
+        indptr.append(nnz)
+
+    create_dataset(group, "indptr", data=np.asarray(indptr, dtype=np.int64))
+
+
+def check_matrix_encodings(roots: List[Any], console: Console) -> None:
+    """Fail before writing anything if a matrix cannot be concatenated.
+
+    Checked up front rather than mid-write: discovering this half way through
+    would leave a partial store behind, and skipping the matrix would produce
+    an output silently missing X.
+    """
+    def _check(label: str, sources: List[Any]) -> None:
+        kinds = {_matrix_kind(s) for s in sources}
+        if kinds in ({spec.CSR_MATRIX}, {spec.CSC_MATRIX}, {"dense"}):
+            return
+        raise ValueError(
+            f"Cannot concatenate {label!r}: inputs use "
+            f"{', '.join(sorted(kinds))}. Every input must use the same "
+            "encoding -- convert them to match first."
+        )
+
+    if all("X" in r for r in roots):
+        _check("X", [r["X"] for r in roots])
+    elif any("X" in r for r in roots):
+        console.print("[yellow]Skipping X: not present in every input[/]")
+
+    names = _index_union(
+        [list(r["layers"].keys()) if "layers" in r else [] for r in roots]
+    )
+    for name in names:
+        if all("layers" in r and name in r["layers"] for r in roots):
+            _check(f"layers/{name}", [r["layers"][name] for r in roots])
+
+
 def _concat_matrix(
     dst_parent: Any,
     name: str,
     sources: List[Any],
     col_maps: List[np.ndarray],
+    row_counts: List[int],
     n_rows: int,
     n_cols: int,
     chunk_rows: int,
     fill_value: float,
     console: Console,
 ) -> bool:
-    """Concatenate X or one layer across inputs. Returns whether it was written."""
+    """Concatenate X or one layer across inputs. Returns whether it was written.
+
+    Encodings are validated by :func:`check_matrix_encodings` before the output
+    store exists, so anything reaching here is concatenable.
+    """
     kinds = {_matrix_kind(s) for s in sources}
 
     if kinds == {spec.CSR_MATRIX}:
         _concat_sparse(
             dst_parent, name, sources, col_maps, n_rows, n_cols, chunk_rows
+        )
+        return True
+
+    if kinds == {spec.CSC_MATRIX}:
+        _concat_csc(
+            dst_parent, name, sources, col_maps, row_counts, n_rows, n_cols
         )
         return True
 
@@ -469,11 +605,9 @@ def _concat_matrix(
         )
         return True
 
-    console.print(
-        f"[yellow]Skipping {name!r}: inputs disagree on encoding "
-        f"({', '.join(sorted(kinds))}). Convert them to match first.[/]"
+    raise ValueError(
+        f"Cannot concatenate {name!r}: inputs use {', '.join(sorted(kinds))}."
     )
-    return False
 
 
 def _concat_obsm(
@@ -559,14 +693,68 @@ def _merge_group(
             copy_tree(source, target, key)
 
 
-def _readable_value(obj: Any) -> Any:
-    """A comparable snapshot of a small element, for merge strategies."""
+#: Elements larger than this are not compared value-by-value.
+MAX_COMPARABLE_ELEMENTS = 1_000_000
+
+
+class _Incomparable:
+    """Stands for a value too large to compare, and equal to nothing."""
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "<incomparable>"
+
+
+def _readable_value(obj: Any, budget: Optional[List[int]] = None) -> Any:
+    """A comparable snapshot of an element, for the merge strategies.
+
+    Recurses into groups and reads their datasets, including attributes. Using
+    only child key names -- as an earlier version did -- would make two
+    dataframes with the same columns but different values compare equal, so
+    `same` and `unique` would keep conflicting metadata.
+
+    Very large elements are reported as incomparable, which equals nothing and
+    so is never kept by `same` or `unique`.
+    """
+    if budget is None:
+        budget = [MAX_COMPARABLE_ELEMENTS]
+
     try:
+        attrs = tuple(
+            sorted(
+                (str(k), _hashable(spec.decode_attr(v)))
+                for k, v in obj.attrs.items()
+                if k not in ("encoding-version",)
+            )
+        )
+
         if is_dataset(obj):
-            return np.asarray(obj[...])
-        return tuple(sorted(obj.keys()))
+            size = int(np.prod(obj.shape)) if obj.shape else 1
+            budget[0] -= size
+            if budget[0] < 0:
+                return _Incomparable()
+            return ("dataset", attrs, _hashable(np.asarray(obj[...])))
+
+        children = []
+        for key in sorted(obj.keys()):
+            value = _readable_value(obj[key], budget)
+            if isinstance(value, _Incomparable):
+                return value
+            children.append((str(key), value))
+        return ("group", attrs, tuple(children))
     except Exception:
-        return _MISSING
+        return _Incomparable()
+
+
+def _hashable(value: Any) -> Any:
+    """Reduce a value to something `_equal` can compare reliably."""
+    if isinstance(value, np.ndarray):
+        return (value.shape, value.dtype.kind, value.tobytes()
+                if value.dtype.kind not in ("O", "T") else tuple(map(str, value.reshape(-1).tolist())))
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, (list, tuple)):
+        return tuple(_hashable(v) for v in value)
+    return value
 
 
 def concat_on_disk(
@@ -644,6 +832,10 @@ def concat_on_disk(
                 "Pass --index-unique to disambiguate them.[/]"
             )
 
+        # Validated before the output exists, so a mismatch cannot leave a
+        # half-written store behind.
+        check_matrix_encodings(roots, console)
+
         with open_store(output, "w", zarr_format=zarr_format) as dst_store:
             dst = dst_store.root
             _write_obs(
@@ -653,7 +845,15 @@ def concat_on_disk(
             ensure_anndata_skeleton(dst)
 
             _write_matrices(
-                dst, roots, col_maps, n_obs, n_var, chunk_rows, fill_value, console
+                dst,
+                roots,
+                col_maps,
+                obs_counts,
+                n_obs,
+                n_var,
+                chunk_rows,
+                fill_value,
+                console,
             )
             _write_obsm(dst, roots, n_obs, chunk_rows, console)
 
@@ -771,25 +971,49 @@ def _write_var(
 def _write_var_column(
     parent: Any, name: str, column: Any, take: np.ndarray
 ) -> None:
-    """Write one var column, reordered onto the target var index."""
+    """Write one var column, reordered onto the target var index.
+
+    Each encoding is rewritten as itself. Rendering everything as text -- as an
+    earlier version did for nullable columns -- turned missing values into
+    empty strings and lost the numeric and boolean dtypes.
+    """
     kind = _column_kind(column)
+
     if kind == "categorical":
         categories = [str(c) for c in read_categories(column)]
         codes = np.asarray(column["codes"][...], dtype=np.int64)[take]
         write_categorical(
             parent, name, codes, categories, ordered=is_ordered(column)
         )
-    elif kind == "numeric":
+        return
+
+    if kind == "numeric":
         write_dense(parent, name, np.asarray(column[...])[take])
-    else:
-        values = read_str_all(column)
-        write_string_array(parent, name, [values[i] for i in take])
+        return
+
+    if kind == "masked":
+        enc = spec.encoding_type(column) or spec.NULLABLE_STRING_ARRAY
+        mask = np.asarray(column["mask"][...], dtype=bool)[take]
+        raw_values = np.asarray(column["values"][...])
+        if enc == spec.NULLABLE_STRING_ARRAY:
+            from adata.elements.read import decode_str_array
+
+            values = decode_str_array(raw_values)[take].tolist()
+        else:
+            values = raw_values[take]
+        na_value = spec.decode_attr(column.attrs.get("na-value", None))
+        write_masked(parent, name, values, mask, enc, na_value=na_value)
+        return
+
+    values = read_str_all(column)
+    write_string_array(parent, name, [values[i] for i in take])
 
 
 def _write_matrices(
     dst: Any,
     roots: List[Any],
     col_maps: List[np.ndarray],
+    row_counts: List[int],
     n_obs: int,
     n_var: int,
     chunk_rows: int,
@@ -803,6 +1027,7 @@ def _write_matrices(
             "X",
             [r["X"] for r in roots],
             col_maps,
+            row_counts,
             n_obs,
             n_var,
             chunk_rows,
@@ -828,6 +1053,7 @@ def _write_matrices(
             name,
             [r["layers"][name] for r in roots],
             col_maps,
+            row_counts,
             n_obs,
             n_var,
             chunk_rows,

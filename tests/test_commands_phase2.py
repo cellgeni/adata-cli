@@ -450,3 +450,246 @@ def test_concat_rejects_an_unknown_merge_strategy(tmp_path):
     )
     assert result.exit_code == 1
     assert "must be one of" in _out(result)
+
+
+# ---------------------------------------------------------------------------
+# regressions from review of #7
+
+
+@pytest.mark.parametrize("layout", ["csr", "csc"])
+def test_concat_preserves_sparse_layout(tmp_path, layout):
+    """CSC inputs were silently dropped, leaving an output with no X."""
+    rng = np.random.default_rng(4)
+    mats = [
+        sparse.csr_matrix(rng.poisson(1.0, (2, 3)).astype("float32"))
+        for _ in range(2)
+    ]
+    if layout == "csc":
+        mats = [m.tocsc() for m in mats]
+
+    paths = []
+    for i, (mat, cells) in enumerate(zip(mats, (["c1", "c2"], ["c3", "c4"]))):
+        obj = ad.AnnData(
+            X=mat,
+            obs=pd.DataFrame(index=cells),
+            var=pd.DataFrame(index=["g1", "g2", "g3"]),
+        )
+        obj.layers["counts"] = mat.copy()
+        path = tmp_path / f"{i}.h5ad"
+        obj.write_h5ad(path)
+        paths.append(str(path))
+
+    out = tmp_path / "m.h5ad"
+    result = runner.invoke(app, ["concat", *paths, "-o", str(out)])
+    assert result.exit_code == 0, _out(result)
+
+    got = ad.read_h5ad(out)
+    assert got.X is not None, "X must not be silently omitted"
+    assert type(got.X).__name__ == f"{layout}_matrix"
+    assert "counts" in got.layers
+
+    expected = ad.concat([ad.read_h5ad(p) for p in paths])
+    assert np.array_equal(
+        np.asarray(got.X.todense()), np.asarray(expected.X.todense())
+    )
+
+
+def test_concat_rejects_mixed_sparse_encodings_before_writing(tmp_path):
+    """A mismatch must fail loudly, and leave no half-written store behind."""
+    rng = np.random.default_rng(5)
+    base = rng.poisson(1.0, (2, 3)).astype("float32")
+    for i, (mat, cells) in enumerate(
+        zip(
+            [sparse.csr_matrix(base), sparse.csc_matrix(base)],
+            (["c1", "c2"], ["c3", "c4"]),
+        )
+    ):
+        ad.AnnData(
+            X=mat,
+            obs=pd.DataFrame(index=cells),
+            var=pd.DataFrame(index=["g1", "g2", "g3"]),
+        ).write_h5ad(tmp_path / f"{i}.h5ad")
+
+    out = tmp_path / "m.h5ad"
+    result = runner.invoke(
+        app,
+        ["concat", str(tmp_path / "0.h5ad"), str(tmp_path / "1.h5ad"),
+         "-o", str(out)],
+    )
+    assert result.exit_code == 1
+    assert "same encoding" in _out(result)
+    assert not out.exists(), "a rejected concat must not leave a partial store"
+
+
+def test_concat_rejects_duplicate_default_keys(tmp_path):
+    """Same filename in different directories made --label unreadable."""
+    for sub, cells in (("run1", ["c1", "c2"]), ("run2", ["c3", "c4"])):
+        (tmp_path / sub).mkdir()
+        ad.AnnData(
+            X=np.ones((2, 2), dtype="float32"),
+            obs=pd.DataFrame(index=cells),
+            var=pd.DataFrame(index=["g1", "g2"]),
+        ).write_h5ad(tmp_path / sub / "sample.h5ad")
+
+    args = [
+        "concat",
+        str(tmp_path / "run1" / "sample.h5ad"),
+        str(tmp_path / "run2" / "sample.h5ad"),
+        "-o", str(tmp_path / "m.h5ad"),
+    ]
+    result = runner.invoke(app, [*args, "--label", "origin"])
+    assert result.exit_code == 1
+    assert "--keys" in _out(result)
+
+    # Naming them explicitly resolves it.
+    result = runner.invoke(
+        app, [*args, "--label", "origin", "--keys", "run1,run2"]
+    )
+    assert result.exit_code == 0, _out(result)
+    assert list(ad.read_h5ad(tmp_path / "m.h5ad").obs["origin"]) == [
+        "run1", "run1", "run2", "run2"
+    ]
+
+
+def test_concat_rejects_duplicate_explicit_keys(tmp_path):
+    a = _make(tmp_path / "a.h5ad", ["c1"], ["g1"], batch="A")
+    b = _make(tmp_path / "b.h5ad", ["c2"], ["g1"], batch="B")
+    result = runner.invoke(
+        app,
+        ["concat", str(a), str(b), "-o", str(tmp_path / "m.h5ad"),
+         "--keys", "same,same"],
+    )
+    assert result.exit_code == 1
+    assert "unique" in _out(result)
+
+
+def test_concat_uns_merge_compares_values_not_layout(tmp_path):
+    """Non-dict uns groups were compared by child key names alone.
+
+    A dataframe is the case that matters: two with identical columns but
+    different values looked equal, so `same` copied the first input's and kept
+    metadata the strategy was meant to reject. Dict groups already recursed,
+    so they never showed the bug.
+    """
+    for name, scores in (("a", [1.0, 2.0]), ("b", [9.0, 9.0])):
+        obj = ad.AnnData(
+            X=np.ones((2, 2), dtype="float32"),
+            obs=pd.DataFrame(index=["c1", "c2"] if name == "a" else ["c3", "c4"]),
+            var=pd.DataFrame(index=["g1", "g2"]),
+        )
+        obj.uns["stats"] = pd.DataFrame(
+            {"score": scores}, index=["g1", "g2"]
+        )
+        obj.uns["constant"] = pd.DataFrame(
+            {"score": [7.0, 7.0]}, index=["g1", "g2"]
+        )
+        obj.write_h5ad(tmp_path / f"{name}.h5ad")
+
+    out = tmp_path / "m.h5ad"
+    result = runner.invoke(
+        app,
+        ["concat", str(tmp_path / "a.h5ad"), str(tmp_path / "b.h5ad"),
+         "-o", str(out), "--uns-merge", "same"],
+    )
+    assert result.exit_code == 0, _out(result)
+
+    uns = ad.read_h5ad(out).uns
+    assert "stats" not in uns, "differing dataframes must not survive 'same'"
+    assert "constant" in uns, "identical dataframes should survive"
+
+
+def test_concat_keeps_nullable_var_columns_nullable(tmp_path):
+    """A merged nullable var column kept its dtype instead of becoming text."""
+    for name, cells in (("a", ["c1", "c2"]), ("b", ["c3", "c4"])):
+        ad.AnnData(
+            X=np.ones((2, 2), dtype="float32"),
+            obs=pd.DataFrame(index=cells),
+            var=pd.DataFrame(
+                {"nullable": pd.array([1, None], dtype="Int32")},
+                index=["g1", "g2"],
+            ),
+        ).write_h5ad(tmp_path / f"{name}.h5ad")
+
+    out = tmp_path / "m.h5ad"
+    result = runner.invoke(
+        app,
+        ["concat", str(tmp_path / "a.h5ad"), str(tmp_path / "b.h5ad"),
+         "-o", str(out), "--merge", "same"],
+    )
+    assert result.exit_code == 0, _out(result)
+
+    var = ad.read_h5ad(out).var
+    assert str(var["nullable"].dtype) == "Int32"
+    assert var["nullable"].isna().tolist() == [False, True]
+
+
+def test_import_image_refuses_to_clobber_a_dataframe(tmp_path, sample):
+    """`import image ... obs` deleted the obs dataframe outright."""
+    from PIL import Image
+
+    png = tmp_path / "tissue.png"
+    Image.fromarray(np.zeros((8, 8, 3), dtype="uint8")).save(png)
+
+    result = runner.invoke(
+        app, ["import", "image", str(sample), "obs", str(png), "--inplace"]
+    )
+    assert result.exit_code == 1
+    assert "must hold a dataframe" in _out(result)
+
+    # The store is untouched.
+    assert ad.read_h5ad(sample).shape == (4, 2)
+
+
+def test_import_image_validates_axis_bound_paths(tmp_path, sample):
+    from PIL import Image
+
+    png = tmp_path / "tissue.png"
+    Image.fromarray(np.zeros((8, 8, 3), dtype="uint8")).save(png)
+
+    # 8 rows against 4 obs.
+    result = runner.invoke(
+        app, ["import", "image", str(sample), "obsm/bad", str(png), "--inplace"]
+    )
+    assert result.exit_code == 1
+    assert "mismatch" in _out(result)
+
+    # Unstructured destinations are fine.
+    result = runner.invoke(
+        app,
+        ["import", "image", str(sample), "uns/spatial/hires", str(png),
+         "--inplace"],
+    )
+    assert result.exit_code == 0, _out(result)
+    assert ad.read_h5ad(sample).uns["spatial"]["hires"].shape == (8, 8, 3)
+
+
+def test_import_dataframe_validates_raw_var_against_raw(tmp_path):
+    """raw/var was replaceable at any length, desynchronising it from raw/X."""
+    obj = ad.AnnData(
+        X=np.ones((2, 4), dtype="float32"),
+        obs=pd.DataFrame(index=["c1", "c2"]),
+        var=pd.DataFrame(index=["g1", "g2", "g3", "g4"]),
+    )
+    obj.raw = obj
+    src = tmp_path / "withraw.h5ad"
+    obj.write_h5ad(src)
+
+    wrong = tmp_path / "two.csv"
+    wrong.write_text("_index,x\ng1,1\ng2,2\n")
+    result = runner.invoke(
+        app,
+        ["import", "dataframe", str(src), "raw/var", str(wrong),
+         "--inplace", "-i", "_index"],
+    )
+    assert result.exit_code == 1
+    assert "raw has 4 variables" in _out(result)
+
+    right = tmp_path / "four.csv"
+    right.write_text("_index,x\ng1,1\ng2,2\ng3,3\ng4,4\n")
+    result = runner.invoke(
+        app,
+        ["import", "dataframe", str(src), "raw/var", str(right),
+         "--inplace", "-i", "_index"],
+    )
+    assert result.exit_code == 0, _out(result)
+    assert list(ad.read_h5ad(src).raw.var["x"]) == [1, 2, 3, 4]

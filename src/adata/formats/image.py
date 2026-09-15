@@ -8,6 +8,7 @@ from PIL import Image
 from rich.console import Console
 
 from adata.elements.write import write_dense, write_mapping
+from adata.formats.validate import DATAFRAME_PATHS, validate_dimensions
 from adata.formats.common import _resolve
 from adata.storage import is_dataset
 from adata.util.path import norm_path
@@ -60,6 +61,17 @@ def import_image(root: Any, obj: str, input_file: Path, console: Console) -> Non
 
     if arr.ndim not in (2, 3):
         raise ValueError(f"Expected a 2D or 3D image; got shape {arr.shape}.")
+
+    if obj in DATAFRAME_PATHS:
+        raise ValueError(
+            f"'{obj}' must hold a dataframe; writing an image there would "
+            "corrupt the store. Images belong somewhere unstructured, such as "
+            "'uns/spatial/hires'."
+        )
+
+    # An image's height is not an axis, so a path that implies one is almost
+    # certainly a mistake -- but check it rather than assume.
+    validate_dimensions(root, obj, arr.shape, console)
 
     parts = obj.split("/")
     parent = root

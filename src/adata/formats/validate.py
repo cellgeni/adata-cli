@@ -12,12 +12,91 @@ OBS_AXIS_PREFIXES = ("obs", "obsm/", "obsp/")
 VAR_AXIS_PREFIXES = ("var", "varm/", "varp/")
 MATRIX_PREFIXES = ("X", "layers/")
 
+#: Paths that must hold a dataframe, so writing an array there would corrupt
+#: the store rather than merely mis-size it.
+DATAFRAME_PATHS = frozenset({"obs", "var", "raw/var"})
+
 
 def _get_axis_length(root: Any, axis: str) -> Optional[int]:
     try:
         return axis_len(root, axis)
     except Exception:
         return None
+
+
+def _raw_var_length(root: Any) -> Optional[int]:
+    """Number of variables in `raw`, which is its own axis.
+
+    Taken from `raw/X`'s declared width where possible: that is the invariant
+    a replacement `raw/var` has to keep, and it usually differs from the main
+    object's var count.
+    """
+    if "raw" not in root:
+        return None
+    raw = root["raw"]
+
+    if "X" in raw:
+        shape = raw["X"].attrs.get("shape", None)
+        if shape is not None and len(shape) >= 2:
+            return int(shape[1])
+        x_shape = getattr(raw["X"], "shape", None)
+        if x_shape is not None and len(x_shape) >= 2:
+            return int(x_shape[1])
+
+    if "var" in raw:
+        try:
+            return axis_len(raw, "var")
+        except Exception:
+            return None
+    return None
+
+
+def _validate_raw(
+    root: Any, obj_path: str, data_shape: Tuple[int, ...], console: Console
+) -> bool:
+    """Validate a path under `raw/`. Returns whether the path was recognised."""
+    if obj_path == "raw" or not obj_path.startswith("raw/"):
+        return False
+
+    n_raw_var = _raw_var_length(root)
+    n_obs = _get_axis_length(root, "obs")
+    rest = obj_path[len("raw/"):]
+
+    if rest == "var":
+        if n_raw_var is not None and data_shape[0] != n_raw_var:
+            raise ValueError(
+                f"Row count mismatch: input has {data_shape[0]} rows, but raw "
+                f"has {n_raw_var} variables. Replacing raw/var with a "
+                "different length would leave raw/X inconsistent."
+            )
+        return True
+
+    if rest == "X":
+        if len(data_shape) < 2:
+            raise ValueError(
+                f"raw/X requires 2D data, got {len(data_shape)}D."
+            )
+        if n_obs is not None and data_shape[0] != n_obs:
+            raise ValueError(
+                f"First dimension mismatch: input has {data_shape[0]} rows, "
+                f"but obs has {n_obs} cells."
+            )
+        if n_raw_var is not None and data_shape[1] != n_raw_var:
+            raise ValueError(
+                f"Second dimension mismatch: input has {data_shape[1]} columns, "
+                f"but raw has {n_raw_var} variables."
+            )
+        return True
+
+    if rest.startswith("varm/"):
+        if n_raw_var is not None and data_shape[0] != n_raw_var:
+            raise ValueError(
+                f"First dimension mismatch: input has {data_shape[0]} rows, "
+                f"but raw has {n_raw_var} variables."
+            )
+        return True
+
+    return False
 
 
 def validate_dimensions(
@@ -27,6 +106,10 @@ def validate_dimensions(
     console: Console,
 ) -> None:
     obj_path = norm_path(obj_path)
+
+    if _validate_raw(root, obj_path, data_shape, console):
+        return
+
     n_obs = _get_axis_length(root, "obs")
     n_var = _get_axis_length(root, "var")
 
