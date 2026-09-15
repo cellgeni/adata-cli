@@ -12,8 +12,11 @@ overkill.
 ## Install
 
 ```bash
-pip install adata-cli
+pip install pyadata-cli
 ```
+
+The command is `adata`. The distribution is named `pyadata-cli` because
+`adata-cli` was already taken on PyPI by an unrelated project.
 
 Or run it without installing anything:
 

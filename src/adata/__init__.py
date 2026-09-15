@@ -3,7 +3,7 @@
 from importlib.metadata import PackageNotFoundError, version as _version
 
 try:
-    __version__ = _version("adata-cli")
+    __version__ = _version("pyadata-cli")
 except PackageNotFoundError:  # pragma: no cover - running from a source tree
     __version__ = "0.0.0+unknown"
 

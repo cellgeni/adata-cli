@@ -1,5 +1,8 @@
 [project]
-name = "adata-cli"
+# The short name `adata-cli` was taken on PyPI by an unrelated project,
+# so the distribution is published as `pyadata-cli`. The import package
+# and the command are both still `adata`.
+name = "pyadata-cli"
 version = "0.5.0"
 description = "Streaming CLI for exploring and editing large AnnData .h5ad and .zarr stores"
 readme = "README.md"

@@ -10,7 +10,8 @@ AnnData files, and added four commands.
 
 ### Renamed
 
-- Distribution `adata-cli`, import package `adata`, command `adata`.
+- Distribution `pyadata-cli` on PyPI (the short name was already taken by
+  an unrelated project), import package `adata`, command `adata`.
 - `info` is now `view`.
 - The `h5ad` command and the `info` subcommand remain as aliases that warn and
   then run normally. **Both are removed in 1.0.0.**
