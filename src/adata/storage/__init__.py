@@ -229,8 +229,27 @@ def _normalize_attr_value(value: Any, target_backend: str) -> Any:
 
 
 def copy_attrs(src_attrs: Any, dst_attrs: Any, *, target_backend: str) -> None:
-    for k, v in src_attrs.items():
-        dst_attrs[k] = _normalize_attr_value(v, target_backend)
+    """Copy attributes across, normalising values for the target backend.
+
+    Written in one go on Zarr. Each `attrs[k] = v` there persists the whole
+    metadata document through zarr's sync-over-async bridge, so setting them
+    one at a time means a separate round trip per attribute -- slow, and the
+    place a `split` over many groups was observed to wedge in CI.
+    """
+    normalized = {
+        str(k): _normalize_attr_value(v, target_backend)
+        for k, v in src_attrs.items()
+    }
+    if not normalized:
+        return
+
+    put = getattr(dst_attrs, "put", None)
+    if target_backend == "zarr" and callable(put):
+        put({**dict(dst_attrs), **normalized})
+        return
+
+    for k, v in normalized.items():
+        dst_attrs[k] = v
 
 
 def dataset_create_kwargs(
