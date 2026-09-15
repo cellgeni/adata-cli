@@ -511,7 +511,7 @@ class TestSubsetCommand:
         assert result.exit_code == 1
         # Check both stdout and stderr since Console uses stderr=True
         output_text = result.stdout + result.stderr
-        assert "At least one of --obs or --var must be provided" in output_text
+        assert "--obs-query" in output_text
 
     def test_subset_command_chunk_rows(self, sample_h5ad_file, temp_dir):
         """Test subset command with custom chunk size."""
