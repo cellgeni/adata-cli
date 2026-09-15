@@ -508,6 +508,11 @@ def split(
     chunk_rows: int = typer.Option(
         1024, "--chunk", "-C", help="Row chunk size for dense matrices"
     ),
+    zarr_format: Optional[int] = typer.Option(
+        None,
+        "--zarr-format",
+        help="Zarr spec version to write (defaults to the source store's)",
+    ),
 ) -> None:
     """
     Split a store into one file per distinct value of a column.
@@ -523,6 +528,10 @@ def split(
         console.print("[bold red]Error:[/] --axis must be 'obs' or 'var'.")
         raise typer.Exit(code=1)
 
+    if zarr_format is not None and zarr_format not in (2, 3):
+        console.print("[bold red]Error:[/] --zarr-format must be 2 or 3.")
+        raise typer.Exit(code=1)
+
     try:
         split_store(
             file=file,
@@ -535,6 +544,7 @@ def split(
             manifest=manifest,
             min_size=min_size,
             chunk_rows=chunk_rows,
+            zarr_format=zarr_format,
         )
     except Exception as e:
         console.print(f"[bold red]Error:[/] {e}")

@@ -51,7 +51,11 @@ jobs:
 
   publish-testpypi:
     needs: [build]
-    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    if: |
+      always()
+      && needs.build.result == 'success'
+      && github.event_name == 'workflow_dispatch'
+      && inputs.target == 'testpypi'
     runs-on: ubuntu-latest
     environment: testpypi
     permissions:
@@ -67,7 +71,16 @@ jobs:
 
   publish-pypi:
     needs: [build, check-version]
-    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    # check-version only runs for tags, and GitHub skips a job whose
+    # dependency was skipped -- so without always() a manual dispatch to PyPI
+    # would never publish. Success of build is therefore asserted explicitly,
+    # and check-version is accepted as either passed or not applicable.
+    if: |
+      always()
+      && needs.build.result == 'success'
+      && (needs.check-version.result == 'success' || needs.check-version.result == 'skipped')
+      && (startsWith(github.ref, 'refs/tags/')
+          || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi'))
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

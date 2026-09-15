@@ -233,3 +233,10 @@ New Zarr stores follow the source store's version, so a v2 input is not
 silently upgraded. `--zarr-format 2|3` on `create`, `subset`, `split` and
 `concat` overrides that. Writing a Zarr store from an `.h5ad` source defaults
 to v3.
+
+```bash
+adata create out.zarr --n-obs 100 --n-var 50 --zarr-format 2
+adata subset data.zarr -o out.zarr --obs keep.txt --zarr-format 3
+adata split data.zarr --by sample -o parts/ --suffix .zarr --zarr-format 3
+adata concat a.zarr b.zarr -o merged.zarr --zarr-format 3
+```
