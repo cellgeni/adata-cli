@@ -13,12 +13,38 @@ import re
 from pathlib import Path
 from typing import Iterator, List, Tuple
 
+import click
 import pytest
-from typer.testing import CliRunner
+from typer.main import get_command
 
 from adata.cli import app
 
-runner = CliRunner()
+#: The real Click command tree. Options are read from here rather than from
+#: rendered `--help` text: Rich wraps long option names at the terminal width,
+#: so a help-scraping check passes on a wide terminal and fails in CI.
+ROOT = get_command(app)
+
+
+def _lookup(path: List[str]) -> click.Command:
+    """Resolve a subcommand path, or raise KeyError naming what is missing."""
+    command: click.Command = ROOT
+    for name in path:
+        if not isinstance(command, click.Group):
+            raise KeyError(f"{name!r}: {path} is not a group")
+        found = command.get_command(click.Context(command), name)
+        if found is None:
+            raise KeyError(f"{name!r} is not a command of {path}")
+        command = found
+    return command
+
+
+def _options(command: click.Command) -> set:
+    """Every option string the command accepts, long and short."""
+    names = set()
+    for param in command.params:
+        names.update(param.opts)
+        names.update(param.secondary_opts)
+    return names
 
 REPO = Path(__file__).resolve().parent.parent
 DOCS = [REPO / "README.md"] + sorted((REPO / "docs").glob("*.md"))
@@ -100,19 +126,22 @@ def test_documented_invocations_use_real_commands_and_options(line, source):
     path = _command_path(tokens)
     assert path, f"{source}: could not identify a command in {line!r}"
 
-    result = runner.invoke(app, [*path, "--help"])
-    assert result.exit_code == 0, f"{source}: `{' '.join(path)}` is not a command"
+    try:
+        command = _lookup(path)
+    except KeyError as exc:
+        pytest.fail(f"{source}: `{line}` -- {exc}")
 
-    help_text = result.stdout
+    accepted = _options(command)
     for token in tokens[len(path) + 1 :]:
         if not token.startswith("--"):
             continue
         option = token.split("=")[0]
         if _PLACEHOLDER.search(option):
             continue
-        assert option in help_text, (
+        assert option in accepted, (
             f"{source}: `{line}` uses {option}, which `adata "
-            f"{' '.join(path)} --help` does not offer"
+            f"{' '.join(path)}` does not accept. Accepted: "
+            f"{', '.join(sorted(o for o in accepted if o.startswith('--')))}"
         )
 
 
@@ -124,11 +153,11 @@ def test_short_options_in_the_docs_exist_too():
         path = _command_path(tokens)
         if not path:
             continue
-        help_text = runner.invoke(app, [*path, "--help"]).stdout
+        accepted = _options(_lookup(path))
         for token in tokens[len(path) + 1 :]:
             if not re.fullmatch(r"-[A-Za-z]", token):
                 continue
-            if token not in help_text:
+            if token not in accepted:
                 problems.append(f"{source}: `{line}` uses {token}")
     assert not problems, "\n".join(problems)
 
@@ -173,9 +202,11 @@ def test_prose_claims_were_found():
     ids=[f"{src}:{cmd}{opt}" for opt, cmd, src in PROSE_CLAIMS],
 )
 def test_options_claimed_in_prose_exist(option, command, source):
-    result = runner.invoke(app, [command, "--help"])
-    assert result.exit_code == 0, f"{source}: `{command}` is not a command"
-    assert option in result.stdout, (
+    try:
+        resolved = _lookup([command])
+    except KeyError as exc:
+        pytest.fail(f"{source}: {exc}")
+    assert option in _options(resolved), (
         f"{source}: prose says {command} supports {option}, "
-        f"but `adata {command} --help` does not offer it"
+        f"but the command does not accept it"
     )
