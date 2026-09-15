@@ -1,6 +1,8 @@
-"""Pytest configuration and fixtures for h5ad tests."""
+"""Pytest configuration and fixtures for adata tests."""
 
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any, Optional, Sequence
 import tempfile
 import pytest
 import h5py
@@ -222,3 +224,77 @@ def sample_legacy_v010_h5ad(temp_dir):
         f.create_dataset("X", data=X)
 
     return file_path
+
+
+# ---------------------------------------------------------------------------
+# Shared builders
+#
+# The fixtures above are hand-rolled h5py, one per shape of store. These
+# builders exist so a test can ask for a store containing a particular element
+# on a particular backend without repeating that construction, and so the same
+# test body can run against HDF5, Zarr v2 and Zarr v3.
+
+from adata.elements import write as ew
+from adata.storage import open_store
+
+
+BACKENDS = ["h5ad", "zarr2", "zarr3"]
+
+
+def backend_path(tmp_dir: Path, backend: str, stem: str = "store") -> Path:
+    """Path with the extension that makes `detect_backend` pick `backend`."""
+    return tmp_dir / (f"{stem}.h5ad" if backend == "h5ad" else f"{stem}.zarr")
+
+
+def backend_zarr_format(backend: str) -> Optional[int]:
+    return {"zarr2": 2, "zarr3": 3}.get(backend)
+
+
+@pytest.fixture(params=BACKENDS)
+def backend(request) -> str:
+    """Run a test once per storage backend, including both Zarr versions."""
+    return request.param
+
+
+@contextmanager
+def open_new(path: Path, backend: str):
+    """Open a fresh store for writing on the given backend."""
+    with open_store(path, "w", zarr_format=backend_zarr_format(backend)) as store:
+        yield store.root
+
+
+def make_skeleton(
+    root: Any,
+    obs_names: Sequence[str] = ("c1", "c2", "c3"),
+    var_names: Sequence[str] = ("g1", "g2"),
+) -> None:
+    """Write the obs/var frames and mapping groups every store needs."""
+    ew.write_dataframe_header(root, "obs", list(obs_names), [])
+    ew.write_dataframe_header(root, "var", list(var_names), [])
+    ew.ensure_anndata_skeleton(root)
+
+
+@pytest.fixture
+def new_store(temp_dir, backend):
+    """Factory returning ``(path, opener)`` for a store on the current backend.
+
+    The opener is a context manager so a test can write, close, and reopen --
+    which matters on Zarr, where the consolidated metadata index is only
+    rewritten on close.
+    """
+
+    def _make(stem: str = "store"):
+        path = backend_path(temp_dir, backend, stem)
+
+        @contextmanager
+        def _open(mode: str = "a"):
+            with open_store(
+                path, mode, zarr_format=backend_zarr_format(backend)
+            ) as store:
+                yield store.root
+
+        with open_new(path, backend) as root:
+            make_skeleton(root)
+        return path, _open
+
+    return _make

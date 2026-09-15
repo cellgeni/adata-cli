@@ -43,7 +43,13 @@ class Store:
             # the index -- anndata included -- keeps using the stale copy and
             # cannot see them, so the write looks like a silent no-op.
             try:
-                zarr.consolidate_metadata(self.root.store, path=self.root.path)
+                with warnings.catch_warnings():
+                    # zarr notes that consolidated metadata is not part of the
+                    # v3 spec. We write it deliberately, because anndata does
+                    # and because without it our writes are invisible to
+                    # readers that trust the index.
+                    warnings.simplefilter("ignore")
+                    zarr.consolidate_metadata(self.root.store, path=self.root.path)
             except Exception:
                 return
 
@@ -228,7 +234,11 @@ def copy_attrs(src_attrs: Any, dst_attrs: Any, *, target_backend: str) -> None:
 
 
 def dataset_create_kwargs(
-    src: Any, *, target_backend: str, zarr_format: Optional[int] = None
+    src: Any,
+    *,
+    target_backend: str,
+    zarr_format: Optional[int] = None,
+    dst_parent: Any = None,
 ) -> dict:
     """Derive creation kwargs that carry a source's layout onto a new dataset.
 
@@ -236,7 +246,11 @@ def dataset_create_kwargs(
     can express them; codecs that do not survive the crossing are dropped
     rather than forwarded into an error.
     """
+    # Prefer the destination's own version over anything the caller guessed,
+    # so a call site that forgets to pass one still behaves correctly.
     kw_target = zarr_format
+    if dst_parent is not None:
+        kw_target = zarr_format_of(dst_parent)
     kw: dict = {}
     chunks = getattr(src, "chunks", None)
     if chunks is not None:
@@ -253,42 +267,53 @@ def dataset_create_kwargs(
             kw["fillvalue"] = src.fillvalue
     if target_backend == "zarr" and is_zarr_array(src):
         src_zarr_format = getattr(getattr(src, "metadata", None), "zarr_format", None)
-        if src_zarr_format == 3:
-            compressors = None
+        target_format = _target_zarr_format(kw_target)
+        # Only when both versions are known and equal can codecs travel.
+        same_version = (
+            target_format is not None and src_zarr_format == target_format
+        )
+
+        # Codecs only travel between stores of the same Zarr version: v2 holds
+        # numcodecs objects, v3 holds its own codec classes, and neither
+        # accepts the other's. Across versions the target's default is used
+        # rather than a translation that fails at creation time.
+        if same_version:
+            if src_zarr_format == 3:
+                try:
+                    compressors = getattr(src, "compressors", None)
+                except Exception:
+                    compressors = None
+                if compressors is not None:
+                    kw["compressors"] = compressors
+            else:
+                try:
+                    compressor = getattr(src, "compressor", None)
+                except Exception:
+                    compressor = None
+                if compressor is not None:
+                    kw["compressor"] = compressor
+
             try:
-                compressors = getattr(src, "compressors", None)
+                filters = getattr(src, "filters", None)
             except Exception:
-                compressors = None
-            if compressors is not None:
-                kw["compressors"] = compressors
-        else:
-            try:
-                compressor = getattr(src, "compressor", None)
-            except Exception:
-                compressor = None
-            if compressor is not None:
-                kw["compressor"] = compressor
-        try:
-            filters = getattr(src, "filters", None)
-        except Exception:
-            filters = None
-        if filters:
-            # A v2 string array carries VLenUTF8 in `filters`; a v3 array
-            # rejects it (`Expected an ArrayArrayCodec`) because its string
-            # dtype encodes variable length itself.
-            if not (_target_zarr_format(kw_target) == 3 and _is_string_src(src)):
+                filters = None
+            # A v2 string array carries VLenUTF8 in `filters`; the v3 string
+            # dtype encodes variable length itself and rejects it.
+            if filters and not _is_string_src(src):
                 kw["filters"] = filters
+
         try:
             shards = getattr(src, "shards", None)
         except Exception:
             shards = None
-        if shards is not None:
+        if shards is not None and target_format == 3:
             kw["shards"] = shards
+
         try:
             fill_value = getattr(src, "fill_value", None)
         except Exception:
             fill_value = None
-        if fill_value is not None:
+        if fill_value is not None and not _is_string_src(src):
             kw["fill_value"] = fill_value
     return kw
 
@@ -381,7 +406,13 @@ def create_dataset(
 
 
 def _target_zarr_format(zarr_format: Optional[int]) -> Optional[int]:
-    return zarr_format if zarr_format is not None else 3
+    """The destination's Zarr version, or None when the caller did not say.
+
+    Deliberately not defaulting to 3: guessing meant v3-only options such as
+    sharding were forwarded into v2 arrays, which reject them outright.
+    Unknown means "carry nothing version-specific".
+    """
+    return zarr_format
 
 
 def _is_string_src(src: Any) -> bool:

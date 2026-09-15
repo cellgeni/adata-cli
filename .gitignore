@@ -9,3 +9,4 @@ coverage.xml
 htmlcov/
 .pytest_cache/
 pytest-results*.xml
+compat-results.xml

@@ -83,6 +83,7 @@ adata concat per_sample/*.h5ad -o merged.h5ad --join outer --label sample
 - [Get started](docs/GET_STARTED.md) — a short tutorial
 - [Command reference](docs/COMMANDS.md) — every command and flag
 - [Element spec: HDF5](docs/ELEMENTS_h5ad.md) / [Zarr](docs/ELEMENTS_zarr.md) — the on-disk format, and what this tool does with it
+- [Testing](docs/TESTING.md) — how the suite is organised, and how compatibility is verified against six anndata releases
 - [Changelog](CHANGELOG.md)
 
 ## Docker

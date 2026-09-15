@@ -34,6 +34,8 @@ docker run --rm -it -v /path/to/data:/data \
   out in `.h5ad`, and what this tool does with it.
 - **[Element spec: Zarr](ELEMENTS_zarr.md)** — the same for `.zarr`, including
   the v2/v3 differences.
+- **[Testing](TESTING.md)** — how the suite is organised, and how compatibility
+  is verified against six real anndata releases.
 
 ## At a glance
 
@@ -53,7 +55,9 @@ adata import sparse new.h5ad X counts.mtx --inplace
 ## Format support
 
 Every AnnData on-disk layout is readable, from anndata 0.7.x through the
-current spec; everything written is in the current spec. Both backends are
+current spec; everything written is in the current spec. This is verified in
+CI against stores written by anndata 0.8, 0.9, 0.10, 0.11, 0.12 and 0.13, in
+both formats. Both backends are
 supported in both directions, so `adata subset in.h5ad -o out.zarr` converts as
 it filters.
 
