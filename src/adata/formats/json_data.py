@@ -8,10 +8,18 @@ from typing import Any, Dict
 import numpy as np
 from rich.console import Console
 
-from h5ad.core.read import decode_str_array
-from h5ad.formats.common import _check_json_exportable, _resolve
-from h5ad.storage import create_dataset, is_dataset, is_group
-from h5ad.util.path import norm_path
+from adata.core.read import decode_str_array
+from adata.elements import spec
+from adata.formats.common import _check_json_exportable, _resolve
+from adata.elements.write import (
+    write_dense,
+    write_mapping,
+    write_null,
+    write_scalar,
+    write_string_array,
+)
+from adata.storage import create_dataset, is_dataset, is_group
+from adata.util.path import norm_path
 
 
 def export_json(
@@ -71,6 +79,12 @@ def _pyify(value: Any, max_elements: int) -> Any:
 
 
 def _dataset_to_jsonable(ds: Any, max_elements: int) -> Any:
+    if spec.encoding_type(ds) == spec.NULL:
+        # A null is a placeholder -- an h5py.Empty or a 0-d zarr bool -- whose
+        # stored value is meaningless. Reading it would emit that placeholder
+        # rather than restoring the None it represents.
+        return None
+
     if ds.shape == ():
         v = ds[()]
         return _pyify(v, max_elements=max_elements)
@@ -128,28 +142,55 @@ def import_json(
 
 
 def _write_json_to_group(parent: Any, name: str, value: Any) -> None:
+    """Write one JSON value as the AnnData element that best represents it."""
     if isinstance(value, dict):
-        group = parent.create_group(name)
+        group = write_mapping(parent, name, replace=True)
         for k, v in value.items():
             _write_json_to_group(group, k, v)
-    elif isinstance(value, list):
-        try:
-            arr = np.array(value)
-            if arr.dtype.kind in ("U", "O"):
-                arr = np.array(value, dtype="S")
-            create_dataset(parent, name, data=arr)
-        except (ValueError, TypeError):
-            create_dataset(parent, name, data=json.dumps(value).encode("utf-8"))
-    elif isinstance(value, str):
-        create_dataset(parent, name, data=np.array([value], dtype="S"))
-    elif isinstance(value, bool):
-        create_dataset(parent, name, data=np.array(value, dtype=bool))
-    elif isinstance(value, int):
-        create_dataset(parent, name, data=np.array(value, dtype=np.int64))
-    elif isinstance(value, float):
-        create_dataset(parent, name, data=np.array(value, dtype=np.float64))
-    elif value is None:
-        ds = create_dataset(parent, name, data=np.array([], dtype="S"))
-        ds.attrs["_is_none"] = True
-    else:
-        raise ValueError(f"Cannot convert JSON value of type {type(value).__name__}")
+        return
+
+    if value is None:
+        write_null(parent, name, replace=True)
+        return
+
+    if isinstance(value, str):
+        write_scalar(parent, name, value, replace=True)
+        return
+
+    if isinstance(value, (bool, int, float)):
+        write_scalar(parent, name, value, replace=True)
+        return
+
+    if isinstance(value, list):
+        _write_json_list(parent, name, value)
+        return
+
+    raise ValueError(f"Cannot convert JSON value of type {type(value).__name__}")
+
+
+def _write_json_list(parent: Any, name: str, value: list) -> None:
+    """Write a JSON array as a string or numeric array where it is uniform.
+
+    Ragged or mixed lists have no array representation in the spec, so they
+    are stored as their JSON text rather than silently reshaped.
+    """
+    if all(isinstance(v, str) for v in value):
+        write_string_array(parent, name, value, replace=True)
+        return
+
+    try:
+        arr = np.array(value)
+    except (ValueError, TypeError):
+        arr = None
+
+    if arr is not None and arr.dtype.kind in ("b", "i", "u", "f"):
+        write_dense(parent, name, arr, replace=True)
+        return
+
+    if arr is not None and arr.dtype.kind in ("U", "S", "O", "T"):
+        # Pass the shaped array through: flattening would turn a nested list
+        # such as [["a","b"],["c","d"]] into a length-4 vector.
+        write_string_array(parent, name, arr, replace=True)
+        return
+
+    write_scalar(parent, name, json.dumps(value), replace=True)

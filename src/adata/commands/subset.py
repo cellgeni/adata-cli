@@ -1,4 +1,4 @@
-from h5ad.core.subset import (
+from adata.core.subset import (
     _read_name_file,
     indices_from_name_set,
     subset_axis_group,

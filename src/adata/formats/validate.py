@@ -4,8 +4,8 @@ from typing import Optional, Tuple, Any
 
 from rich.console import Console
 
-from h5ad.core.info import axis_len
-from h5ad.util.path import norm_path
+from adata.core.info import axis_len
+from adata.util.path import norm_path
 
 
 OBS_AXIS_PREFIXES = ("obs", "obsm/", "obsp/")

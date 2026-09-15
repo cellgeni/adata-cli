@@ -5,7 +5,7 @@ from pathlib import Path
 import h5py
 import pytest
 
-from h5ad.storage import open_store
+from adata.storage import open_store
 
 
 def _make_minimal_h5ad(path: Path) -> None:
@@ -25,7 +25,7 @@ def test_open_store_read_warns_for_missing_root_attrs(temp_dir: Path) -> None:
     file_path = temp_dir / "missing_root_attrs.h5ad"
     _make_minimal_h5ad(file_path)
 
-    with pytest.warns(UserWarning, match="missing required AnnData attrs"):
+    with pytest.warns(UserWarning, match="missing or invalid AnnData attrs"):
         with open_store(file_path, "r"):
             pass
 

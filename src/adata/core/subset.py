@@ -17,8 +17,15 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 
-from h5ad.core.read import decode_str_array
-from h5ad.storage import (
+from adata.elements import spec
+from adata.elements.write import set_shape_attr, write_mapping
+from adata.elements.read import (
+    decode_str_array,
+    element_len,
+    read_str_chunk,
+    resolve_index,
+)
+from adata.storage import (
     create_dataset,
     copy_attrs,
     copy_tree,
@@ -37,7 +44,13 @@ def _target_backend(dst_group: Any) -> str:
 
 
 def _ensure_group(parent: Any, name: str) -> Any:
-    return parent[name] if name in parent else parent.create_group(name)
+    """Get or create an AnnData mapping group, tagged `encoding-type: dict`.
+
+    Every container here (layers, obsm, obsp, varm, varp) is a mapping in the
+    spec; leaving one untagged makes anndata fall back to its legacy reader
+    and emit an OldFormatWarning.
+    """
+    return write_mapping(parent, name)
 
 
 def _group_get(parent: Any, key: str) -> Any | None:
@@ -45,6 +58,7 @@ def _group_get(parent: Any, key: str) -> Any | None:
 
 
 def _ensure_optional_anndata_groups(dst: Any) -> None:
+    """Create the optional mapping groups an AnnData store is expected to have."""
     for key in ("layers", "obsm", "obsp", "varm", "varp"):
         _ensure_group(dst, key)
 
@@ -71,20 +85,22 @@ def indices_from_name_set(
     *,
     chunk_size: int = 200_000,
 ) -> Tuple[np.ndarray, Set[str]]:
-    if names_ds.ndim != 1:
-        flat_len = int(np.prod(names_ds.shape))
-    else:
-        flat_len = names_ds.shape[0]
+    """Resolve a set of names to sorted row indices, streaming the index.
+
+    `names_ds` may be a dataset or -- as anndata >= 0.11 writes indices -- a
+    `nullable-string-array` group, so it is read through
+    :func:`adata.elements.read.read_str_chunk` rather than sliced directly.
+    Returns the indices found and the names that were not.
+    """
+    flat_len = element_len(names_ds)
 
     remaining = set(keep)
     found_indices: List[int] = []
+    cache: Dict[str, np.ndarray] = {}
 
     for start in range(0, flat_len, chunk_size):
         end = min(start + chunk_size, flat_len)
-        chunk = names_ds[start:end]
-        chunk = decode_str_array(np.asarray(chunk)).astype(str)
-
-        for i, name in enumerate(chunk):
+        for i, name in enumerate(read_str_chunk(names_ds, start, end, cache)):
             if name in remaining:
                 found_indices.append(start + i)
                 remaining.remove(name)
@@ -95,60 +111,98 @@ def indices_from_name_set(
     return np.asarray(found_indices, dtype=np.int64), remaining
 
 
+def _take_rows(obj: Any, indices: Optional[np.ndarray]) -> Any:
+    """Read the selected rows of a dataset, handling both backends' indexing."""
+    if indices is None:
+        return obj[...]
+    if is_zarr_array(obj):
+        if obj.ndim == 1:
+            return obj.oindex[indices]
+        return obj.oindex[(indices,) + (slice(None),) * (obj.ndim - 1)]
+    return obj[indices, ...]
+
+
+def _copy_rows(
+    src_ds: Any,
+    dst_parent: Any,
+    name: str,
+    indices: Optional[np.ndarray],
+) -> Any:
+    """Write the selected rows of `src_ds` into `dst_parent` as `name`."""
+    if indices is None:
+        return copy_tree(src_ds, dst_parent, name)
+
+    target_backend = _target_backend(dst_parent)
+    kw = dataset_create_kwargs(src_ds, target_backend=target_backend)
+    kw = _clamp_chunks(kw, len(indices))
+    ds = create_dataset(
+        dst_parent,
+        name,
+        data=_take_rows(src_ds, indices),
+        **kw,
+    )
+    copy_attrs(src_ds.attrs, ds.attrs, target_backend=target_backend)
+    return ds
+
+
+def _clamp_chunks(kw: dict, n_rows: int) -> dict:
+    """Shrink a forwarded chunk shape to fit the subset.
+
+    h5py rejects a chunk larger than the dataset, so a chunked source column
+    subset below its own chunk size would otherwise fail outright.
+    """
+    chunks = kw.get("chunks")
+    if isinstance(chunks, (tuple, list)) and len(chunks) >= 1 and n_rows > 0:
+        clamped = (min(int(chunks[0]), n_rows),) + tuple(int(c) for c in chunks[1:])
+        kw = dict(kw)
+        kw["chunks"] = clamped
+    return kw
+
+
 def subset_axis_group(
     src: Any,
     dst: Any,
     indices: Optional[np.ndarray],
 ) -> None:
-    copy_attrs(src.attrs, dst.attrs, target_backend=_target_backend(dst))
+    """Copy a dataframe group, taking only `indices` along its rows.
+
+    Every column layout the spec allows has to be narrowed here, not just plain
+    datasets: `categorical` keeps its categories and subsets only `codes`,
+    while the masked layouts (`nullable-*`, which anndata >= 0.11 uses for the
+    index and every string column) subset both `values` and `mask`. Copying a
+    masked column whole would leave it longer than the rest of the frame.
+    """
     target_backend = _target_backend(dst)
+    copy_attrs(src.attrs, dst.attrs, target_backend=target_backend)
 
     for key in src.keys():
         obj = src[key]
 
         if is_dataset(obj):
-            if indices is None:
-                copy_tree(obj, dst, key)
-            else:
-                if is_zarr_array(obj):
-                    if obj.ndim == 1:
-                        data = obj.oindex[indices]
-                    else:
-                        selection = (indices,) + (slice(None),) * (obj.ndim - 1)
-                        data = obj.oindex[selection]
-                else:
-                    data = obj[indices, ...]
-                ds = create_dataset(
-                    dst,
-                    key,
-                    data=data,
-                    **dataset_create_kwargs(obj, target_backend=target_backend),
-                )
-                copy_attrs(obj.attrs, ds.attrs, target_backend=target_backend)
-        elif is_group(obj):
-            enc = obj.attrs.get("encoding-type", b"")
-            if isinstance(enc, bytes):
-                enc = enc.decode("utf-8")
+            _copy_rows(obj, dst, key, indices)
+            continue
 
-            if enc == "categorical":
-                gdst = dst.create_group(key)
-                copy_attrs(obj.attrs, gdst.attrs, target_backend=target_backend)
-                copy_tree(obj["categories"], gdst, "categories")
+        if not is_group(obj):
+            continue
 
-                codes = obj["codes"]
-                if indices is None:
-                    copy_tree(codes, gdst, "codes")
-                else:
-                    codes_sub = codes[indices, ...]
-                    ds = create_dataset(
-                        gdst,
-                        "codes",
-                        data=codes_sub,
-                        **dataset_create_kwargs(codes, target_backend=target_backend),
-                    )
-                    copy_attrs(codes.attrs, ds.attrs, target_backend=target_backend)
-            else:
-                copy_tree(obj, dst, key)
+        enc = _decode_attr(obj.attrs.get("encoding-type", b""))
+
+        if enc == spec.CATEGORICAL or (enc is None and "codes" in obj):
+            gdst = dst.create_group(key)
+            copy_attrs(obj.attrs, gdst.attrs, target_backend=target_backend)
+            copy_tree(obj["categories"], gdst, "categories")
+            _copy_rows(obj["codes"], gdst, "codes", indices)
+            continue
+
+        if enc in spec.MASKED_TYPES or ("values" in obj and "mask" in obj):
+            gdst = dst.create_group(key)
+            copy_attrs(obj.attrs, gdst.attrs, target_backend=target_backend)
+            _copy_rows(obj["values"], gdst, "values", indices)
+            _copy_rows(obj["mask"], gdst, "mask", indices)
+            continue
+
+        # Not row-aligned (e.g. __categories) -- copy verbatim.
+        copy_tree(obj, dst, key)
 
 
 def subset_dense_matrix(
@@ -198,96 +252,122 @@ def subset_dense_matrix(
         dst[out_start:out_end, :] = block
 
 
+def _minor_remap(keep: Optional[np.ndarray], size: int) -> Optional[np.ndarray]:
+    """Build a lookup from old minor index to new, with -1 for dropped entries.
+
+    A dense lookup table costs one int32 per column of the source, which is
+    negligible beside the matrix itself and turns the remap into a single
+    vectorised gather rather than a per-entry dict lookup.
+    """
+    if keep is None:
+        return None
+    remap = np.full(size, -1, dtype=np.int64)
+    remap[keep] = np.arange(len(keep), dtype=np.int64)
+    return remap
+
+
 def subset_sparse_matrix_group(
     src: Any,
     dst_parent: Any,
     name: str,
     obs_idx: Optional[np.ndarray],
     var_idx: Optional[np.ndarray],
+    *,
+    chunk_major: int = 4096,
 ) -> None:
-    enc = src.attrs.get("encoding-type", b"")
-    if isinstance(enc, bytes):
-        enc = enc.decode("utf-8")
+    """Subset a CSR/CSC matrix, streaming it a block of major axis at a time.
 
-    if enc not in ("csr_matrix", "csc_matrix"):
+    Only the slice of `data`/`indices` spanned by the current block is read, so
+    peak memory is set by `chunk_major` rather than by the matrix. The output
+    datasets are grown as each block is appended, since the final nnz is not
+    known until the pass completes.
+    """
+    enc = _decode_attr(src.attrs.get("encoding-type", b""))
+    if enc not in spec.SPARSE_TYPES:
         raise ValueError(f"Unsupported sparse encoding type: {enc}")
 
-    data = np.asarray(src["data"][...])
-    indices = np.asarray(src["indices"][...], dtype=np.int64)
-    indptr = np.asarray(src["indptr"][...], dtype=np.int64)
     shape = src.attrs.get("shape", None)
     if shape is None:
         raise ValueError("Sparse matrix group missing 'shape' attribute.")
     n_rows, n_cols = int(shape[0]), int(shape[1])
 
-    if enc == "csr_matrix":
-        row_idx = obs_idx if obs_idx is not None else np.arange(n_rows, dtype=np.int64)
-        col_idx = var_idx if var_idx is not None else np.arange(n_cols, dtype=np.int64)
+    data_ds, indices_ds = src["data"], src["indices"]
+    indptr = np.asarray(src["indptr"][...], dtype=np.int64)
 
-        new_data = []
-        new_indices = []
-        new_indptr = [0]
-
-        for r in row_idx:
-            start = indptr[r]
-            end = indptr[r + 1]
-            row_cols = indices[start:end]
-            row_data = data[start:end]
-
-            if var_idx is not None:
-                col_mask = np.isin(row_cols, col_idx)
-                row_cols = row_cols[col_mask]
-                row_data = row_data[col_mask]
-
-            if var_idx is not None:
-                col_map = {c: i for i, c in enumerate(col_idx)}
-                row_cols = np.array([col_map[c] for c in row_cols], dtype=np.int64)
-
-            new_indices.extend(row_cols.tolist())
-            new_data.extend(row_data.tolist())
-            new_indptr.append(len(new_indices))
-
-        new_shape = (len(row_idx), len(col_idx))
+    if enc == spec.CSR_MATRIX:
+        major_idx, minor_keep, n_minor = obs_idx, var_idx, n_cols
+        out_rows = len(obs_idx) if obs_idx is not None else n_rows
+        out_cols = len(var_idx) if var_idx is not None else n_cols
     else:
-        row_idx = obs_idx if obs_idx is not None else np.arange(n_rows, dtype=np.int64)
-        col_idx = var_idx if var_idx is not None else np.arange(n_cols, dtype=np.int64)
+        major_idx, minor_keep, n_minor = var_idx, obs_idx, n_rows
+        out_rows = len(obs_idx) if obs_idx is not None else n_rows
+        out_cols = len(var_idx) if var_idx is not None else n_cols
 
-        new_data = []
-        new_indices = []
-        new_indptr = [0]
-
-        for c in col_idx:
-            start = indptr[c]
-            end = indptr[c + 1]
-            col_rows = indices[start:end]
-            col_data = data[start:end]
-
-            if obs_idx is not None:
-                row_mask = np.isin(col_rows, row_idx)
-                col_rows = col_rows[row_mask]
-                col_data = col_data[row_mask]
-
-            if obs_idx is not None:
-                row_map = {r: i for i, r in enumerate(row_idx)}
-                col_rows = np.array([row_map[r] for r in col_rows], dtype=np.int64)
-
-            new_indices.extend(col_rows.tolist())
-            new_data.extend(col_data.tolist())
-            new_indptr.append(len(new_indices))
-
-        new_shape = (len(row_idx), len(col_idx))
+    n_major = n_rows if enc == spec.CSR_MATRIX else n_cols
+    majors = major_idx if major_idx is not None else np.arange(n_major, dtype=np.int64)
+    remap = _minor_remap(minor_keep, n_minor)
 
     group = dst_parent.create_group(name)
-    group.attrs["encoding-type"] = enc
-    group.attrs["encoding-version"] = "0.1.0"
-    if is_zarr_group(group):
-        group.attrs["shape"] = list(new_shape)
-    else:
-        group.attrs["shape"] = np.array(new_shape, dtype=np.int64)
+    copy_attrs(src.attrs, group.attrs, target_backend=_target_backend(dst_parent))
+    spec.set_encoding(group, enc)
+    set_shape_attr(group, (out_rows, out_cols))
 
-    create_dataset(group, "data", data=np.array(new_data, dtype=data.dtype))
-    create_dataset(group, "indices", data=np.array(new_indices, dtype=indices.dtype))
-    create_dataset(group, "indptr", data=np.array(new_indptr, dtype=indptr.dtype))
+    out_data = _growable(group, "data", data_ds.dtype)
+    out_indices = _growable(group, "indices", np.int64)
+    out_indptr = [0]
+    nnz = 0
+
+    for block_start in range(0, len(majors), chunk_major):
+        block = majors[block_start : block_start + chunk_major]
+        # One contiguous read covers the whole block's entries.
+        lo, hi = int(indptr[block].min()), int(indptr[block + 1].max())
+        if hi > lo:
+            block_indices = np.asarray(indices_ds[lo:hi], dtype=np.int64)
+            block_data = np.asarray(data_ds[lo:hi])
+        else:
+            block_indices = np.empty(0, dtype=np.int64)
+            block_data = np.empty(0, dtype=data_ds.dtype)
+
+        kept_indices: List[np.ndarray] = []
+        kept_data: List[np.ndarray] = []
+        for m in block:
+            sl = slice(int(indptr[m]) - lo, int(indptr[m + 1]) - lo)
+            minor = block_indices[sl]
+            values = block_data[sl]
+            if remap is not None:
+                mapped = remap[minor]
+                keep = mapped >= 0
+                minor, values = mapped[keep], values[keep]
+            kept_indices.append(minor)
+            kept_data.append(values)
+            nnz += len(minor)
+            out_indptr.append(nnz)
+
+        if kept_indices:
+            _append(out_indices, np.concatenate(kept_indices))
+            _append(out_data, np.concatenate(kept_data))
+
+    create_dataset(
+        group, "indptr", data=np.asarray(out_indptr, dtype=np.int64)
+    )
+
+
+def _growable(group: Any, name: str, dtype: Any) -> Any:
+    """Create an empty 1-D dataset that can be extended as blocks arrive."""
+    if is_zarr_group(group):
+        return group.create_array(name, shape=(0,), dtype=dtype, chunks=(65536,))
+    return group.create_dataset(
+        name, shape=(0,), maxshape=(None,), dtype=dtype, chunks=(65536,)
+    )
+
+
+def _append(ds: Any, values: np.ndarray) -> None:
+    """Append a block to a growable 1-D dataset."""
+    if values.size == 0:
+        return
+    start = ds.shape[0]
+    ds.resize((start + values.size,))
+    ds[start:] = values
 
 
 def subset_matrix_entry(
@@ -307,15 +387,86 @@ def subset_matrix_entry(
         return
 
     if is_group(obj):
-        enc = obj.attrs.get("encoding-type", b"")
-        if isinstance(enc, bytes):
-            enc = enc.decode("utf-8")
-        if enc in ("csr_matrix", "csc_matrix"):
+        enc = _decode_attr(obj.attrs.get("encoding-type", b""))
+        if enc in spec.SPARSE_TYPES:
             subset_sparse_matrix_group(obj, dst_parent, name, obs_idx, var_idx)
+            return
+        if enc == spec.DATAFRAME:
+            # obsm/varm may hold a dataframe; it is row-aligned like obs/var.
+            subset_axis_group(obj, dst_parent.create_group(name), obs_idx)
             return
         raise ValueError(f"Unsupported {entry_label} encoding type: {enc}")
 
     raise ValueError(f"Unsupported {entry_label} object type")
+
+
+HANDLED_KEYS = frozenset(
+    {"obs", "var", "X", "layers", "obsm", "varm", "obsp", "varp", "uns", "raw"}
+)
+
+
+def subset_raw_group(
+    src_raw: Any,
+    dst: Any,
+    obs_idx: Optional[np.ndarray],
+    var_keep: Optional[Set[str]],
+    *,
+    chunk_rows: int,
+    console: Console,
+) -> None:
+    """Subset a `raw/` group, which carries its own var axis.
+
+    `raw` typically holds more genes than the main object, so its var names are
+    matched independently rather than reusing the outer var indices -- using
+    those would select the wrong columns entirely.
+    """
+    raw_dst = dst.create_group("raw")
+    copy_attrs(src_raw.attrs, raw_dst.attrs, target_backend=_target_backend(dst))
+    spec.set_encoding(raw_dst, spec.RAW)
+
+    raw_var_idx: Optional[np.ndarray] = None
+    if var_keep is not None and "var" in src_raw:
+        raw_var_names, _ = resolve_index(src_raw["var"], "var")
+        raw_var_idx, missing = indices_from_name_set(raw_var_names, var_keep)
+        console.print(
+            f"[green]Selected {len(raw_var_idx)} raw/var "
+            f"(of {element_len(raw_var_names)})[/]"
+        )
+        if missing:
+            console.print(
+                f"[yellow]Warning: {len(missing)} var names not found in raw/var[/]"
+            )
+
+    if "var" in src_raw:
+        subset_axis_group(src_raw["var"], raw_dst.create_group("var"), raw_var_idx)
+
+    if "X" in src_raw:
+        subset_matrix_entry(
+            src_raw["X"],
+            raw_dst,
+            "X",
+            obs_idx,
+            raw_var_idx,
+            chunk_rows=chunk_rows,
+            entry_label="raw/X",
+        )
+
+    if "varm" in src_raw:
+        varm_dst = _ensure_group(raw_dst, "varm")
+        for key in src_raw["varm"].keys():
+            subset_matrix_entry(
+                src_raw["varm"][key],
+                varm_dst,
+                key,
+                raw_var_idx,
+                None,
+                chunk_rows=chunk_rows,
+                entry_label=f"raw/varm:{key}",
+            )
+
+    for key in src_raw.keys():
+        if key not in ("X", "var", "varm"):
+            copy_tree(src_raw[key], raw_dst, key)
 
 
 def subset_h5ad(
@@ -366,12 +517,7 @@ def subset_h5ad(
             if obs_keep is not None:
                 console.print("[cyan]Matching obs names...[/]")
                 obs_group = src["obs"]
-                obs_index = _decode_attr(obs_group.attrs.get("_index", "obs_names"))
-                obs_names_ds = _group_get(obs_group, "obs_names") or _group_get(
-                    obs_group, obs_index
-                )
-                if obs_names_ds is None:
-                    raise KeyError("Could not find obs names")
+                obs_names_ds, _ = resolve_index(obs_group, "obs")
 
                 obs_idx, missing_obs = indices_from_name_set(obs_names_ds, obs_keep)
                 if missing_obs:
@@ -379,19 +525,14 @@ def subset_h5ad(
                         f"[yellow]Warning: {len(missing_obs)} obs names not found in file[/]"
                     )
                 console.print(
-                    f"[green]Selected {len(obs_idx)} obs (of {obs_names_ds.shape[0]})[/]"
+                    f"[green]Selected {len(obs_idx)} obs (of {element_len(obs_names_ds)})[/]"
                 )
 
             var_idx = None
             if var_keep is not None:
                 console.print("[cyan]Matching var names...[/]")
                 var_group = src["var"]
-                var_index = _decode_attr(var_group.attrs.get("_index", "var_names"))
-                var_names_ds = _group_get(var_group, "var_names") or _group_get(
-                    var_group, var_index
-                )
-                if var_names_ds is None:
-                    raise KeyError("Could not find var names")
+                var_names_ds, _ = resolve_index(var_group, "var")
 
                 var_idx, missing_var = indices_from_name_set(var_names_ds, var_keep)
                 if missing_var:
@@ -399,7 +540,7 @@ def subset_h5ad(
                         f"[yellow]Warning: {len(missing_var)} var names not found in file[/]"
                     )
                 console.print(
-                    f"[green]Selected {len(var_idx)} var (of {var_names_ds.shape[0]})[/]"
+                    f"[green]Selected {len(var_idx)} var (of {element_len(var_names_ds)})[/]"
                 )
 
             tasks: List[str] = []
@@ -421,6 +562,23 @@ def subset_h5ad(
                 tasks.extend([f"varp:{k}" for k in src["varp"].keys()])
             if "uns" in src:
                 tasks.append("uns")
+            # anndata writes a placeholder `raw` even when there is none, and
+            # on Zarr that placeholder is an array rather than a group.
+            if "raw" in src and is_group(src["raw"]):
+                tasks.append("raw")
+            elif "raw" in src:
+                tasks.append("copy:raw")
+
+            passthrough = [
+                k for k in src.keys() if k not in HANDLED_KEYS
+            ]
+            if passthrough:
+                console.print(
+                    "[yellow]Copying unrecognised top-level "
+                    f"{'keys' if len(passthrough) > 1 else 'key'} verbatim: "
+                    f"{', '.join(sorted(passthrough))}[/]"
+                )
+                tasks.extend(f"copy:{k}" for k in passthrough)
 
             with Progress(
                 SpinnerColumn(finished_text="[green]✓[/]"),
@@ -515,6 +673,18 @@ def subset_h5ad(
                         )
                     elif task == "uns":
                         copy_tree(src["uns"], dst, "uns")
+                    elif task == "raw":
+                        subset_raw_group(
+                            src["raw"],
+                            dst,
+                            obs_idx,
+                            var_keep,
+                            chunk_rows=chunk_rows,
+                            console=console,
+                        )
+                    elif task.startswith("copy:"):
+                        key = task.split(":", 1)[1]
+                        copy_tree(src[key], dst, key)
                     progress.update(
                         task_id,
                         description=f"[green]Subsetting {task}[/]",

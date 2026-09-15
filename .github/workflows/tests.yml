@@ -3,8 +3,9 @@ name: Tests
 on:
   push:
     branches: [main, dev]
+  # Every pull request, not only those targeting main/dev -- a stacked PR
+  # based on another feature branch would otherwise run no checks at all.
   pull_request:
-    branches: [main, dev]
 
 concurrency:
   group: tests-${{ github.workflow }}-${{ github.ref }}
@@ -17,27 +18,15 @@ jobs:
 
     permissions:
       contents: read
-      checks: write   # needed for EnricoMi/publish-unit-test-result-action on PRs
+      checks: write          # publish-unit-test-result-action writes a check run
+      pull-requests: write   # ...and comments the summary on the PR
 
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12"]  # add "3.13" if you want
-        module:
-          - name: cli
-            tests: tests/test_cli.py
-          - name: export
-            tests: tests/test_export.py
-          - name: import
-            tests: tests/test_import.py
-          - name: info-read
-            tests: tests/test_info_read.py
-          - name: subset
-            tests: tests/test_subset.py
-          - name: zarr
-            tests: tests/test_zarr.py
+        python-version: ["3.12", "3.13"]
 
-    name: tests (${{ matrix.module.name }})
+    name: tests (py${{ matrix.python-version }})
 
     steps:
       - uses: actions/checkout@v4
@@ -57,29 +46,29 @@ jobs:
 
       - name: Run tests with coverage
         run: |
-          uv run pytest -v -W default ${{ matrix.module.tests }} \
-            --cov=h5ad \
+          uv run pytest -v -W default tests/ \
+            --cov=adata \
             --cov-report=term-missing \
             --cov-report=xml \
             --cov-report=html \
-            --junitxml=pytest-results-${{ matrix.module.name }}.xml
+            --junitxml=pytest-results-py${{ matrix.python-version }}.xml
 
       - name: Publish test results summary
         uses: EnricoMi/publish-unit-test-result-action@v2
         if: always()
         with:
-          files: pytest-results-${{ matrix.module.name }}.xml
-          check_name: Test Results (${{ matrix.module.name }})
+          files: pytest-results-py${{ matrix.python-version }}.xml
+          check_name: Test Results (py${{ matrix.python-version }})
 
       - name: Upload coverage artifacts
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: coverage-${{ matrix.module.name }}
+          name: coverage-py${{ matrix.python-version }}
           path: |
             coverage.xml
             htmlcov/
-            pytest-results-${{ matrix.module.name }}.xml
+            pytest-results-py${{ matrix.python-version }}.xml
           retention-days: 30
 
       - name: Upload coverage to Codecov

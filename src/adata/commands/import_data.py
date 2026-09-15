@@ -7,11 +7,11 @@ from typing import Optional
 
 from rich.console import Console
 
-from h5ad.formats.array import import_npy
-from h5ad.formats.dataframe import import_dataframe
-from h5ad.formats.json_data import import_json
-from h5ad.formats.sparse import import_mtx
-from h5ad.storage import copy_path, copy_store_contents, detect_backend, open_store
+from adata.formats.array import import_npy
+from adata.formats.dataframe import import_dataframe
+from adata.formats.json_data import import_json
+from adata.formats.sparse import import_mtx
+from adata.storage import copy_path, copy_store_contents, detect_backend, open_store
 
 
 EXTENSION_FORMAT = {
