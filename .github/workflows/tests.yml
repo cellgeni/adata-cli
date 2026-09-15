@@ -48,11 +48,12 @@ jobs:
 
       - name: Run tests with coverage
         run: |
-          uv run pytest -v -W default tests/ \
+          uv run pytest -v -W default tests/ -m "not integration" \
             --cov=adata \
             --cov-report=term-missing \
             --cov-report=xml \
             --cov-report=html \
+            --cov-fail-under=90 \
             --junitxml=pytest-results-py${{ matrix.python-version }}.xml
 
       - name: Publish test results summary
@@ -79,3 +80,27 @@ jobs:
         with:
           files: coverage.xml
           fail_ci_if_error: false
+
+  # Builds a store with each pinned anndata release and checks the CLI against
+  # it. Split out because it assembles six environments with uv, which needs
+  # the network and is far slower than the unit suite.
+  compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    name: anndata 0.8-0.13 compatibility
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (frozen)
+        run: uv sync --extra dev --frozen
+
+      - name: Run compatibility tests
+        run: uv run pytest -v -W default tests/test_anndata_versions.py -m integration
