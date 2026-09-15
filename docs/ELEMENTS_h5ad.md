@@ -280,6 +280,42 @@ Group members: datasets for the buffers (often named like `nodeX-*`).
 >
 > This encoding is considered experimental in the anndata 0.9.x series and later.
 
+## What `adata-cli` does with these elements
+
+This tool reads every layout listed above, including the legacy 0.7.x forms,
+and always writes the current spec version shown in each section.
+
+| Element | Read | Written |
+|---|---|---|
+| `anndata` | yes | yes (0.1.0, stamped on every store it creates) |
+| `raw` | yes | yes (0.1.0; subset against its own var axis) |
+| `dict` | yes | yes (0.1.0, on every mapping group) |
+| `dataframe` | 0.2.0 and legacy 0.1.0 | 0.2.0, with `column-order` |
+| `array` | yes | yes (0.2.0) |
+| `csr_matrix` / `csc_matrix` | yes | yes (0.1.0); both are streamed, never loaded whole |
+| `categorical` | 0.2.0, plus both legacy layouts | 0.2.0, preserving `ordered` |
+| `string-array` | yes | yes (0.2.0), variable-length UTF-8 |
+| `nullable-integer` / `-boolean` / `-string-array` | yes | yes (0.1.0) |
+| `numeric-scalar` | yes | yes (0.2.0) |
+| `string` | yes | yes (0.2.0), as a 0-d dataset |
+| `null` | yes | yes (0.1.0) |
+| `awkward-array` | reported by `view` and `ls` | not written |
+
+### `null` (`encoding-version: 0.1.0`)
+
+Not in the upstream prose spec, but written by anndata 0.12+ for a `None`
+value in `uns`. In HDF5 it is a dataset with a null dataspace (`h5py.Empty`);
+in Zarr it is a 0-d boolean array. Both carry `encoding-type: null`.
+
+### Elements with no `encoding-type`
+
+Files written by anndata 0.7.x carry no encoding attributes at all. These are
+classified structurally: a group with `codes` and `categories` is a
+categorical, one with `values` and `mask` is a nullable array, one with
+`_index` in its attributes is a dataframe, and anything else is a mapping.
+Structural inference is only ever a fallback -- a declared `encoding-type`
+always wins.
+
 ## Sources
 
 - AnnData “on-disk format” prose docs (modern, ≥0.8): https://anndata.readthedocs.io/en/stable/fileformat-prose.html
