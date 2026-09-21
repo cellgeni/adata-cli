@@ -440,12 +440,69 @@ def _is_string_src(src: Any) -> bool:
     return is_string_dtype(getattr(src, "dtype", None))
 
 
-def _chunk_step(shape: Sequence[int], chunks: Optional[Sequence[int]]) -> int:
-    if chunks is not None and len(chunks) > 0 and chunks[0]:
-        return int(chunks[0])
+#: Byte budget for a single read when streaming a dataset.
+#:
+#: Using a source's chunk height as the read size means inheriting whatever
+#: the writer chose, and a store chunked `(1, n_cols)` is then copied one row
+#: per read. On a local disk that is merely wasteful; on a network filesystem
+#: (Lustre, NFS) every read is a round-trip costing milliseconds, so a
+#: million-row copy spends nearly all of its time waiting. 32 MiB sits
+#: comfortably above a typical 1 MiB Lustre stripe while bounding peak memory.
+TARGET_READ_BYTES = 32 * 1024 * 1024
+
+#: Assumed width of a variable-length string element, for read sizing only.
+#: h5py reports `itemsize` 8 for vlen strings because the value is a pointer,
+#: which would overestimate the row count by an order of magnitude and break
+#: the memory bound. Real cell and gene names sit well under this.
+VLEN_ELEMENT_BYTES = 64
+
+
+def _row_bytes(shape: Sequence[int], dtype: Any) -> int:
+    """In-memory size of one row along the first axis."""
+    width = 1
+    for dim in shape[1:]:
+        width *= max(1, int(dim))
+
+    itemsize = int(getattr(dtype, "itemsize", 0) or 0)
+    # 'O' is how h5py spells vlen str, 'T' is numpy StringDType as reported by
+    # zarr-python 3. Neither itemsize reflects the bytes actually stored.
+    if itemsize <= 0 or getattr(dtype, "kind", None) in ("O", "T"):
+        itemsize = VLEN_ELEMENT_BYTES
+
+    return max(1, width * itemsize)
+
+
+def _chunk_step(
+    shape: Sequence[int], chunks: Optional[Sequence[int]], dtype: Any
+) -> int:
+    """Rows to copy per read, sized for the filesystem rather than the source.
+
+    The step is grown to `TARGET_READ_BYTES`, then rounded down to a whole
+    number of source chunks: reading part of a chunk still costs decompressing
+    all of it, so a step that splits one wastes the remainder.
+    """
     if not shape:
         return 1
-    return max(1, min(1024, int(shape[0])))
+
+    n_rows = int(shape[0])
+    if n_rows <= 0:
+        return 1
+
+    chunk_rows = 0
+    if chunks is not None and len(chunks) > 0 and chunks[0]:
+        chunk_rows = max(1, int(chunks[0]))
+
+    step = max(1, TARGET_READ_BYTES // _row_bytes(shape, dtype))
+    if chunk_rows:
+        # Never go below a single chunk: a partial read still decompresses the
+        # whole thing, so a smaller step costs the same I/O for less data. That
+        # makes TARGET_READ_BYTES a target rather than a cap -- a source whose
+        # own chunk already exceeds the budget (say 1000 x 1e6 float32, chunked
+        # whole) reads that chunk regardless. This matches the previous
+        # behaviour, which used the chunk height verbatim.
+        step = max(chunk_rows, (step // chunk_rows) * chunk_rows)
+
+    return min(step, n_rows)
 
 
 def copy_dataset(src: Any, dst_group: Any, name: str) -> Any:
@@ -475,7 +532,7 @@ def copy_dataset(src: Any, dst_group: Any, name: str) -> Any:
         ds[()] = src[()]
         return ds
 
-    step = _chunk_step(shape, getattr(src, "chunks", None))
+    step = _chunk_step(shape, getattr(src, "chunks", None), src.dtype)
     for start in range(0, shape[0], step):
         end = min(start + step, shape[0])
         if len(shape) == 1:

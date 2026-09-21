@@ -5,10 +5,23 @@ Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 
 ## 0.5.1
 
-A container-only release. No changes to the Python package; the PyPI
-artifact is identical in behaviour to 0.5.0.
+Makes the container image usable from Nextflow, and stops `copy_dataset`
+reading one row at a time from row-chunked stores.
 
 ### Fixed
+
+- **Copying a row-chunked store was dominated by read latency.** The read step
+  was the source's chunk height verbatim, so a store chunked `(1, n_cols)` was
+  copied one row per read. On a network filesystem (Lustre, NFS) each read is a
+  round-trip, so a million-row copy spent nearly all of its time waiting. Reads
+  are now sized to a 32 MiB budget, rounded down to a whole number of source
+  chunks. A `(1_000_000, 30_000)` float32 store chunked `(1, 30_000)` goes from
+  1 row per read to 279.
+- Read sizing no longer trusts `itemsize` for variable-length strings. h5py
+  reports 8 there because the value is a pointer, which overestimated the row
+  count by an order of magnitude and broke the memory bound.
+
+### Container
 
 - **The image could not be used from a Nextflow process.** Nextflow requires
   `/bin/bash` to be the container entrypoint, so `ENTRYPOINT ["adata"]` made
