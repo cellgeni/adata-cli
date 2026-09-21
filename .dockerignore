@@ -1,0 +1,18 @@
+# Keep the build context to what `uv sync --locked` actually needs. In
+# particular .venv/ would otherwise ship a host-platform virtualenv into the
+# image, and .claude/worktrees/ holds full copies of this repo.
+#
+# Do NOT add README.md or LICENSE here: pyproject.toml references them via
+# `readme` and `license-files`, so the build fails without them.
+.venv/
+.git/
+.claude/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
+*.egg-info/
