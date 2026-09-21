@@ -3,7 +3,7 @@
 # so the distribution is published as `pyadata-cli`. The import package
 # and the command are both still `adata`.
 name = "pyadata-cli"
-version = "0.5.0"
+version = "0.5.1"
 description = "Streaming CLI for exploring and editing large AnnData .h5ad and .zarr stores"
 readme = "README.md"
 requires-python = ">=3.12"

@@ -3,6 +3,35 @@
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
+## 0.5.1
+
+A container-only release. No changes to the Python package; the PyPI
+artifact is identical in behaviour to 0.5.0.
+
+### Fixed
+
+- **The image could not be used from a Nextflow process.** Nextflow requires
+  `/bin/bash` to be the container entrypoint, so `ENTRYPOINT ["adata"]` made
+  every Docker- and Podman-backed task fail with `No such command
+  '/bin/bash'`. Apptainer was unaffected, as `singularity exec` ignores the
+  entrypoint.
+- **Task metrics were silently lost.** `procps` is absent from the base image,
+  so Nextflow could not run `ps` to collect them. The required tool set
+  (`bash`, `ps`, `awk`, `date`, `grep`, `sed`, `tail`, `tee`) is now installed
+  and asserted at build time.
+- `PYTHONNOUSERSITE` is set, so a bind-mounted `$HOME` under Apptainer can no
+  longer shadow the image's virtualenv with the user's `~/.local` packages.
+- `XDG_CACHE_HOME` points at `/tmp`, so the image tolerates being run under an
+  arbitrary UID with no writable `$HOME`.
+- Added a `.dockerignore`. Local builds were copying the host's `.venv`,
+  `.git` and `.pytest_cache` into the image.
+
+### Changed
+
+- **The image no longer sets an entrypoint, so the command must be named
+  explicitly:** `docker run IMAGE adata view file.h5ad`, where `docker run
+  IMAGE view file.h5ad` previously worked.
+
 ## 0.5.0
 
 Renamed from `h5ad` to `adata-cli`, restored compatibility with current
