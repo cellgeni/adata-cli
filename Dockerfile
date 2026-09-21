@@ -52,7 +52,18 @@ COPY . .
 
 # --locked asserts that uv.lock is in sync with pyproject.toml, so an image
 # can never be built from a lockfile that drifted.
-RUN uv sync --locked
+#
+# uv honours XDG_CACHE_HOME, so the sync leaves a root-owned package cache at
+# /tmp/.cache -- which made the variable self-defeating, as a task running
+# under an arbitrary UID then could not write to the very path it advertises.
+# Clear it and leave an empty world-writable directory behind. Done in this
+# same layer because a later `rm` would mask the files without reclaiming
+# them; that reclaims about 9 MB, the cache being mostly hardlinks into the
+# venv rather than separate copies.
+RUN uv sync --locked \
+    && rm -rf /tmp/.cache /tmp/uv-*.lock \
+    && mkdir -p /tmp/.cache \
+    && chmod 1777 /tmp/.cache
 
 # Put the project venv on PATH so `adata` is directly runnable
 ENV PATH="/cli/.venv/bin:${PATH}"
