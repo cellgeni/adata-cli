@@ -53,6 +53,7 @@ Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 - **`--merge drop` and `--uns-merge drop` are accepted.** `drop` was already
   the documented default behaviour but was rejected as a value, so a config
   could not state it explicitly.
+
 ## 0.5.1
 
 Makes the container image usable from Nextflow, and stops `copy_dataset`

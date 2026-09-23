@@ -10,3 +10,9 @@ htmlcov/
 .pytest_cache/
 pytest-results*.xml
 compat-results.xml
+
+# Benchmark working directory and results -- the defaults of
+# `python -m benchmarks.run`, both written into the repo root.
+.bench/
+results.json
+summary.md
