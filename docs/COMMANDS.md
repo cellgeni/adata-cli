@@ -118,7 +118,7 @@ adata concat a.h5ad b.h5ad -o m.h5ad --keys a,b --index-unique - --uns-merge sam
 | `--label` | Add an obs column recording each cell's source |
 | `--keys` | Names for the inputs; defaults to their filenames |
 | `--index-unique` | Delimiter for suffixing obs names with their key |
-| `--merge` / `--uns-merge` | `same`, `unique`, `first`, `only`; default drops |
+| `--merge` / `--uns-merge` | `drop` (default), `same`, `unique`, `first`, `only` |
 | `--fill-value` | Value for dense cells introduced by an outer join |
 
 obs columns keep their dtypes: categoricals union their category sets, nullable

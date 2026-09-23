@@ -7,9 +7,9 @@ from typing import Optional, Sequence
 
 from rich.console import Console
 
-from adata.core.concat import MERGE_STRATEGIES, concat_on_disk
+from adata.core.concat import MERGE_CHOICES, MERGE_STRATEGIES, concat_on_disk
 
-__all__ = ["MERGE_STRATEGIES", "concat_stores"]
+__all__ = ["MERGE_CHOICES", "MERGE_STRATEGIES", "concat_stores"]
 
 
 def concat_stores(

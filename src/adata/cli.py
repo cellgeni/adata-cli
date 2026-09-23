@@ -7,7 +7,7 @@ from rich.console import Console
 import typer
 
 from adata.commands import (
-    MERGE_STRATEGIES,
+    MERGE_CHOICES,
     concat_stores,
     create_store,
     split_store,
@@ -413,12 +413,14 @@ def concat(
     merge: Optional[str] = typer.Option(
         None,
         "--merge",
-        help="How to reconcile var columns: same, unique, first, only (default: drop)",
+        help="How to reconcile var columns: drop, same, unique, first, only "
+        "(default: drop)",
     ),
     uns_merge: Optional[str] = typer.Option(
         None,
         "--uns-merge",
-        help="How to reconcile uns: same, unique, first, only (default: drop)",
+        help="How to reconcile uns: drop, same, unique, first, only "
+        "(default: drop)",
     ),
     fill_value: float = typer.Option(
         0.0, "--fill-value", help="Value for dense cells introduced by an outer join"
@@ -442,12 +444,17 @@ def concat(
         adata concat a.h5ad b.h5ad -o m.h5ad --keys a,b --index-unique - --uns-merge same
     """
     for name, value in (("--merge", merge), ("--uns-merge", uns_merge)):
-        if value is not None and value not in MERGE_STRATEGIES:
+        if value is not None and value not in MERGE_CHOICES:
             console.print(
                 f"[bold red]Error:[/] {name} must be one of: "
-                f"{', '.join(MERGE_STRATEGIES)}"
+                f"{', '.join(MERGE_CHOICES)}"
             )
             raise typer.Exit(code=1)
+
+    # "drop" is the default, and naming it explicitly has to be allowed: a
+    # config that spells out the default should not be rejected.
+    merge = None if merge == "drop" else merge
+    uns_merge = None if uns_merge == "drop" else uns_merge
 
     try:
         concat_stores(

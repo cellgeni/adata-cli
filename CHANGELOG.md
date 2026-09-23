@@ -3,6 +3,25 @@
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
+## Unreleased
+
+### Fixed
+
+- **`concat --merge` never finished on a real store.** Aligning a var column
+  onto the target index re-read the whole column from disk once per target
+  variable, so the cost was quadratic: at 36,601 variables a merge that should
+  take a fraction of a second ran for hours at 100% CPU with the output file
+  never growing past its header. Reported against 0.5.1 (REQ-71798), where 12
+  of 13 pipeline tasks had to be killed after 98 minutes. The column is now
+  read once per input, and `--merge first` / `--merge only`, which decide on
+  presence alone, read no column values at all.
+
+### Added
+
+- **`--merge drop` and `--uns-merge drop` are accepted.** `drop` was already
+  the documented default behaviour but was rejected as a value, so a config
+  could not state it explicitly.
+
 ## 0.5.0
 
 Renamed from `h5ad` to `adata-cli`, restored compatibility with current

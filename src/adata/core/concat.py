@@ -48,6 +48,8 @@ from adata.storage import (
 )
 
 MERGE_STRATEGIES = ("same", "unique", "first", "only")
+#: What the CLI accepts. "drop" is the default and maps to no merge at all.
+MERGE_CHOICES = ("drop",) + MERGE_STRATEGIES
 
 
 def _index_union(per_input: Sequence[List[str]]) -> List[str]:
@@ -172,6 +174,16 @@ class _Missing:
 
 
 _MISSING = _Missing()
+
+
+class _Present:
+    """Stands for a column whose value was not read, only its presence."""
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "<present>"
+
+
+_PRESENT = _Present()
 
 
 def _equal(a: Any, b: Any) -> bool:
@@ -945,13 +957,25 @@ def _write_var(
     positions = [_column_map(target_var, names) for names in var_names]
     written: List[str] = []
 
+    # "first" and "only" decide on presence alone, so the column values are
+    # never read for them.
+    compares = merge in ("same", "unique")
+
     for name in candidates:
         aligned: List[Any] = []
         for group, where in zip(groups, positions):
             if name not in group or (where < 0).any():
                 aligned.append(_MISSING)
                 continue
-            aligned.append(tuple(read_str_all(group[name])[i] for i in where))
+            if not compares:
+                aligned.append(_PRESENT)
+                continue
+            # Read the column once and index the result. Reading it inside the
+            # generator -- as an earlier version did -- re-read the whole
+            # column for every target variable, which is quadratic and turns a
+            # 36k-var merge into hours of pure CPU.
+            values = read_str_all(group[name])
+            aligned.append(tuple(values[i] for i in where))
 
         keep, _ = _merge_values(aligned, merge)
         if not keep:
