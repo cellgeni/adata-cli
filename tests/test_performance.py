@@ -40,6 +40,16 @@ import numpy as np
 import pytest
 from rich.console import Console
 
+from adata.commands.create import create_store
+from adata.commands.export import (
+    export_json,
+    export_mtx,
+    export_npy,
+    export_table,
+)
+from adata.commands.import_data import import_object
+from adata.commands.info import show_info
+from adata.commands.ls import list_store
 from adata.core.concat import concat_on_disk
 from adata.core.subset import subset_h5ad
 
@@ -47,7 +57,10 @@ from tests.perf_counters import (
     GROWTH_LIMIT,
     SIZES,
     assert_grows_linearly,
+    assert_grows_slower_than_input,
+    assert_independent_of,
     count_allocations,
+    count_scanned_elements,
     count_io,
     count_lines,
 )
@@ -105,11 +118,13 @@ def _store(
         index=[f"{prefix}g{i}" for i in range(n_var)],
     )
 
-    ad.AnnData(
+    obj = ad.AnnData(
         X=sparse.csr_matrix(np.ones((n_obs, n_var), dtype="float32")),
         obs=obs,
         var=var,
-    ).write_h5ad(path)
+    )
+    obj.obsm["X_pca"] = np.zeros((n_obs, 3), dtype="float32")
+    obj.write_h5ad(path)
     return path
 
 
@@ -502,3 +517,531 @@ def test_growth_limit_separates_linear_from_super_linear():
     assert ratio(1.0) == pytest.approx(4.0, rel=0.01)
     assert ratio(2.0) > GROWTH_LIMIT, "quadratic work must fail"
     assert ratio(1.5) > GROWTH_LIMIT, "n**1.5 must fail"
+
+
+# ---------------------------------------------------------------------------
+# inspection is free
+#
+# `view` and `ls` reach only `.shape`, `.dtype` and `.attrs`: `axis_len` goes
+# through `element_len`, which reads a shape, and `_array_details` and
+# `_infer_untagged` never touch a value. That is the whole reason they return
+# instantly on a store far too large to open, and it is the one claim in the
+# README that can be stated as an exact number rather than a ratio.
+
+
+def _reads_for_inspection(path: Path, run) -> "object":
+    with count_io() as io:
+        run(path)
+    return io
+
+
+@pytest.mark.parametrize("n_obs", [64, 4096])
+@pytest.mark.parametrize(
+    "label,run",
+    [
+        ("view", lambda p: show_info(p, QUIET, out_console=QUIET)),
+        ("view --types", lambda p: show_info(p, QUIET, show_types=True,
+                                             out_console=QUIET)),
+        ("ls", lambda p: list_store(p, QUIET)),
+        ("ls --long", lambda p: list_store(p, QUIET, long=True)),
+        ("ls --plain", lambda p: list_store(p, QUIET, plain=True)),
+    ],
+    ids=lambda v: v if isinstance(v, str) else "",
+)
+def test_inspection_reads_no_data_at_all(tmp_path, n_obs, label, run):
+    """Not "grows slowly" -- zero. An exact count, so it needs no tolerance.
+
+    A ratio would be the wrong instrument here: 0 to 0 is not a meaningful
+    ratio, and the moment inspection reads *one* column the answer stops
+    being zero regardless of how the store scales.
+    """
+    source = _store(tmp_path / f"i{label}{n_obs}.h5ad", name="i", n_obs=n_obs,
+                    n_var=16, obs_kind="numeric", n_categories=4)
+    io = _reads_for_inspection(source, run)
+
+    assert io.elements == 0, (
+        f"`{label}` read {io.elements} data elements from a {n_obs}-row store; "
+        f"inspection is supposed to touch only shapes and attributes. "
+        f"Largest reader: {max(io.by_name.items(), key=lambda kv: kv[1], default=('-', 0))}"
+    )
+
+
+def test_the_inspection_fixture_really_does_hold_readable_data(tmp_path):
+    """Keeps the test above from passing because there was nothing to read.
+
+    Same store, read by a command that is supposed to read: if this registers
+    nothing either, the fixture or the hooks are broken, not the claim.
+    """
+    source = _store(tmp_path / "control.h5ad", name="i", n_obs=4096, n_var=16,
+                    obs_kind="numeric", n_categories=4)
+    with count_io() as io:
+        export_table(source, "obs", None, tmp_path / "control.csv", 10_000, None, QUIET)
+
+    assert io.elements >= 4096, (
+        f"the control read only {io.elements} elements from a 4096-row store, "
+        "so the zero above proves nothing"
+    )
+
+
+# ---------------------------------------------------------------------------
+# grouping work does not depend on the number of groups
+#
+# `split --by` groups rows through `core.select.group_indices`. Its cost is
+# invisible to every other instrument in this file: the chunk is already in
+# memory so no read counter moves, nothing lasting is allocated, and the
+# Python line count per label is constant. Only counting what is handed to
+# numpy shows it.
+
+
+def test_grouping_does_not_rescan_the_column_once_per_group(tmp_path):
+    """One pass over the column, however many distinct values it holds.
+
+    Scanning per label is O(n_rows * n_groups): measured at n_obs=4096 it was
+    16,384 elements for 4 groups and 1,048,576 for 256 -- exactly n_rows per
+    group. On a million cells split by a thousand samples that is 10^9
+    comparisons, and `split` would appear to hang for the same reason
+    `concat --merge` did.
+
+    n_obs is fixed. The claim is about work per row, not total work.
+    """
+    from adata.core.select import group_indices
+    from adata.storage import open_store
+
+    n_obs = 4096
+
+    def measure(n_groups: int) -> int:
+        source = _store(
+            tmp_path / f"g{n_groups}.h5ad",
+            name="g",
+            n_obs=n_obs,
+            n_var=2,
+            n_categories=n_groups,
+        )
+        with open_store(source, "r") as store, count_scanned_elements() as scanned:
+            groups, order = group_indices(store.root, "obs", "ct")
+        assert len(order) == n_groups, "fixture did not produce the groups asked for"
+        # A floor, not a measurement -- see count_scanned_elements. If the
+        # implementation stops calling numpy by name the count collapses to
+        # zero and the ratio below would pass for the wrong reason.
+        assert scanned[0] >= n_obs, (
+            f"only {scanned[0]} elements scanned for {n_obs} rows; the counter "
+            "is no longer seeing this code path"
+        )
+        return scanned[0]
+
+    assert_independent_of(
+        measure, what="group_indices", axis="n_groups", sizes=(4, 256)
+    )
+
+
+# ---------------------------------------------------------------------------
+# export
+#
+# Each export reads the thing it is asked for and nothing else. The axis
+# differs per subcommand -- rows, elements, nonzeros, keys -- so each says
+# which one it scales and holds the rest fixed.
+
+
+def test_export_dataframe_reads_grow_linearly_in_rows(tmp_path):
+    def measure(n: int) -> int:
+        source = _store(tmp_path / f"ed{n}.h5ad", name="e", n_obs=n, n_var=4,
+                        obs_kind="numeric")
+        with count_io() as io:
+            export_table(source, "obs", None, tmp_path / f"ed{n}.csv",
+                         10_000, None, QUIET)
+        return io.reads
+
+    assert_grows_linearly(measure, what="export dataframe", axis="n_obs")
+
+
+def test_export_dataframe_reads_grow_linearly_in_column_count(tmp_path):
+    def measure(n: int) -> int:
+        source = _store(tmp_path / f"ec{n}.h5ad", name="e", n_obs=16, n_var=4,
+                        n_obs_columns=n)
+        with count_io() as io:
+            export_table(source, "obs", None, tmp_path / f"ec{n}.csv",
+                         10_000, None, QUIET)
+        return io.reads
+
+    assert_grows_linearly(measure, what="export dataframe", axis="n_obs_columns")
+
+
+def test_export_array_reads_grow_linearly_in_element_count(tmp_path):
+    def measure(n: int) -> int:
+        source = _store(tmp_path / f"ea{n}.h5ad", name="e", n_obs=n, n_var=4)
+        with count_io() as io:
+            export_npy(source, "obsm/X_pca", tmp_path / f"ea{n}.npy",
+                       100_000, QUIET)
+        return io.reads
+
+    assert_grows_linearly(measure, what="export array", axis="n_obs")
+
+
+@pytest.mark.parametrize("in_memory", [False, True])
+def test_export_sparse_reads_grow_linearly_in_nonzeros(tmp_path, in_memory):
+    """Both paths: the streamed one and the one that loads the matrix."""
+
+    def measure(n: int) -> int:
+        source = _store(tmp_path / f"es{in_memory}{n}.h5ad", name="e",
+                        n_obs=n, n_var=4)
+        with count_io() as io:
+            export_mtx(source, "X", tmp_path / f"es{in_memory}{n}.mtx",
+                       None, 1_000, in_memory, QUIET)
+        return io.reads
+
+    assert_grows_linearly(
+        measure, what=f"export sparse (in_memory={in_memory})", axis="nnz"
+    )
+
+
+def test_export_dict_reads_grow_linearly_in_key_count(tmp_path):
+    def measure(n: int) -> int:
+        source = _store_with_uns_keys(tmp_path / f"ej{n}.h5ad", n)
+        with count_io() as io:
+            export_json(source, "uns", tmp_path / f"ej{n}.json",
+                        100_000, False, QUIET)
+        return io.reads
+
+    assert_grows_linearly(
+        measure, what="export dict", axis="n_keys", sizes=(64, 256, 1024)
+    )
+
+
+def test_export_image_reads_grow_linearly_in_pixels(tmp_path):
+    from adata.commands.export import export_image
+
+    def measure(n: int) -> int:
+        source = _store_with_image(tmp_path / f"ei{n}.h5ad", n)
+        with count_io() as io:
+            export_image(source, "uns/picture", tmp_path / f"ei{n}.png", QUIET)
+        return io.reads
+
+    # n is the side of a square image, so pixels grow as n**2 -- the axis
+    # being scaled is the pixel count, and the sizes below keep it at 4x.
+    assert_grows_linearly(
+        measure, what="export image", axis="pixels", sizes=(16, 32, 64)
+    )
+
+
+# ---------------------------------------------------------------------------
+# import
+
+
+def test_import_dataframe_reads_grow_linearly_in_rows(tmp_path):
+    def measure(n: int) -> int:
+        source = _store(tmp_path / f"id{n}.h5ad", name="m", n_obs=n, n_var=4)
+        csv = tmp_path / f"id{n}.csv"
+        pd.DataFrame(
+            {"score": np.arange(n, dtype="int32")},
+            index=[f"mc{i}" for i in range(n)],
+        ).to_csv(csv)
+        with count_io() as io:
+            import_object(source, "obs", csv, tmp_path / f"od{n}.h5ad",
+                          False, None, QUIET)
+        # `work`, not `reads`: import is a write path, and measuring only
+        # reads made this vacuous.
+        return io.work
+
+    assert_grows_linearly(measure, what="import dataframe", axis="n_obs")
+
+
+def test_import_array_reads_grow_linearly_in_element_count(tmp_path):
+    def measure(n: int) -> int:
+        source = _store(tmp_path / f"ia{n}.h5ad", name="m", n_obs=n, n_var=4)
+        npy = tmp_path / f"ia{n}.npy"
+        np.save(npy, np.zeros((n, 3), dtype="float32"))
+        with count_io() as io:
+            import_object(source, "obsm/imported", npy,
+                          tmp_path / f"oa{n}.h5ad", False, None, QUIET)
+        return io.work
+
+    assert_grows_linearly(measure, what="import array", axis="n_obs")
+
+
+def test_import_sparse_reads_grow_linearly_in_nonzeros(tmp_path):
+    def measure(n: int) -> int:
+        source = _store(tmp_path / f"is{n}.h5ad", name="m", n_obs=n, n_var=4)
+        mtx = tmp_path / f"is{n}.mtx"
+        sparse_io = pytest.importorskip("scipy.io")
+        sparse_io.mmwrite(
+            str(mtx), sparse.csr_matrix(np.ones((n, 4), dtype="float32"))
+        )
+        with count_io() as io:
+            import_object(source, "layers/imported", mtx,
+                          tmp_path / f"os{n}.h5ad", False, None, QUIET)
+        return io.work
+
+    assert_grows_linearly(measure, what="import sparse", axis="nnz")
+
+
+def test_import_dict_reads_grow_linearly_in_key_count(tmp_path):
+    import json
+
+    def measure(n: int) -> int:
+        source = _store(tmp_path / f"ij{n}.h5ad", name="m", n_obs=8, n_var=4)
+        blob = tmp_path / f"ij{n}.json"
+        blob.write_text(json.dumps({f"k{i}": i for i in range(n)}))
+        with count_io() as io:
+            import_object(source, "uns/imported", blob,
+                          tmp_path / f"oj{n}.h5ad", False, None, QUIET)
+        return io.work
+
+    assert_grows_linearly(
+        measure, what="import dict", axis="n_keys", sizes=(64, 256, 1024)
+    )
+
+
+def test_import_image_reads_grow_linearly_in_pixels(tmp_path):
+    """Images take their own entry point.
+
+    `import_object` dispatches on extension and `.png` is deliberately not in
+    `EXTENSION_FORMAT`; the CLI's `import image` calls `_import_image`
+    directly, and it edits in place rather than writing a copy.
+    """
+    Image = pytest.importorskip("PIL.Image")
+    from adata.commands.import_data import _import_image
+
+    def measure(n: int) -> int:
+        source = _store(tmp_path / f"ii{n}.h5ad", name="m", n_obs=8, n_var=4)
+        png = tmp_path / f"ii{n}.png"
+        Image.fromarray(np.zeros((n, n, 3), dtype="uint8")).save(png)
+        with count_io() as io:
+            _import_image(source, "uns/picture", png, QUIET)
+        return io.work
+
+    assert_grows_linearly(
+        measure, what="import image", axis="pixels", sizes=(16, 32, 64)
+    )
+
+
+# ---------------------------------------------------------------------------
+# create, and the concat options nothing else covers
+
+
+@pytest.mark.parametrize("from_file", [False, True])
+def test_create_writes_grow_linearly_in_obs_count(tmp_path, from_file):
+    """Both the generated-names path and the name-file path."""
+
+    def measure(n: int) -> int:
+        names = None
+        if from_file:
+            names = tmp_path / f"cn{n}.txt"
+            names.write_text("\n".join(f"c{i}" for i in range(n)) + "\n")
+        output = tmp_path / f"cr{from_file}{n}.h5ad"
+        with count_io() as io:
+            create_store(
+                output,
+                QUIET,
+                n_obs=None if from_file else n,
+                n_var=4,
+                obs_names=names,
+            )
+        return io.work
+
+    assert_grows_linearly(
+        measure, what=f"create (from_file={from_file})", axis="n_obs"
+    )
+
+
+@pytest.mark.parametrize(
+    "option", ["label", "index_unique"], ids=["--label", "--index-unique"]
+)
+def test_concat_option_reads_grow_linearly_in_obs_count(tmp_path, option):
+    """Both build a per-row value, so both are worth a guard of their own."""
+
+    def measure(n: int) -> int:
+        files = _inputs(tmp_path, f"co{option}{n}", n_obs=n, n_var=4)
+        kwargs = {"label": "batch"} if option == "label" else {"index_unique": "-"}
+        with count_io() as io:
+            concat_on_disk(files, tmp_path / f"oco{option}{n}.h5ad", QUIET, **kwargs)
+        return io.reads
+
+    assert_grows_linearly(measure, what=f"concat --{option}", axis="n_obs")
+
+
+def test_split_by_var_reads_grow_linearly_in_group_count(tmp_path):
+    """The var axis takes a different path through `split` than obs does."""
+    from adata.commands.split import split_store
+
+    n_var = 512
+
+    def measure(n: int) -> int:
+        source = _store_with_var_groups(tmp_path / f"sv{n}.h5ad", n_var, n)
+        with count_io() as io:
+            split_store(source, "kind", tmp_path / f"osv{n}", QUIET,
+                        axis="var", manifest=False)
+        return io.reads
+
+    assert_grows_linearly(
+        measure, what="split --axis var", axis="n_groups", sizes=(8, 32, 128)
+    )
+
+
+# ---------------------------------------------------------------------------
+# fixture variants the guards above need
+
+
+def _store_with_uns_keys(path: Path, n_keys: int) -> Path:
+    obj = ad.AnnData(
+        X=np.ones((4, 2), dtype="float32"),
+        obs=pd.DataFrame(index=["a", "b", "c", "d"]),
+        var=pd.DataFrame(index=["g1", "g2"]),
+    )
+    obj.uns.update({f"k{i}": i for i in range(n_keys)})
+    obj.write_h5ad(path)
+    return path
+
+
+def _store_with_image(path: Path, side: int) -> Path:
+    obj = ad.AnnData(
+        X=np.ones((4, 2), dtype="float32"),
+        obs=pd.DataFrame(index=["a", "b", "c", "d"]),
+        var=pd.DataFrame(index=["g1", "g2"]),
+    )
+    obj.uns["picture"] = np.zeros((side, side, 3), dtype="uint8")
+    obj.write_h5ad(path)
+    return path
+
+
+def _store_with_var_groups(path: Path, n_var: int, n_groups: int) -> Path:
+    ad.AnnData(
+        X=np.ones((4, n_var), dtype="float32"),
+        obs=pd.DataFrame(index=["a", "b", "c", "d"]),
+        var=pd.DataFrame(
+            {"kind": pd.Categorical([f"k{i % n_groups}" for i in range(n_var)])},
+            index=[f"g{i}" for i in range(n_var)],
+        ),
+    ).write_h5ad(path)
+    return path
+
+
+# ---------------------------------------------------------------------------
+# streaming is bounded by the chunk, not by the input
+#
+# The README's actual claim, and the reason this tool exists. It is only
+# wholly true in one place today, so these guards say what is true rather
+# than what would be nice, and record the measured numbers so that drift is
+# visible. Everything below holds the chunk size fixed and grows the input by
+# 256x; a command that loaded everything would grow 256x with it.
+
+#: 256x span. Wide enough that "flat" and "linear" cannot be confused, and
+#: the reason these carry the `slow` marker: building a 65,536-row store is
+#: most of the ~45 s this section costs. They still gate merges; the marker
+#: is so a local run can say `-m "not slow"`.
+STREAM_SIZES = (256, 65536)
+
+
+def _peak_for(tmp_path: Path, tag: str, n: int, run) -> int:
+    source = _store(tmp_path / f"{tag}{n}.h5ad", name="s", n_obs=n, n_var=8,
+                    obs_kind="numeric")
+    with count_allocations() as peak:
+        run(source, n)
+    return peak[0]
+
+
+@pytest.mark.slow
+def test_export_array_peak_memory_is_set_by_the_chunk_not_the_input(tmp_path):
+    """The closest the tool comes to the claim outright.
+
+    Measured at a fixed 1,000-element chunk: 21.5 KiB at 256 rows and
+    34.3 KiB at 65,536 -- 1.6x for a 256x input. Not flat, so this does not
+    assert flat; the residue is fixed-size bookkeeping that grows with the
+    length of a formatted shape rather than with the data. Stating it as "at
+    least 64x better than the input" is both true and strong: loading
+    everything would be 256x.
+    """
+
+    def measure(n: int) -> int:
+        return _peak_for(
+            tmp_path, "sa", n,
+            lambda p, k: export_npy(p, "obsm/X_pca", tmp_path / f"sa{k}.npy",
+                                    1_000, QUIET),
+        )
+
+    assert_grows_slower_than_input(
+        measure,
+        what="export array peak allocation at --chunk 1000",
+        axis="n_obs",
+        sizes=STREAM_SIZES,
+        at_least=64.0,
+    )
+
+
+@pytest.mark.parametrize(
+    "label,factor,run",
+    [
+        # Measured over the 256x span: export sparse 6.5x, export dataframe
+        # 2.2x, subset 46x. The factors below sit roughly midway between the
+        # measurement and linear, so ordinary variation passes and a real
+        # drift towards loading everything fails.
+        (
+            "export sparse",
+            8.0,
+            lambda p, k, t: export_mtx(p, "X", t / f"ss{k}.mtx", None, 1_000,
+                                       False, QUIET),
+        ),
+        (
+            "export dataframe",
+            8.0,
+            lambda p, k, t: export_table(p, "obs", None, t / f"st{k}.csv",
+                                         1_000, None, QUIET),
+        ),
+        (
+            "subset",
+            2.0,
+            lambda p, k, t: subset_h5ad(p, t / f"su{k}.h5ad", None, None,
+                                        console=QUIET, obs_query="col >= 0",
+                                        chunk_rows=256),
+        ),
+    ],
+    ids=["export-sparse", "export-dataframe", "subset"],
+)
+@pytest.mark.slow
+def test_streamed_peak_memory_grows_far_slower_than_the_input(
+    tmp_path, label, factor, run
+):
+    """Not flat, and the guards should not pretend otherwise.
+
+    These paths read an index or an indptr whole, so peak allocation does
+    track n_obs -- just far below it. `subset` is the weakest of the three
+    because obs columns are materialised per column; that is a known gap,
+    reported by `benchmarks/` rather than hidden here.
+    """
+
+    def measure(n: int) -> int:
+        return _peak_for(tmp_path, f"st{label[-4:]}", n,
+                         lambda p, k: run(p, k, tmp_path))
+
+    assert_grows_slower_than_input(
+        measure,
+        what=f"{label} peak allocation at a fixed chunk",
+        axis="n_obs",
+        sizes=STREAM_SIZES,
+        at_least=factor,
+    )
+
+
+@pytest.mark.slow
+def test_streaming_export_sparse_costs_far_less_than_loading_the_matrix(
+    tmp_path,
+):
+    """`--in-memory` exists as the fast path; the default must earn its place.
+
+    Self-calibrating: both are measured in the same run, so the assertion
+    holds regardless of platform. Measured at 65,536 rows: 777 KiB streamed
+    against 31,763 KiB in memory, a factor of 41.
+    """
+    n = 65_536
+    source = _store(tmp_path / "cmp.h5ad", name="s", n_obs=n, n_var=8)
+
+    with count_allocations() as streamed:
+        export_mtx(source, "X", tmp_path / "streamed.mtx", None, 1_000, False, QUIET)
+    with count_allocations() as loaded:
+        export_mtx(source, "X", tmp_path / "loaded.mtx", None, 1_000, True, QUIET)
+
+    assert streamed[0] <= loaded[0] / 4, (
+        f"streaming export used {streamed[0] // 1024} KiB against "
+        f"{loaded[0] // 1024} KiB for --in-memory, a factor of only "
+        f"{loaded[0] / max(streamed[0], 1):.1f}. The default path is supposed "
+        "to be the one you reach for when the matrix does not fit."
+    )

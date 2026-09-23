@@ -56,6 +56,8 @@ class IOCounts:
 
     h5_calls: int = 0
     h5_elements: int = 0
+    h5_write_calls: int = 0
+    h5_written_elements: int = 0
     zarr_calls: int = 0
     zarr_elements: int = 0
     store_get: int = 0
@@ -76,6 +78,26 @@ class IOCounts:
         return self.h5_calls + self.zarr_calls
 
     @property
+    def writes(self) -> int:
+        """Elements written through either backend.
+
+        Zarr is counted in store keys rather than elements -- a chunk write
+        is one `set` -- so the two are not the same unit. For a guard that
+        only compares a command against itself at two sizes, that is fine.
+        """
+        return self.h5_written_elements + self.store_set
+
+    @property
+    def work(self) -> int:
+        """Reads plus writes, for commands whose job is mostly writing.
+
+        `import` and `create` read almost nothing; measuring only reads made
+        their guards vacuous, which the lower bound in `assert_grows_linearly`
+        caught.
+        """
+        return self.reads + self.writes
+
+    @property
     def reads(self) -> int:
         """The headline number: array elements plus store-level fetches.
 
@@ -86,10 +108,10 @@ class IOCounts:
 
     def __str__(self) -> str:  # pragma: no cover - diagnostic only
         return (
-            f"elements={self.elements} (h5={self.h5_elements} "
-            f"zarr={self.zarr_elements}) calls={self.calls} "
-            f"store: get={self.store_get} set={self.store_set} "
-            f"delete={self.store_delete}"
+            f"read={self.elements} (h5={self.h5_elements} "
+            f"zarr={self.zarr_elements}) wrote={self.h5_written_elements} "
+            f"calls={self.calls} store: get={self.store_get} "
+            f"set={self.store_set} delete={self.store_delete}"
         )
 
 
@@ -106,12 +128,18 @@ def count_io() -> Iterator[IOCounts]:
 
     Patches four seams, all verified against h5py 3.15.1 and zarr 3.1.5:
 
-    ===================================  ====================================
-    ``h5py.Dataset.__getitem__``         HDF5 reads
-    ``zarr.Array.__getitem__``           Zarr reads, v2 and v3 alike
-    ``zarr.storage.LocalStore.get``      chunk and metadata fetches
-    ``LocalStore.set`` / ``.delete``     write storms
-    ===================================  ====================================
+    ======================================  =================================
+    ``h5py.Dataset.__getitem__``            HDF5 reads
+    ``h5py.Dataset.__setitem__``            HDF5 writes
+    ``h5py.Group.create_dataset``           HDF5 writes made at creation
+    ``zarr.Array.__getitem__``              Zarr reads, v2 and v3 alike
+    ``zarr.storage.LocalStore.get``         chunk and metadata fetches
+    ``LocalStore.set`` / ``.delete``        write storms
+    ======================================  =================================
+
+    Both write seams are needed: `create_dataset(name, data=...)` writes its
+    payload during creation and never touches `__setitem__`, so hooking only
+    the latter leaves `import` and `create` measuring zero.
 
     The store hooks are the ones that see a metadata write storm: attribute
     writes never touch `Array.__getitem__`, so an O(k^2) attribute rewrite is
@@ -126,6 +154,8 @@ def count_io() -> Iterator[IOCounts]:
     counts = IOCounts()
 
     h5_get = h5py.Dataset.__getitem__
+    h5_set = h5py.Dataset.__setitem__
+    h5_create = h5py.Group.create_dataset
     zarr_get = zarr.Array.__getitem__
     store_get = LocalStore.get
     store_set = LocalStore.set
@@ -150,6 +180,21 @@ def count_io() -> Iterator[IOCounts]:
         _record(getattr(self, "path", "?") or "/", n)
         return result
 
+    def h5_set_wrapper(self: Any, key: Any, value: Any) -> Any:
+        counts.h5_write_calls += 1
+        counts.h5_written_elements += _size(value)
+        return h5_set(self, key, value)
+
+    def h5_create_wrapper(self: Any, name: Any, *args: Any, **kwargs: Any) -> Any:
+        counts.h5_write_calls += 1
+        data = kwargs.get("data")
+        if data is None and args:
+            # positional signature is (name, shape, dtype, data, ...)
+            data = args[2] if len(args) > 2 else None
+        if data is not None:
+            counts.h5_written_elements += _size(data)
+        return h5_create(self, name, *args, **kwargs)
+
     async def get_wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
         result = await store_get(self, *args, **kwargs)
         counts.store_get += 1
@@ -169,6 +214,8 @@ def count_io() -> Iterator[IOCounts]:
         return await store_delete(self, *args, **kwargs)
 
     h5py.Dataset.__getitem__ = h5_wrapper
+    h5py.Dataset.__setitem__ = h5_set_wrapper
+    h5py.Group.create_dataset = h5_create_wrapper
     zarr.Array.__getitem__ = zarr_wrapper
     LocalStore.get = get_wrapper
     LocalStore.set = set_wrapper
@@ -177,6 +224,8 @@ def count_io() -> Iterator[IOCounts]:
         yield counts
     finally:
         h5py.Dataset.__getitem__ = h5_get
+        h5py.Dataset.__setitem__ = h5_set
+        h5py.Group.create_dataset = h5_create
         zarr.Array.__getitem__ = zarr_get
         LocalStore.get = store_get
         LocalStore.set = store_set
@@ -241,6 +290,78 @@ def count_lines(prefix: str) -> Iterator[List[int]]:
         sys.settrace(previous)
 
 
+#: numpy entry points that scan their operand, and the argument that is
+#: scanned. Patched by name, so only calls written as `np.f(...)` are seen.
+_SCANNING = {
+    "nonzero": 0,
+    "flatnonzero": 0,
+    "unique": 0,
+    "argsort": 0,
+    "sort": 0,
+    "searchsorted": 0,
+    "bincount": 0,
+    "equal": 0,
+    "isin": 0,
+}
+
+
+@contextmanager
+def count_scanned_elements() -> Iterator[List[int]]:
+    """Elements handed to numpy's scanning primitives, as `[n]`.
+
+    The third instrument, and the one the other two cannot replace. A loop of
+    the shape::
+
+        for label in distinct_labels:
+            np.nonzero(values == label)
+
+    reads nothing extra (the chunk is already in memory), allocates nothing
+    that lasts, and executes a constant number of Python lines per label. It
+    is invisible to `count_io`, to `count_allocations` and to `count_lines`
+    alike, and it is O(len(values) * len(distinct_labels)).
+
+    Counting what is passed into numpy makes it visible, in the same spirit
+    as the `_CountingStr` guard in `test_performance.py`: when the cost lives
+    inside C, count what is handed to C.
+
+    What this does and does not see
+    -------------------------------
+    Only calls that go through the `numpy` module namespace by name. An
+    operator -- `values == label` -- dispatches to `ndarray.__eq__` and then
+    to the ufunc in C, so it never passes the patched `np.equal`; a scan
+    written purely as `(a == b).sum()` is invisible. Method form,
+    `arr.argsort()`, is invisible for the same reason.
+
+    So this is a floor on the real work, not a measurement of it, which is
+    exactly what a guard needs: it can only under-report, and the guards
+    using it assert a lower bound so that under-reporting to nothing fails
+    rather than passes.
+    """
+    total = [0]
+    originals = {name: getattr(np, name) for name in _SCANNING}
+
+    def wrap(name: str, position: int):
+        original = originals[name]
+
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            if len(args) > position:
+                try:
+                    total[0] += int(np.size(args[position]))
+                except Exception:  # pragma: no cover - exotic operands
+                    pass
+            return original(*args, **kwargs)
+
+        return wrapper
+
+    for name, position in _SCANNING.items():
+        setattr(np, name, wrap(name, position))
+    try:
+        yield total
+    finally:
+        for name, original in originals.items():
+            setattr(np, name, original)
+
+
 # ---------------------------------------------------------------------------
 # the growth assertion
 
@@ -300,12 +421,109 @@ def assert_grows_linearly(
         + ")"
     )
 
-    assert d1 >= mid, (
+    # Half an operation per element added. Work that is exactly one
+    # operation per element -- `export dict` reads each key once -- gives
+    # d1 = mid - small, which is 0.75 * mid at 4x spacing, so a bound of
+    # `mid` would reject correct code. Anything the counters cannot see at
+    # all gives 0 and still fails.
+    floor = (mid - small) / 2
+    assert d1 >= floor, (
         f"Too little measured work for the growth ratio to mean anything -- "
-        f"the counters are probably not seeing this operation. {series}"
+        f"the counters are probably not seeing this operation. Expected at "
+        f"least {floor:.0f} more operations between {small} and {mid}. "
+        f"{series}"
     )
     assert d2 <= limit * d1, (
         f"Cost grows faster than linearly in {axis}. Expect an increment "
         f"ratio near 4.0 for linear work; {limit} is the limit and quadratic "
         f"would be about 16. {series}"
     )
+
+
+#: How much a "flat" cost may drift across the whole size span.
+#:
+#: Not 1.0: opening a store, resolving an index and printing a tree all cost
+#: a little more when there is more to describe -- a longer index name, a
+#: wider shape to format. 1.5 across a 64x span leaves room for that and none
+#: at all for reading the data, which would be 64x.
+FLAT_TOLERANCE = 1.5
+
+#: Span for the flat guards. Wider than SIZES, because the claim is stronger
+#: and a wide span is what makes it convincing.
+FLAT_SIZES = (64, 4096)
+
+
+def assert_independent_of(
+    measure: Callable[[int], int],
+    *,
+    what: str,
+    axis: str,
+    sizes: tuple = FLAT_SIZES,
+    tolerance: float = FLAT_TOLERANCE,
+) -> None:
+    """Assert `measure` does not grow with `axis` at all.
+
+    A stronger claim than `assert_grows_linearly`, and the right one wherever
+    the tool promises work proportional to something other than input size:
+
+    * **Inspection.** `view` and `ls` read shapes, dtypes and attributes and
+      never the values behind them, which is the whole reason they return
+      instantly on a store too large to open. Linear growth here would mean
+      the promise had quietly stopped holding.
+    * **Grouping.** Work per row must not depend on how many groups there are.
+    * **Streaming.** At a fixed chunk size, peak memory must not track the
+      size of the input.
+
+    Each of those reads as obvious prose and none of them is checked by a
+    linear-growth guard, which would happily accept a 64x increase.
+    """
+    small, large = sizes[0], sizes[-1]
+    c_small, c_large = measure(small), measure(large)
+
+    span = large / small
+    series = (
+        f"{what}, scaling {axis}: {small}->{c_small}, {large}->{c_large} "
+        f"over a {span:.0f}x span"
+    )
+    ratio = (c_large / c_small) if c_small else float("inf") if c_large else 1.0
+
+    assert ratio <= tolerance, (
+        f"Cost tracks {axis}, and it is supposed to be independent of it. "
+        f"Growing in step with the input would be about {span:.0f}x; "
+        f"{tolerance}x is the limit. {series} (ratio {ratio:.2f})"
+    )
+
+
+def assert_grows_slower_than_input(
+    measure: Callable[[int], int],
+    *,
+    what: str,
+    axis: str,
+    sizes: tuple,
+    at_least: float,
+) -> None:
+    """Assert cost grows at least `at_least` times slower than the input.
+
+    The middle ground between `assert_grows_linearly` and
+    `assert_independent_of`, and the honest shape of most of this tool's
+    streaming: peak memory is not flat -- an index or an indptr is read whole
+    -- but it is far below the input curve, and that margin is the feature.
+
+    Stating the margin as a factor rather than an absolute ceiling keeps the
+    guard meaningful across platforms and interpreters, and makes a drift
+    back towards linear fail long before it becomes a bug report.
+    """
+    small, large = sizes[0], sizes[-1]
+    c_small, c_large = measure(small), measure(large)
+
+    span = large / small
+    growth = (c_large / c_small) if c_small else float("inf")
+    budget = span / at_least
+
+    assert growth <= budget, (
+        f"{what} cost is tracking {axis} too closely. Input grew {span:.0f}x "
+        f"and cost grew {growth:.1f}x; the requirement is at least "
+        f"{at_least:.0f}x better than the input, i.e. no more than "
+        f"{budget:.0f}x. Series: {small}->{c_small}, {large}->{c_large}"
+    )
+
