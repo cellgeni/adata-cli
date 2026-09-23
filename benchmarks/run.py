@@ -38,9 +38,13 @@ from benchmarks._measure import (
 from benchmarks.cases import CASES, Case, Contender
 
 #: Packages each baseline environment needs.
+#: `dask` is there for `concat_on_disk`, which imports it to concatenate a
+#: dense element such as obsm and raises ModuleNotFoundError without it.
+#: Installing it is the fair thing to do -- the rule is to give the baseline
+#: the best idiom it has -- and the dependency is itself worth knowing about.
 ENVIRONMENTS: Dict[str, List[str]] = {
-    "anndata": ["anndata", "scipy", "pandas", "h5py", "zarr"],
-    "scanpy": ["scanpy", "anndata", "scipy", "pandas", "h5py", "zarr"],
+    "anndata": ["anndata", "scipy", "pandas", "h5py", "zarr", "dask"],
+    "scanpy": ["scanpy", "anndata", "scipy", "pandas", "h5py", "zarr", "dask"],
 }
 
 
@@ -93,6 +97,7 @@ def _run_contender(
     *,
     timeout_s: float,
     scripts_dir: Path,
+    shape: tuple,
 ) -> Measurement:
     workdir.mkdir(parents=True, exist_ok=True)
     output = workdir / f"{case.name}{case.output_suffix}"
@@ -105,11 +110,21 @@ def _run_contender(
         elif stale.exists():
             stale.unlink()
 
+    sidecar = _build_sidecar(case, inputs, workdir)
+    # The tier's shape, so a case that builds rather than reads -- `create`
+    # has no input to take its size from -- scales with the tier instead of
+    # making the smoke run as heavy as the ci one.
     substitutions = {
         "output": str(output),
         "outdir": str(outdir),
+        "sidecar_csv": str(sidecar) if sidecar else "",
+        "n_obs": str(shape[0]),
+        "n_var": str(shape[1]),
         **{f"input{i}": str(p) for i, p in enumerate(inputs)},
     }
+    env = {"BENCH_N_OBS": str(shape[0]), "BENCH_N_VAR": str(shape[1])}
+    if sidecar:
+        env["BENCH_SIDECAR_CSV"] = str(sidecar)
 
     if contender.argv is not None:
         command = [part.format(**substitutions) for part in contender.argv]
@@ -127,7 +142,33 @@ def _run_contender(
 
     # Read-only cases produce nothing to size.
     watched = None if (case.output_suffix == "" and target == output) else target
-    return measure(command, output=watched, timeout_s=timeout_s)
+    if shutil.which(command[0]) is None and not Path(command[0]).exists():
+        # A contender whose binary is not installed -- `h5ls` comes with the
+        # HDF5 tools and is often absent. Missing is a result, not a crash.
+        return Measurement(
+            wall_s=0.0, maxrss_bytes=0, exit_code=127, status="n/a",
+            stderr_tail=f"{command[0]} is not installed",
+        )
+    return measure(command, output=watched, timeout_s=timeout_s, env=env)
+
+
+def _build_sidecar(case: Case, inputs: List[Path], workdir: Path) -> Optional[Path]:
+    """Build the auxiliary input a case declares, once per case.
+
+    Derived from the real store rather than invented, so an import writes
+    back something the file could plausibly have held.
+    """
+    if case.sidecar != "csv":
+        return None
+    path = workdir / f"{case.name}-sidecar.csv"
+    if path.exists():
+        return path
+    import h5py
+    from anndata.io import read_elem
+
+    with h5py.File(inputs[0], "r") as handle:
+        read_elem(handle["obs"]).to_csv(path)
+    return path
 
 
 def run(
@@ -190,6 +231,11 @@ def run(
                         interpreters,
                         timeout_s=timeout_s,
                         scripts_dir=scripts,
+                        shape=(
+                            (datasets.VAR_HEAVY.n_obs, datasets.VAR_HEAVY.n_var)
+                            if case.var_heavy
+                            else (tier.n_obs, tier.n_var)
+                        ),
                     )
                 )
                 if runs[-1].status != "ok":

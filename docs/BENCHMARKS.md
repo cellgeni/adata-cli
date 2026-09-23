@@ -13,10 +13,17 @@ loading the whole thing is often faster, and the tables say so where it is
 true -- the trade is memory for time, and a table that hid the cost would be
 worth nothing.
 
-A `ci` run taken during development, as an indication: `adata concat` of two
-50,000 x 20,000 stores peaked at 202 MB against 1,778 MB for `ad.concat` in
-memory and 439 MB for `anndata.experimental.concat_on_disk`, and was faster
-than both. The published tables will say where it is slower, too.
+A `ci` run taken during development, as an indication. `adata concat` of two
+50,000 x 20,000 stores peaked at 202 MB against 1,778 MB for `ad.concat` in memory
+and 439 MB for `anndata.experimental.concat_on_disk`, and was faster than both.
+`adata create` used 78 MB against 2,225 MB.
+
+The tables also carry the rows where adata-cli loses, because those are the same
+measurement. `export sparse` streams a 50,000 x 20,000 matrix in 68 MB and takes
+10.8 s, where loading it whole takes 759 MB and 1.9 s; and `h5ls -r` lists the file
+in 0.01 s and 7 MB against our 0.25 s and 63 MB, being C rather than a Python
+process. The trade is memory for time, and a table that hid the cost would not be
+worth publishing.
 
 To produce one locally:
 

@@ -78,9 +78,19 @@ h5py 3.15.1 and zarr 3.1.5:
 | Hook | Sees |
 |---|---|
 | `h5py.Dataset.__getitem__` | HDF5 reads |
+| `h5py.Dataset.__setitem__` | HDF5 writes |
+| `h5py.Group.create_dataset` | HDF5 writes made at creation |
 | `zarr.Array.__getitem__` | Zarr reads, v2 and v3 alike |
 | `zarr.storage.LocalStore.get` | chunk and metadata fetches |
 | `LocalStore.set` / `.delete` | write storms |
+
+Both write seams are needed. `create_dataset(name, data=...)` writes its payload
+during creation and never touches `__setitem__`, so hooking only the latter leaves
+every `import` and `create` guard measuring zero — which is how they were first
+written, and what the lower bound below caught.
+
+Use `io.reads` for a read path, `io.work` (reads plus writes) for `import` and
+`create`.
 
 The libraries are patched rather than anything in `src/adata/`. An in-repo
 seam would only see the call sites that remembered to use it, which is the
@@ -127,6 +137,43 @@ produce n_obs x n_var_union cells. The axes worth separate coverage are
 `n_var`, `n_obs`, `n_inputs`, `n_obs_columns`, `n_var_columns`,
 `n_categories` and `n_groups`.
 
+### Three invariants, not one
+
+`assert_grows_linearly` only catches super-linear growth. Most commands need exactly
+that, but two claims this tool makes are stronger, and a linear guard would happily
+accept a 64x increase in a command that is supposed to read nothing.
+
+| Helper | Claim | Used for |
+|---|---|---|
+| `assert_grows_linearly` | no worse than linear in one axis | most commands |
+| `assert_grows_slower_than_input` | grows at least N times slower than the input | streaming at a fixed chunk |
+| `assert_independent_of` | does not grow at all | inspection, and grouping work per row |
+
+**Inspection is free, and that is an exact number.** `view` and `ls` reach only
+`.shape`, `.dtype` and `.attrs`: `axis_len` goes through `element_len`, which reads a
+shape, and `_array_details` and `_infer_untagged` never touch a value. So the guard
+asserts **zero** data elements read rather than a ratio — 0 against 0 is not a
+meaningful ratio, and the moment inspection reads one column the answer stops being
+zero however the store scales. A companion test exports the same fixture to prove
+there was data there to read, so the zero cannot pass because the fixture was empty.
+
+**Streaming is bounded well below the input, which is weaker than it sounds and is
+what the measurements support.** Over a 256x span at a fixed chunk:
+
+| | peak allocation growth |
+|---|---|
+| `export array` | 1.6x |
+| `export dataframe` | 2.2x |
+| `export sparse` | 6.5x |
+| `subset` | 46x |
+
+Only `export array` is close to flat, so only it is held to a near-flat bound. None is
+asserted as flat outright. `subset` is the weakest because obs columns are
+materialised one at a time — a known gap that `benchmarks/` reports rather than these
+guards conceal. Streamed `export sparse` is separately asserted to stay under a
+quarter of what `--in-memory` costs, both measured in the same run so the factor holds
+on any machine.
+
 ### Where counting is not enough
 
 Two real defects in `concat.py` were invisible to all of the above, and both
@@ -143,9 +190,23 @@ needed their own instrument:
   against the numeric column path measured in the same run -- self-calibrating,
   so it needs no hand-tuned budget and holds across interpreters.
 
-`count_allocations` (tracemalloc) and `count_lines` (`sys.settrace`) are the
-tools for these. The line tracer costs a 10-50x slowdown, so its tests carry
-the `perf` marker and stay small.
+A third case needed a third instrument. `split --by` grouped rows with
+`np.nonzero(values == label)` inside a loop over distinct labels, rescanning each
+chunk once per label: O(n_rows x n_groups), which at a million cells and a thousand
+samples is 10^9 comparisons. No read counter moves, because the chunk is already in
+memory; nothing lasting is allocated; and the Python line count per label is constant.
+`count_scanned_elements` counts what is handed to numpy's scanning primitives and
+makes it visible — 16,384 elements at 4 groups against 1,048,576 at 256.
+
+It is a **floor, not a measurement**: an operator such as `values == label` dispatches
+to the ufunc in C and never passes the patched `np.equal`, and `arr.argsort()` is
+invisible for the same reason. That is the right property for a guard — it can only
+under-report — but it means a guard using it must also assert a lower bound, so that
+under-reporting to nothing fails instead of passing.
+
+`count_allocations` (tracemalloc), `count_lines` (`sys.settrace`) and
+`count_scanned_elements` are the tools for all of this. The line tracer costs a 10-50x
+slowdown, so its tests carry the `perf` marker and stay small.
 
 ### What the guards deliberately do not claim
 
@@ -153,6 +214,28 @@ Obs columns are read whole, so peak allocation for a concat is O(n_obs), not
 O(`--chunk`). The streaming guarantee holds for X, not for obs annotation.
 The guards only stop that getting worse than linear; `benchmarks/` reports
 the actual curve.
+
+### What is covered
+
+Every subcommand has a guard. When you add a command, add one: pick the axis its cost
+should scale with, scale only that, and hold everything else fixed.
+
+| Command | Axis scaled | Invariant |
+|---|---|---|
+| `view`, `view --types`, `ls`, `ls --long`, `ls --plain` | n_obs, n_var | **zero** data reads |
+| `create` | n_obs | linear in writes, both generated names and a name file |
+| `concat` | n_var, n_obs, n_inputs, n_obs_columns, n_var_columns | linear; every `--merge` strategy and both joins |
+| `concat --label`, `--index-unique` | n_obs | linear |
+| `concat` category union | n_categories | bounded string comparisons |
+| `subset` by name, by query | n_obs, n_var | linear |
+| `split --by`, `--axis var` | n_groups | linear reads, **flat** scan work |
+| `export dataframe` | n_obs, n_obs_columns | linear |
+| `export array`, `sparse` (both paths), `dict`, `image` | elements, nnz, keys, pixels | linear |
+| `import dataframe`, `array`, `sparse`, `dict`, `image` | rows, elements, nnz, keys, pixels | linear in writes |
+| h5ad to zarr | n_obs | linear |
+
+The `slow` marker is on the three guards that build a 65,536-row store; they still gate
+merges, and `-m "not slow"` skips them locally. `perf` is on the tracing guards.
 
 ### Reading a failure
 
@@ -179,17 +262,28 @@ seconds end to end on a laptop, so the full set with three repeats is minutes
 rather than the hour the workflow allows. The 90-minute timeout is headroom
 for `large`, not an estimate.
 
-A `ci` run measured while writing this, for a sense of what the tables say:
+A `ci` run measured while writing this, for a sense of what the tables say — and of
+what they are for. Peak RSS first, wall time second:
 
-| | adata-cli | anndata (`concat_on_disk`) | anndata (in memory) |
-|---|---|---|---|
-| `concat-inner`, peak RSS | **202 MB** | 439 MB | 1,778 MB |
-| `concat-inner`, wall time | **2.35 s** | 16.44 s | 3.69 s |
-| `inspect`, peak RSS | **63 MB** | 138 MB (`read_elem`) | 556 MB (full load) |
+| Case | adata-cli | best baseline |
+|---|---|---|
+| `concat-inner` | **202 MB**, 2.35 s | 439 MB, 16.44 s (`concat_on_disk`) |
+| `concat-outer` | **202 MB**, 2.60 s | 436 MB, **2.24 s** (`concat_on_disk`) |
+| `inspect` | **63 MB**, 0.31 s | 138 MB, 0.79 s (`read_elem`) |
+| `create` | **78 MB**, 0.28 s | 2,225 MB, 2.85 s |
+| `import-dataframe` | **107 MB**, 0.41 s | 571 MB, 1.84 s |
+| `export-sparse` | **68 MB**, 10.79 s | 759 MB, **1.90 s** (full load) |
+| `ls` | 63 MB, 0.25 s | **7 MB, 0.01 s** (`h5ls -r`) |
 
-Note that 202 MB is not flat in input size -- obs columns are read whole, and
-a dense block is `--chunk` x n_var. The benchmark exists to keep that curve
-visible rather than to assert a claim the code does not yet meet.
+The last two rows are the reason the report is not a leaderboard. `export sparse`
+streams in a tenth of the memory and takes five times as long; `h5ls` walks the file
+in a hundredth of our time and a ninth of our memory, because it is C and does not
+start a Python interpreter. Both belong in the table. A benchmark that only published
+the rows we win would not be worth running.
+
+Note also that 202 MB is not flat in input size — obs columns are read whole, and a
+dense block is `--chunk` x n_var. The benchmark exists to keep that curve visible
+rather than to assert a claim the code does not yet meet.
 
 Results are published to `docs/BENCHMARKS.md` and `docs/benchmarks/<tag>.json`
 on every tag, and appended to the GitHub release notes if a release exists.
@@ -231,6 +325,13 @@ decays fastest.
 - **Do not hide the rows where the baseline wins.** `_concat_csr` loops per
   row in Python and scipy's C `vstack` will often beat it on time at many
   times the memory. That trade is the argument for the tool.
+- **Give the baseline everything it needs.** `concat_on_disk` imports `dask` to
+  concatenate a dense element and fails outright without it, so the baseline
+  environments install it. Measuring a library crippled by a missing optional
+  dependency would be measuring our own setup.
+- **Four commands are deliberately not benchmarked.** `export image`, `export dict`,
+  `import image` and `import dict` have no library equivalent, so their rows would only
+  ever read `n/a` while adding runtime to every tag. The complexity guards cover them.
 - **Say whether the page cache was dropped.** A fixture written seconds ago
   is entirely in RAM, which understates streaming. The runner can drop it; a
   laptop usually cannot, and the report states which happened.

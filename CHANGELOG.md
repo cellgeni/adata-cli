@@ -19,6 +19,13 @@ Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
   Category merging probed a list rather than a dict: 2,096,128 string
   comparisons to union 1,024 categories, and around 5e9 for a 100k-category
   column. Found by the new guards.
+- **`split --by` was quadratic**, O(n_rows x n_groups). `group_indices` grouped
+  rows with `np.nonzero(values == label)` inside a loop over distinct labels,
+  rescanning each chunk once per label: at 4,096 rows, 16,384 elements scanned
+  for 4 groups and 1,048,576 for 256. A million cells split by a thousand
+  samples is ~10^9 comparisons. One `np.unique` pass per chunk makes it flat
+  in the group count. Found by the new guards; order of first appearance,
+  which names the output files, is unchanged.
 - **`concat` built a Python object per row** for nullable and string obs
   columns, then walked the list twice more. Filling a typed buffer by slice
   removes three full passes over every such column.
@@ -30,12 +37,19 @@ Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
   seconds -- h5py and zarr reads, Zarr store traffic, Python allocation and
   executed lines -- and assert that successive increments grow no faster than
   linearly, so nothing here can fail because a CI runner was busy. See
-  [docs/TESTING.md](docs/TESTING.md#performance).
+  [docs/TESTING.md](docs/TESTING.md#performance). Every subcommand is covered:
+  `ls`, `view`, `create`, all five `export` and all five `import` variants,
+  `split` on both axes, and the `concat` options nothing else reached.
+  Two claims are now enforced rather than described -- `view` and `ls` read
+  **zero** data elements at any store size, and streaming stays far below the
+  input curve at a fixed `--chunk`.
 - **A comparative benchmark** (`benchmarks/`), run on every tag against
   anndata and against scanpy where scanpy has a real equivalent. Reports peak
   RSS, wall time and output size; publishes to
   [docs/BENCHMARKS.md](docs/BENCHMARKS.md) and the release notes. Report-only
-  -- it never fails a build.
+  -- it never fails a build. Fifteen cases, covering every command with a real
+  baseline, including `h5ls -r` for `ls` and the rows where adata-cli is the
+  slower of the two.
 - **`--merge drop` and `--uns-merge drop` are accepted.** `drop` was already
   the documented default behaviour but was rejected as a value, so a config
   could not state it explicitly.

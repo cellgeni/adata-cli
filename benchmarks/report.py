@@ -120,8 +120,11 @@ def render(payload: Dict, previous: Optional[Dict] = None) -> str:
                 f"| {record['contender']} | {wall} | {rss} | {output} | "
                 f"{_delta(record, before.get((name, record['contender'])))} |"
             )
-            if record.get("note"):
-                lines.append(f"| | *{record['note']}* | | | |")
+            note = record.get("note") or (
+                record.get("stderr_tail") if record.get("status") == "n/a" else None
+            )
+            if note:
+                lines.append(f"| | *{note}* | | | |")
         lines.append("")
 
     lines.append("---")

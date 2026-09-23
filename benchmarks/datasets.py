@@ -108,6 +108,11 @@ def _write(path: Path, tier: Tier, seed: int, *, n_var_columns: int = 2) -> Path
     )
 
     obj = ad.AnnData(X=matrix, obs=obs, var=var)
+    # A dense element, so the `export array` / `import array` cases have
+    # something of realistic width to move. 50 columns is a typical PCA.
+    obj.obsm["X_pca"] = rng.standard_normal(
+        (tier.n_obs, 50), dtype="float32"
+    )
     obj.write_h5ad(path, compression="lzf")
     del obj, matrix, blocks
 

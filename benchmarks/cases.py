@@ -13,6 +13,11 @@ labelled second row, where the point is the gap between the two.
 its output; `write_h5ad` defaults to none. Left alone, adata-cli's output
 looks smaller for reasons unrelated to the tool.
 
+**Give the baseline everything it needs.** `concat_on_disk` imports `dask`
+to handle a dense element and fails outright without it, so the baseline
+environments install it. Measuring a library crippled by a missing optional
+dependency would be measuring our own setup.
+
 **`n/a` is a result.** `concat_on_disk` is CSR/CSC-oriented and its outer-join
 support has varied by version; scanpy has no streaming concat at all. Print
 what refused and why. An omitted row reads as an oversight; a stated `n/a`
@@ -27,6 +32,12 @@ against.
 in Python; scipy's C `vstack` will very likely be several times faster in wall
 time at many times the memory. That trade *is* the argument for this tool.
 The table is "peak RSS against wall time", not a leaderboard.
+
+**Not every command has a baseline, and four are left out on purpose.**
+`export image`, `export dict`, `import image` and `import dict` have no
+library equivalent, so their rows would only ever read `n/a` and they would
+add runtime to every tag for nothing. They are covered by the complexity
+guards in `tests/test_performance.py` instead.
 
 **scanpy's filter functions are not our subset.** `sc.pp.filter_cells`
 *computes* `n_genes` by scanning X; `adata subset --obs-query` filters a
@@ -72,6 +83,10 @@ class Case:
     output_suffix: str = ".h5ad"
     #: Use the var-heavy shape rather than the tier's main shape.
     var_heavy: bool = False
+    #: An auxiliary input the case needs, e.g. the CSV an import reads.
+    #: Built once from the first input and offered to CLI contenders as
+    #: `{sidecar_csv}` and to scripts as $BENCH_SIDECAR_CSV.
+    sidecar: Optional[str] = None
     tags: List[str] = field(default_factory=list)
 
 
@@ -305,6 +320,167 @@ CASES: List[Case] = [
                     "    obj[idx].write_h5ad(\n"
                     "        os.path.join(OUT, f'{key}.h5ad'), compression=COMPRESSION\n"
                     "    )\n"
+                ),
+            ),
+        ],
+    ),
+    # -- structure and metadata -------------------------------------------
+    Case(
+        name="ls",
+        question="List everything in the store.",
+        output_suffix="",
+        contenders=[
+            Contender("adata-cli", argv=["adata", "ls", "{input0}", "--plain"]),
+            Contender(
+                "h5py (visit)",
+                script=_py(
+                    "names = []\n"
+                    "with h5py.File(IN[0], 'r') as f:\n"
+                    "    f.visit(names.append)\n"
+                    "print(len(names))\n"
+                ),
+            ),
+            # The obvious tool someone already has. If the CLI cannot beat a
+            # 20-year-old C program at walking an HDF5 file, that is worth
+            # knowing and worth printing.
+            Contender("h5ls -r", argv=["h5ls", "-r", "{input0}"]),
+        ],
+        tags=["headline"],
+    ),
+    Case(
+        name="create",
+        question="Write an empty store with a given obs/var shape.",
+        contenders=[
+            Contender(
+                "adata-cli",
+                argv=[
+                    "adata", "create", "{output}",
+                    "--n-obs", "{n_obs}", "--n-var", "{n_var}",
+                ],
+            ),
+            Contender(
+                "anndata",
+                script=_py(
+                    "import os, pandas as pd\n"
+                    "n_obs = int(os.environ['BENCH_N_OBS'])\n"
+                    "n_var = int(os.environ['BENCH_N_VAR'])\n"
+                    "obs = pd.DataFrame(index=[f'cell_{i}' for i in range(n_obs)])\n"
+                    "var = pd.DataFrame(index=[f'gene_{i}' for i in range(n_var)])\n"
+                    "ad.AnnData(\n"
+                    "    X=np.zeros((n_obs, n_var), dtype='float32'), obs=obs, var=var\n"
+                    ").write_h5ad(OUT, compression=COMPRESSION)\n"
+                ),
+            ),
+        ],
+    ),
+    # -- export -------------------------------------------------------------
+    Case(
+        name="export-array",
+        question="Write a dense element out as .npy.",
+        output_suffix=".npy",
+        contenders=[
+            Contender(
+                "adata-cli",
+                argv=[
+                    "adata", "export", "array", "{input0}", "obsm/X_pca",
+                    "-o", "{output}",
+                ],
+            ),
+            Contender(
+                "anndata (read_elem)",
+                script=_py(
+                    "from anndata.io import read_elem\n"
+                    "with h5py.File(IN[0], 'r') as f:\n"
+                    "    np.save(OUT, read_elem(f['obsm/X_pca']))\n"
+                ),
+            ),
+            Contender(
+                "anndata (full load)",
+                script=_py("np.save(OUT, ad.read_h5ad(IN[0]).obsm['X_pca'])\n"),
+            ),
+        ],
+    ),
+    Case(
+        name="export-sparse",
+        question="Write X out as Matrix Market text.",
+        output_suffix=".mtx",
+        contenders=[
+            Contender(
+                "adata-cli",
+                argv=[
+                    "adata", "export", "sparse", "{input0}", "X", "-o", "{output}",
+                ],
+            ),
+            Contender(
+                "anndata (sparse_dataset)",
+                script=_py(
+                    "import scipy.io as sio\n"
+                    "from anndata.abc import CSRDataset\n"
+                    "from anndata.io import sparse_dataset\n"
+                    "with h5py.File(IN[0], 'r') as f:\n"
+                    "    sio.mmwrite(OUT, sparse_dataset(f['X'])[...])\n"
+                ),
+            ),
+            Contender(
+                "anndata (full load)",
+                script=_py(
+                    "import scipy.io as sio\n"
+                    "sio.mmwrite(OUT, ad.read_h5ad(IN[0]).X)\n"
+                ),
+            ),
+        ],
+    ),
+    # -- import -------------------------------------------------------------
+    Case(
+        name="import-dataframe",
+        question="Replace obs from a CSV.",
+        sidecar="csv",
+        contenders=[
+            Contender(
+                "adata-cli",
+                argv=[
+                    "adata", "import", "dataframe", "{input0}", "obs",
+                    "{sidecar_csv}", "-o", "{output}",
+                ],
+            ),
+            Contender(
+                "anndata",
+                script=_py(
+                    "import pandas as pd, os\n"
+                    "csv = os.environ['BENCH_SIDECAR_CSV']\n"
+                    "obj = ad.read_h5ad(IN[0])\n"
+                    "obj.obs = pd.read_csv(csv, index_col=0)\n"
+                    "obj.write_h5ad(OUT, compression=COMPRESSION)\n"
+                ),
+            ),
+        ],
+    ),
+    # -- concat, outer ------------------------------------------------------
+    Case(
+        name="concat-outer",
+        question="Concatenate two stores keeping the union of variables.",
+        inputs=2,
+        contenders=[
+            Contender(
+                "adata-cli",
+                argv=[
+                    "adata", "concat", "{input0}", "{input1}",
+                    "-o", "{output}", "--join", "outer",
+                ],
+            ),
+            Contender(
+                "anndata (concat_on_disk)",
+                script=_py(
+                    "from anndata.experimental import concat_on_disk\n"
+                    "concat_on_disk(IN, OUT, join='outer')\n"
+                ),
+            ),
+            Contender(
+                "anndata (in memory)",
+                script=_py(
+                    "parts = [ad.read_h5ad(p) for p in IN]\n"
+                    "ad.concat(parts, join='outer')"
+                    ".write_h5ad(OUT, compression=COMPRESSION)\n"
                 ),
             ),
         ],
