@@ -169,10 +169,27 @@ uv run python -m benchmarks.run --tier smoke --out results.json
 uv run python -m benchmarks.report results.json
 ```
 
-Tiers are `smoke` (1,000 x 2,000, seconds), `ci` (50,000 x 20,000, 35-50
-minutes for the whole suite) and `large` (500,000 x 20,000, dispatch only,
-where the in-memory baseline is expected to hit the ceiling). Every tier also
-builds the 2,000 x 36,601 var-heavy shape, which is what hung in 0.5.1.
+Tiers are `smoke` (1,000 x 2,000, seconds), `ci` (50,000 x 20,000) and
+`large` (500,000 x 20,000, dispatch only, where the in-memory baseline is
+expected to hit the ceiling). Every tier also builds the 2,000 x 36,601
+var-heavy shape, which is what hung in 0.5.1.
+
+`ci` is cheaper than it looks: 580 MB of fixtures and three cases took 43
+seconds end to end on a laptop, so the full set with three repeats is minutes
+rather than the hour the workflow allows. The 90-minute timeout is headroom
+for `large`, not an estimate.
+
+A `ci` run measured while writing this, for a sense of what the tables say:
+
+| | adata-cli | anndata (`concat_on_disk`) | anndata (in memory) |
+|---|---|---|---|
+| `concat-inner`, peak RSS | **202 MB** | 439 MB | 1,778 MB |
+| `concat-inner`, wall time | **2.35 s** | 16.44 s | 3.69 s |
+| `inspect`, peak RSS | **63 MB** | 138 MB (`read_elem`) | 556 MB (full load) |
+
+Note that 202 MB is not flat in input size -- obs columns are read whole, and
+a dense block is `--chunk` x n_var. The benchmark exists to keep that curve
+visible rather than to assert a claim the code does not yet meet.
 
 Results are published to `docs/BENCHMARKS.md` and `docs/benchmarks/<tag>.json`
 on every tag, and appended to the GitHub release notes if a release exists.

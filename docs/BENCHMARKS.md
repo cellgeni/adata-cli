@@ -13,6 +13,11 @@ loading the whole thing is often faster, and the tables say so where it is
 true -- the trade is memory for time, and a table that hid the cost would be
 worth nothing.
 
+A `ci` run taken during development, as an indication: `adata concat` of two
+50,000 x 20,000 stores peaked at 202 MB against 1,778 MB for `ad.concat` in
+memory and 439 MB for `anndata.experimental.concat_on_disk`, and was faster
+than both. The published tables will say where it is slower, too.
+
 To produce one locally:
 
 ```bash
