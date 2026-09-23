@@ -102,3 +102,27 @@ def test_maxrss_is_normalised_to_bytes():
     assert isinstance(result, Measurement)
     # Any CPython start-up is well over 1 MB and well under 4 GB.
     assert 1024**2 < result.maxrss_bytes < 4 * 1024**3, result.maxrss_bytes
+
+
+def test_publishing_keeps_the_page_prose():
+    """A republish must not reduce the docs page to bare tables.
+
+    `publish` rewrites `docs/BENCHMARKS.md` in full on every tag. An earlier
+    version wrote only the rendered results, which would have thrown away
+    everything explaining what the numbers mean the first time it ran.
+    """
+    from benchmarks.report import PAGE_TEMPLATE, build_page
+
+    template = PAGE_TEMPLATE.read_text()
+    assert "<!-- results -->" in template, (
+        "the results marker is gone from page_template.md, so results would "
+        "be appended rather than placed"
+    )
+
+    page = build_page("## Results\n\nsome tables\n")
+    assert "some tables" in page
+    assert "Peak RSS is the headline" in page, "the framing was dropped"
+    assert "Running it yourself" in page, "the trailing sections were dropped"
+    assert page.count("\n# ") + page.startswith("# ") == 1, (
+        "the published page must have exactly one H1"
+    )

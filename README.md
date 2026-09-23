@@ -4,7 +4,7 @@ A command-line tool for exploring huge AnnData stores (`.h5ad` and `.zarr`) with
 
 ## Features
 
-- Streaming access to very large `.h5ad` and `.zarr` stores
+- Streaming access to very large `.h5ad` and `.zarr` stores — see [the benchmarks](docs/BENCHMARKS.md) for what that costs in practice, including where loading the file outright is faster
 - Auto-detects `.h5ad` files vs `.zarr` directories
 - Chunked processing for dense and sparse matrices (CSR/CSC)
 - Reads every AnnData on-disk layout, from 0.7.x through the current spec, and always writes the current one
@@ -83,7 +83,8 @@ adata concat per_sample/*.h5ad -o merged.h5ad --join outer --label sample
 - [Get started](docs/GET_STARTED.md) — a short tutorial
 - [Command reference](docs/COMMANDS.md) — every command and flag
 - [Element spec: HDF5](docs/ELEMENTS_h5ad.md) / [Zarr](docs/ELEMENTS_zarr.md) — the on-disk format, and what this tool does with it
-- [Testing](docs/TESTING.md) — how the suite is organised, and how compatibility is verified against six anndata releases
+- [Testing](docs/TESTING.md) — how the suite is organised, how compatibility is verified against six anndata releases, and the complexity guards that keep cost regressions out
+- [Benchmarks](docs/BENCHMARKS.md) — peak memory and wall time against anndata and scanpy, remeasured on every release
 - [Changelog](CHANGELOG.md)
 
 ## Docker

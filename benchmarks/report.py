@@ -66,15 +66,10 @@ def render(payload: Dict, previous: Optional[Dict] = None) -> str:
     )
 
     lines: List[str] = []
-    lines.append(f"# Benchmark: `{payload['ref']}`")
-    lines.append("")
-    lines.append(
-        "adata-cli against anndata, and scanpy where it has a real "
-        "equivalent. **Peak RSS is the headline, not wall time.** This tool "
-        "exists so that memory is set by `--chunk` rather than by input size; "
-        "for anything that fits in RAM, loading the whole thing is often "
-        "faster, and the rows below say so where it is true."
-    )
+    # H2, because this is embedded under the page's own H1 by `build_page`.
+    # The framing lives in `page_template.md`; repeating it here would print
+    # it twice on the published page.
+    lines.append(f"## Results — `{payload['ref']}`")
     lines.append("")
 
     n_obs, n_var, density = payload["tier_shape"]
@@ -107,7 +102,7 @@ def render(payload: Dict, previous: Optional[Dict] = None) -> str:
 
     for name, records in grouped.items():
         case = cases.get(name)
-        lines.append(f"## `{name}`")
+        lines.append(f"### `{name}`")
         lines.append("")
         if case:
             lines.append(f"{case.question}")
@@ -188,7 +183,7 @@ def history_table(docs: Path) -> str:
         return ""
 
     lines = [
-        "## History",
+        "### History",
         "",
         "`concat-inner` on adata-cli, run by run. Full results for each are "
         "in [`docs/benchmarks/`](benchmarks/).",
@@ -205,8 +200,34 @@ def history_table(docs: Path) -> str:
     return "\n".join(lines) + "\n"
 
 
+#: The standing prose of the docs page, with `<!-- results -->` marking where
+#: the tables go. Kept as a file rather than inline so the words that explain
+#: the numbers live in one place and survive every republish -- an earlier
+#: version overwrote the whole page with bare tables, which would have thrown
+#: away the framing on the first tag.
+PAGE_TEMPLATE = Path(__file__).with_name("page_template.md")
+
+#: What the template shows before any run has happened.
+NOT_YET_RUN = (
+    "## Results\n\nNo run has been published yet. The next tag fills this in; "
+    "until then, produce one locally with the commands below.\n"
+)
+
+
+def build_page(body: str) -> str:
+    """Wrap rendered results in the page's standing explanation."""
+    template = PAGE_TEMPLATE.read_text()
+    if "<!-- results -->" not in template:  # pragma: no cover - template edited
+        return template.rstrip() + "\n\n" + body
+    return template.replace("<!-- results -->", body.strip())
+
+
 def publish(payload: Dict, results: Path, docs: Path) -> Path:
-    """Copy the raw results in and rewrite the docs page."""
+    """Copy the raw results in and rewrite the docs page.
+
+    Only the results section is replaced; everything explaining what the
+    numbers mean comes from `page_template.md` and is reinstated every time.
+    """
     store = docs / "benchmarks"
     store.mkdir(parents=True, exist_ok=True)
     ref = payload["ref"].replace("/", "-")
@@ -214,7 +235,9 @@ def publish(payload: Dict, results: Path, docs: Path) -> Path:
 
     previous = _previous(store, skip=f"{ref}.json")
     page = docs / "BENCHMARKS.md"
-    page.write_text(render(payload, previous) + "\n" + history_table(docs))
+    page.write_text(
+        build_page(render(payload, previous) + "\n" + history_table(docs))
+    )
     return page
 
 

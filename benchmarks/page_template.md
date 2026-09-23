@@ -25,26 +25,7 @@ the entire measurement.
 library offers an equivalent, so the rows would only ever read `n/a`. They are covered
 by the complexity guards instead.
 
-## Results
-
-No tagged run has been published yet — the next tag fills this in. These
-numbers are from a `ci` run during development, as an indication of what the
-tables will say.
-
-| Case | adata-cli | best baseline |
-|---|---|---|
-| `concat-inner` | **202 MB**, 2.35 s | 439 MB, 16.44 s (`concat_on_disk`) |
-| `concat-outer` | **202 MB**, 2.60 s | 436 MB, **2.24 s** (`concat_on_disk`) |
-| `create` | **78 MB**, 0.28 s | 2,225 MB, 2.85 s |
-| `inspect` | **63 MB**, 0.31 s | 138 MB, 0.79 s (`read_elem`) |
-| `import-dataframe` | **107 MB**, 0.41 s | 571 MB, 1.84 s |
-| `export-sparse` | **68 MB**, 10.79 s | 759 MB, **1.90 s** (full load) |
-| `ls` | 63 MB, 0.36 s | **7 MB, 0.03 s** (`h5ls -r`) |
-
-The last two rows are why this is not a leaderboard. `export sparse` streams in a
-tenth of the memory and takes five times as long. `h5ls -r` walks the file in a
-hundredth of our time and a ninth of our memory, being a C program rather than a
-Python process that must import typer, rich, h5py and zarr before it starts.
+<!-- results -->
 
 ## A caveat on the streaming claim
 
