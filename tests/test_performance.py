@@ -1045,3 +1045,96 @@ def test_streaming_export_sparse_costs_far_less_than_loading_the_matrix(
         f"{loaded[0] / max(streamed[0], 1):.1f}. The default path is supposed "
         "to be the one you reach for when the matrix does not fit."
     )
+
+
+# ---------------------------------------------------------------------------
+# copying a store must stay inside its read budget
+#
+# `copy_dataset` sizes each read to TARGET_READ_BYTES. For variable-length
+# strings it cannot ask the dtype how wide an element is -- h5py reports the
+# itemsize of a pointer -- so it estimated. An estimate is not a bound: at
+# 4 KiB elements the 32 MiB budget became an 827 MB peak, and at 200,000 rows
+# the computed step exceeded the dataset, so the whole array was read at once.
+#
+# This is the one path the rest of this file did not reach, and it is the
+# path every `copy:` task in `subset` and every uns entry goes through.
+
+
+def _vlen_source(path: Path, width: int, n_rows: int):
+    """An HDF5 variable-length string dataset of `n_rows` x `width` bytes."""
+    import h5py
+
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset(
+            "t",
+            data=np.array([("x" * width).encode()] * n_rows, dtype=object),
+            dtype=h5py.string_dtype(),
+            chunks=(1024,),
+        )
+    return path
+
+
+@pytest.mark.parametrize("width", [16, 256, 4096])
+def test_a_read_of_variable_length_strings_stays_inside_the_byte_budget(
+    tmp_path, width
+):
+    """The budget is bytes per read, so a wider element means fewer elements.
+
+    This is the exact invariant, and it costs nothing to check: the step is
+    computed, not measured. Before the fix the element width was assumed to
+    be 64 bytes, so the step was the same 524,288 elements whatever the data
+    actually held -- 2 GiB per read at 4 KiB elements, against a stated
+    32 MiB budget.
+    """
+    import h5py
+
+    from adata.storage import (
+        TARGET_READ_BYTES,
+        _chunk_step,
+        _sample_element_bytes,
+    )
+
+    n_rows = 50_000
+    source = _vlen_source(tmp_path / f"s{width}.h5", width, n_rows)
+    with h5py.File(source, "r") as handle:
+        dataset = handle["t"]
+        sampled = _sample_element_bytes(dataset, n_rows)
+        step = _chunk_step(dataset.shape, dataset.chunks, dataset.dtype, sampled)
+
+    assert sampled >= min(width, 64), (
+        f"sampled {sampled} bytes for {width}-byte elements; the width is "
+        "being guessed rather than measured"
+    )
+    # A read may round up to a whole source chunk, hence the slack.
+    assert step * width <= TARGET_READ_BYTES * 2, (
+        f"one read would take {step * width / 1e6:.0f} MB of {width}-byte "
+        f"strings ({step} elements), against a {TARGET_READ_BYTES / 1e6:.0f} "
+        "MB budget"
+    )
+
+
+@pytest.mark.slow
+def test_copying_wide_strings_does_not_read_the_whole_array(tmp_path):
+    """And the budget holds in practice, not just in the arithmetic.
+
+    Sized so the array is several times the budget: before the fix the
+    computed step exceeded the row count, so the whole thing was read at once
+    -- 164 MB here, and 827 MB in the 200,000-row case that prompted this.
+    """
+    import h5py
+
+    from adata.storage import TARGET_READ_BYTES, copy_dataset
+
+    width, n_rows = 4096, 40_000  # ~164 MB, about 5x the budget
+    source = _vlen_source(tmp_path / "wide.h5", width, n_rows)
+
+    with h5py.File(source, "r") as src, h5py.File(tmp_path / "out.h5", "w") as dst:
+        with count_allocations() as peak:
+            copy_dataset(src["t"], dst, "t")
+
+    assert peak[0] <= TARGET_READ_BYTES * 3, (
+        f"copying a {width * n_rows / 1e6:.0f} MB array of {width}-byte "
+        f"strings peaked at {peak[0] / 1e6:.0f} MB, against a "
+        f"{TARGET_READ_BYTES / 1e6:.0f} MB read budget. A step larger than "
+        "the array means the whole array is read in one go."
+    )

@@ -450,30 +450,86 @@ def _is_string_src(src: Any) -> bool:
 #: comfortably above a typical 1 MiB Lustre stripe while bounding peak memory.
 TARGET_READ_BYTES = 32 * 1024 * 1024
 
-#: Assumed width of a variable-length string element, for read sizing only.
-#: h5py reports `itemsize` 8 for vlen strings because the value is a pointer,
-#: which would overestimate the row count by an order of magnitude and break
-#: the memory bound. Real cell and gene names sit well under this.
+#: Fallback width of a variable-length string element, used only when the
+#: real width cannot be sampled. h5py reports `itemsize` 8 for vlen strings
+#: because the value is a pointer, which would overestimate the row count by
+#: an order of magnitude. Real cell and gene names sit well under this.
 VLEN_ELEMENT_BYTES = 64
 
+#: Elements read when sampling a variable-length array's real element width.
+#: One small read, against a copy that is about to stream the whole array.
+VLEN_SAMPLE_ROWS = 256
 
-def _row_bytes(shape: Sequence[int], dtype: Any) -> int:
-    """In-memory size of one row along the first axis."""
+
+def _is_vlen(dtype: Any) -> bool:
+    """Does this dtype hide its real element width behind a pointer?
+
+    'O' is how h5py spells vlen str, 'T' is numpy StringDType as reported by
+    zarr-python 3. Neither `itemsize` reflects the bytes actually stored.
+    """
+    itemsize = int(getattr(dtype, "itemsize", 0) or 0)
+    return itemsize <= 0 or getattr(dtype, "kind", None) in ("O", "T")
+
+
+def _sample_element_bytes(src: Any, n_rows: int) -> int:
+    """Mean stored width of a variable-length element, by reading a few.
+
+    An assumed width is not a bound. Estimating 64 bytes and reading
+    `TARGET_READ_BYTES // 64` elements means the read is 32 MiB only if the
+    guess holds: at 4 KiB elements it is 2 GiB, and for an array shorter than
+    the computed step the whole thing is read at once. Measured before this:
+    copying 200,000 strings of 4 KiB peaked at 827 MB against a stated 32 MiB
+    budget.
+
+    One small read fixes that, and it is negligible beside the copy it is
+    about to size -- `uns` can hold arbitrary text, so the width is not
+    something this layer can assume.
+    """
+    try:
+        sample = np.asarray(src[: min(VLEN_SAMPLE_ROWS, max(1, n_rows))])
+    except Exception:  # pragma: no cover - unreadable source
+        return VLEN_ELEMENT_BYTES
+
+    total = 0
+    count = 0
+    for value in sample.reshape(-1)[:VLEN_SAMPLE_ROWS]:
+        try:
+            total += len(value)
+        except TypeError:  # pragma: no cover - non-sized element
+            total += VLEN_ELEMENT_BYTES
+        count += 1
+
+    if not count:
+        return VLEN_ELEMENT_BYTES
+    # The floor keeps a column of empty strings from producing an unbounded
+    # step; the object header dominates at that size anyway.
+    return max(VLEN_ELEMENT_BYTES, total // count)
+
+
+def _row_bytes(
+    shape: Sequence[int], dtype: Any, element_bytes: int = VLEN_ELEMENT_BYTES
+) -> int:
+    """In-memory size of one row along the first axis.
+
+    `element_bytes` is the measured width for a variable-length dtype; the
+    default is the fallback for callers that have no sample to offer.
+    """
     width = 1
     for dim in shape[1:]:
         width *= max(1, int(dim))
 
     itemsize = int(getattr(dtype, "itemsize", 0) or 0)
-    # 'O' is how h5py spells vlen str, 'T' is numpy StringDType as reported by
-    # zarr-python 3. Neither itemsize reflects the bytes actually stored.
-    if itemsize <= 0 or getattr(dtype, "kind", None) in ("O", "T"):
-        itemsize = VLEN_ELEMENT_BYTES
+    if _is_vlen(dtype):
+        itemsize = element_bytes
 
     return max(1, width * itemsize)
 
 
 def _chunk_step(
-    shape: Sequence[int], chunks: Optional[Sequence[int]], dtype: Any
+    shape: Sequence[int],
+    chunks: Optional[Sequence[int]],
+    dtype: Any,
+    element_bytes: int = VLEN_ELEMENT_BYTES,
 ) -> int:
     """Rows to copy per read, sized for the filesystem rather than the source.
 
@@ -492,7 +548,7 @@ def _chunk_step(
     if chunks is not None and len(chunks) > 0 and chunks[0]:
         chunk_rows = max(1, int(chunks[0]))
 
-    step = max(1, TARGET_READ_BYTES // _row_bytes(shape, dtype))
+    step = max(1, TARGET_READ_BYTES // _row_bytes(shape, dtype, element_bytes))
     if chunk_rows:
         # Never go below a single chunk: a partial read still decompresses the
         # whole thing, so a smaller step costs the same I/O for less data. That
@@ -532,7 +588,11 @@ def copy_dataset(src: Any, dst_group: Any, name: str) -> Any:
         ds[()] = src[()]
         return ds
 
-    step = _chunk_step(shape, getattr(src, "chunks", None), src.dtype)
+    element_bytes = (
+        _sample_element_bytes(src, shape[0]) if _is_vlen(src.dtype)
+        else VLEN_ELEMENT_BYTES
+    )
+    step = _chunk_step(shape, getattr(src, "chunks", None), src.dtype, element_bytes)
     for start in range(0, shape[0], step):
         end = min(start + step, shape[0])
         if len(shape) == 1:

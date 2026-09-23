@@ -43,6 +43,15 @@ Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
   Two claims are now enforced rather than described -- `view` and `ls` read
   **zero** data elements at any store size, and streaming stays far below the
   input curve at a fixed `--chunk`.
+- **Copying variable-length strings ignored its own read budget.** The width
+  of a vlen element was assumed to be 64 bytes, because h5py reports the
+  itemsize of a pointer, so the step was the same 524,288 elements whatever
+  the data held: 2 GiB per read at 4 KiB elements against a stated 32 MiB
+  budget, and for any array shorter than that step, the whole array in one
+  go. Copying 200,000 strings of 4 KiB peaked at 827 MB. The width is now
+  sampled from the first 256 elements. Reported by an automated review on
+  PR #14 and confirmed by measurement; `uns` can hold arbitrary text, so this
+  was not a width the layer could assume.
 - **Peak RSS in the benchmark was floored by the runner's own memory on Linux.**
   A forked child inherits its parent's resident pages and `execve` folds that
   into the `maxrss` the kernel reports, so every contender would have measured
