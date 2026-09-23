@@ -15,9 +15,27 @@ Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
   of 13 pipeline tasks had to be killed after 98 minutes. The column is now
   read once per input, and `--merge first` / `--merge only`, which decide on
   presence alone, read no column values at all.
+- **`concat` was quadratic in the number of categories** in an obs column.
+  Category merging probed a list rather than a dict: 2,096,128 string
+  comparisons to union 1,024 categories, and around 5e9 for a 100k-category
+  column. Found by the new guards.
+- **`concat` built a Python object per row** for nullable and string obs
+  columns, then walked the list twice more. Filling a typed buffer by slice
+  removes three full passes over every such column.
 
 ### Added
 
+- **Complexity guards in the test suite** (`tests/test_performance.py`).
+  Cost regressions now fail at merge time. They count operations rather than
+  seconds -- h5py and zarr reads, Zarr store traffic, Python allocation and
+  executed lines -- and assert that successive increments grow no faster than
+  linearly, so nothing here can fail because a CI runner was busy. See
+  [docs/TESTING.md](docs/TESTING.md#performance).
+- **A comparative benchmark** (`benchmarks/`), run on every tag against
+  anndata and against scanpy where scanpy has a real equivalent. Reports peak
+  RSS, wall time and output size; publishes to
+  [docs/BENCHMARKS.md](docs/BENCHMARKS.md) and the release notes. Report-only
+  -- it never fails a build.
 - **`--merge drop` and `--uns-merge drop` are accepted.** `drop` was already
   the documented default behaviour but was rejected as a value, so a config
   could not state it explicitly.

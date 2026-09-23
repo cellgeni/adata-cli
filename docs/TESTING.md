@@ -4,6 +4,7 @@
 uv sync --extra dev
 uv run pytest                      # everything
 uv run pytest -m "not integration" # fast: no environment building, ~40s
+uv run pytest -m perf              # just the tracing complexity guards
 uv run pytest -m integration       # compatibility across anndata releases
 ```
 
@@ -22,6 +23,8 @@ and the compatibility suite as a separate job.
 | `test_anndata_roundtrip.py` | anndata writes the fixtures, reads back our output |
 | `test_anndata_versions.py` | Compatibility with six real anndata releases (see below) |
 | `test_commands_phase2.py`, `test_commands_coverage.py`, `test_cli.py` | Command surfaces and error paths |
+| `test_performance.py` | Complexity guards -- what an operation costs, not how long it takes (see below) |
+| `test_benchmark_harness.py` | That the benchmark's measurement is trustworthy |
 | `test_subset.py`, `test_export.py`, `test_import.py`, `test_info_read.py`, `test_zarr.py`, `test_query.py` | Per-feature unit tests |
 
 ## Writing a test
@@ -43,6 +46,177 @@ For CLI surfaces, use the module-level `CliRunner` and assert on
 `result.stdout + (result.stderr or "")`, since status goes to stderr. Strip
 ANSI before matching message text — Rich also wraps long lines, so collapse
 whitespace.
+
+## Performance
+
+Two mechanisms, and confusing them is the main way this gets misused.
+
+| | `tests/test_performance.py` | `benchmarks/` |
+|---|---|---|
+| Measures | operation **counts** | wall time, peak RSS, output size |
+| Runs | every CI job, both interpreters | tags, and `workflow_dispatch` |
+| Gates | **yes** -- it fails the build | never |
+| Data | 64-4096 elements | 50,000 x 20,000 |
+
+### Why the guards do not use a clock
+
+A test that can fail because a runner was busy does not belong in a merge
+gate. Every number in `test_performance.py` is deterministic: the same input
+gives the same count on every machine. That is what lets it block a merge.
+
+This is not new -- `test_commands_phase2.py` already counts `read_str_all`
+calls for exactly this reason. The performance file generalises the idea; it
+does not replace those tests, and where an exact count is derivable an exact
+count is still better than a ratio, because it says what the number *should*
+be rather than only that it did not grow.
+
+### What is counted
+
+`tests/perf_counters.py` patches four seams, all verified against the pinned
+h5py 3.15.1 and zarr 3.1.5:
+
+| Hook | Sees |
+|---|---|
+| `h5py.Dataset.__getitem__` | HDF5 reads |
+| `zarr.Array.__getitem__` | Zarr reads, v2 and v3 alike |
+| `zarr.storage.LocalStore.get` | chunk and metadata fetches |
+| `LocalStore.set` / `.delete` | write storms |
+
+The libraries are patched rather than anything in `src/adata/`. An in-repo
+seam would only see the call sites that remembered to use it, which is the
+wrong property for a guard meant to catch the read nobody thought of -- and
+the matrix paths slice the backend objects directly anyway.
+
+Elements are counted, not just calls: the `--merge` bug was n calls each
+reading n elements, and counting calls alone would miss a vectorised variant
+that reads n elements n times in one call.
+
+**Known bypasses.** `Dataset.read_direct`, `np.asarray(dataset)` (it goes via
+`__array__`), `dataset.asstr()[...]` and `.fields()` reach the file without
+passing any hook. None are used today. If you add one, the counters will
+quietly report less work than happened -- which is why every guard also
+asserts a lower bound, and why there are two canary tests with known absolute
+counts. If a canary fails, fix the hooks before trusting anything else here.
+
+### The invariant
+
+Three sizes at 4x spacing, comparing successive **increments**:
+
+```python
+d1 = c(4n) - c(n)
+d2 = c(16n) - c(4n)
+assert d2 <= 6 * d1     # grows no faster than linearly
+assert d1 >= 4n         # and the counters actually saw something
+```
+
+The increment form is the point. Comparing raw counts needs an additive
+constant to absorb fixed setup cost, and there is no principled value for
+one: too small and it is flaky, too large and a quadratic with a small
+coefficient hides underneath at n=64. Any constant appears in both
+differences and cancels exactly.
+
+Why 6: at 4x spacing the increment ratio is 4.0 for linear work, about 4.4
+for n log n, 8 for n^1.5 and 16 for quadratic. 6 sits in the gap with room on
+both sides. `test_growth_limit_separates_linear_from_super_linear` asserts
+that calibration rather than leaving it as a comment, and it fails if anyone
+changes `SIZES` without recomputing the limit.
+
+**Scale one axis per test, and name it in the test id.** Scaling two at once
+makes legitimate work look quadratic -- an outer-join concat really does
+produce n_obs x n_var_union cells. The axes worth separate coverage are
+`n_var`, `n_obs`, `n_inputs`, `n_obs_columns`, `n_var_columns`,
+`n_categories` and `n_groups`.
+
+### Where counting is not enough
+
+Two real defects in `concat.py` were invisible to all of the above, and both
+needed their own instrument:
+
+- **Category merging** used `if category not in categories` on a list. The
+  category lists are read once either way, so no read counter sees it, and
+  `x not in lst` is a single bytecode, so the line tracer does not either --
+  the quadratic is inside C-level list membership. Counting string
+  comparisons through a `str` subclass is what made it visible: 2,096,128
+  comparisons at k=1024.
+- **A per-element loop over obs rows.** Linear, just with a fat constant, so
+  no ratio catches it. The guard compares executed Python lines per row
+  against the numeric column path measured in the same run -- self-calibrating,
+  so it needs no hand-tuned budget and holds across interpreters.
+
+`count_allocations` (tracemalloc) and `count_lines` (`sys.settrace`) are the
+tools for these. The line tracer costs a 10-50x slowdown, so its tests carry
+the `perf` marker and stay small.
+
+### What the guards deliberately do not claim
+
+Obs columns are read whole, so peak allocation for a concat is O(n_obs), not
+O(`--chunk`). The streaming guarantee holds for X, not for obs annotation.
+The guards only stop that getting worse than linear; `benchmarks/` reports
+the actual curve.
+
+### Reading a failure
+
+It says cost grew super-linearly on the named axis. The assertion message
+carries the whole measured series and the computed ratio. Usually the code is
+wrong. Occasionally the expectation is -- an operation legitimately gained
+work -- and then the new number needs a comment saying why, in the same style
+as the exact counts in `test_commands_phase2.py`.
+
+## The comparative benchmark
+
+```bash
+uv run python -m benchmarks.run --tier smoke --out results.json
+uv run python -m benchmarks.report results.json
+```
+
+Tiers are `smoke` (1,000 x 2,000, seconds), `ci` (50,000 x 20,000, 35-50
+minutes for the whole suite) and `large` (500,000 x 20,000, dispatch only,
+where the in-memory baseline is expected to hit the ceiling). Every tier also
+builds the 2,000 x 36,601 var-heavy shape, which is what hung in 0.5.1.
+
+Results are published to `docs/BENCHMARKS.md` and `docs/benchmarks/<tag>.json`
+on every tag, and appended to the GitHub release notes if a release exists.
+Artifacts expire; the docs page is the durable series.
+
+### How it measures
+
+- **`os.wait4`, not `resource.getrusage`.** `RUSAGE_CHILDREN` is a running
+  maximum over every child ever reaped, so one large case would poison every
+  later row. Output goes to temporary files rather than pipes, because
+  `communicate()` reaps the child and loses its rusage.
+- **`RLIMIT_AS` at 12 GiB on every child.** Cases where the in-memory
+  baseline cannot cope are the whole point, but an uncontained OOM kills the
+  runner agent and the job ends with no report. With a ceiling it is a row
+  that says `out of memory` at a limit we can state. macOS refuses
+  `RLIMIT_AS`, so a local run is unbounded.
+- **Baselines run from venvs built up front**, not `uv run --with`. The
+  latter is right for building fixtures, as `reference_stores.py` does, and
+  wrong here: the first invocation would put several hundred megabytes of
+  wheel downloads into the measured wall time and uv's own memory into the
+  measured peak. scanpy therefore never enters `uv.lock` or the image.
+
+### Rules that keep the comparison honest
+
+These live in `benchmarks/cases.py` as well, because this is the part that
+decays fastest.
+
+- **Use the best idiom the baseline has.** Comparing `export dataframe`
+  against a full `read_h5ad()` is a strawman -- anndata reads just `obs` via
+  `read_elem`. The good idiom is the primary row; the naive load may appear
+  only as a clearly labelled second row.
+- **Pin compression on both sides.** adata-cli forwards the source's
+  settings; `write_h5ad` defaults to none.
+- **`n/a` is a result.** Where scanpy has no equivalent, or
+  `concat_on_disk` refuses, say which and why. An omitted row reads as an
+  oversight.
+- **Include the startup floor.** The CLI costs 0.3-1 s to import, and
+  `import scanpy` 3-8 s; on a small tier that is the entire measurement.
+- **Do not hide the rows where the baseline wins.** `_concat_csr` loops per
+  row in Python and scipy's C `vstack` will often beat it on time at many
+  times the memory. That trade is the argument for the tool.
+- **Say whether the page cache was dropped.** A fixture written seconds ago
+  is entirely in RAM, which understates streaming. The runner can drop it; a
+  laptop usually cannot, and the report states which happened.
 
 ## Compatibility testing against real anndata releases
 
