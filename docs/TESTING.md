@@ -291,6 +291,12 @@ Artifacts expire; the docs page is the durable series.
 
 ### How it measures
 
+- **Every command is forked from a small shim, not from the runner.** On Linux a
+  forked child inherits its parent's resident pages and `execve` folds that into the
+  reported `maxrss`, so a child of a process that has imported anndata cannot measure
+  below roughly 200 MB — which would have flattened every row in the table. Measured
+  with a 330 MB parent: 326 MB for a no-op child directly, 8 MB through the shim.
+  `posix_spawn` does not help (329 MB), so dropping `preexec_fn` is not a fix.
 - **`os.wait4`, not `resource.getrusage`.** `RUSAGE_CHILDREN` is a running
   maximum over every child ever reaped, so one large case would poison every
   later row. Output goes to temporary files rather than pipes, because

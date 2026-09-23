@@ -43,6 +43,15 @@ Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
   Two claims are now enforced rather than described -- `view` and `ls` read
   **zero** data elements at any store size, and streaming stays far below the
   input curve at a fixed `--chunk`.
+- **Peak RSS in the benchmark was floored by the runner's own memory on Linux.**
+  A forked child inherits its parent's resident pages and `execve` folds that
+  into the `maxrss` the kernel reports, so every contender would have measured
+  at least what `benchmarks/run.py` used to build the fixtures — around
+  200 MB — and the tables would have read "everything costs about the same".
+  Commands are now forked from a small shim: with a 330 MB parent, a no-op
+  child goes from 326 MB to 8 MB. Caught by `test_benchmark_harness.py`, which
+  exists for exactly this. The published figures were measured on macOS, which
+  resets the high-water mark at exec, and are unchanged.
 - **A comparative benchmark** (`benchmarks/`), run on every tag against
   anndata and against scanpy where scanpy has a real equivalent. Reports peak
   RSS, wall time and output size; publishes to

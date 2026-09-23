@@ -5,18 +5,42 @@ set by chunk size rather than by input size, and a comparison reporting only
 wall time would misrepresent it -- for anything that fits in RAM, loading the
 whole thing is usually faster.
 
-Measuring it correctly needs `os.wait4`, not `resource.getrusage`.
-`RUSAGE_CHILDREN` is a running maximum over every child the process has ever
-reaped: run a 400 MB case and then a 17 MB one and it still reports 400 MB.
-`wait4` returns rusage for one specific child. (Checked on this machine:
-wait4 gives 435 MB then 17 MB where RUSAGE_CHILDREN stays at 435 MB.)
+Two things have to be right for the number to mean anything, and both were
+wrong at some point.
+
+**Use `os.wait4`, not `resource.getrusage`.** `RUSAGE_CHILDREN` is a running
+maximum over every child the process has ever reaped: run a 400 MB case and
+then a 17 MB one and it still reports 400 MB. `wait4` returns rusage for one
+specific child.
+
+**Fork the child from a small process.** On Linux a forked child inherits its
+parent's resident pages, and `execve` folds that pre-exec high-water mark into
+the accumulated `maxrss` that `wait4` reports. So a child of a fat parent can
+never appear small. Measured under python:3.12-slim:
+
+    parent 14.7 MB  ->  no-op child   11.8 MB
+    parent 329.6 MB ->  no-op child  326.4 MB   <- the parent's RSS, not the child's
+    parent 329.6 MB ->  via shim       8.1 MB
+
+macOS resets the high-water mark at exec and shows none of this, which is why
+it went unnoticed locally and failed on CI. It matters because `run.py`
+imports anndata, pandas and numpy to build fixtures in the same process that
+measures, so every contender would have been floored at ~200 MB and the
+tables would have read "everything costs about the same".
+
+`posix_spawn` does not help -- the middle row above is 329.5 MB that way too.
+The fix is the shim: `measure()` re-invokes this file as a subprocess, and
+that freshly-exec'd interpreter, about 8 MB, is what forks the command being
+measured.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import resource
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -112,7 +136,57 @@ def measure(
     env: Optional[Dict[str, str]] = None,
     cwd: Optional[Path] = None,
 ) -> Measurement:
-    """Run `command`, returning its wall time, peak RSS and output size."""
+    """Run `command` from a small shim, and report what it cost.
+
+    The shim is this same file, re-invoked. It exists so that the process
+    which forks `command` is a bare interpreter rather than whatever imported
+    anndata -- see the module docstring for the measurement it fixes.
+    """
+    # Checked here rather than in the shim: a stale output would be sized and
+    # reported as this run's work, which is a bug in the caller and should be
+    # loud rather than turned into a "failed" row.
+    if output is not None and output.exists():
+        raise FileExistsError(f"{output} exists; the harness never overwrites.")
+
+    argv = [sys.executable, str(Path(__file__).resolve()), "--timeout", str(timeout_s)]
+    if output is not None:
+        argv += ["--output", str(output)]
+    if memory_limit is None:
+        argv += ["--no-memory-limit"]
+    else:
+        argv += ["--memory-limit", str(memory_limit)]
+    if cwd is not None:
+        argv += ["--cwd", str(cwd)]
+    for key, value in (env or {}).items():
+        argv += ["--env", f"{key}={value}"]
+    argv += ["--", *command]
+
+    done = subprocess.run(argv, capture_output=True, text=True)
+    try:
+        return Measurement(**json.loads(done.stdout))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        # The shim itself failed. Report it rather than crashing the run, and
+        # keep enough of its output to diagnose.
+        return Measurement(
+            wall_s=0.0,
+            maxrss_bytes=0,
+            exit_code=done.returncode,
+            status="failed",
+            stderr_tail="measurement shim failed:\n"
+            + "\n".join((done.stderr or done.stdout).strip().splitlines()[-6:]),
+        )
+
+
+def _measure_here(
+    command: Sequence[str],
+    *,
+    output: Optional[Path] = None,
+    timeout_s: float = 900.0,
+    memory_limit: Optional[int] = DEFAULT_MEMORY_LIMIT,
+    env: Optional[Dict[str, str]] = None,
+    cwd: Optional[Path] = None,
+) -> Measurement:
+    """Run `command` in this process's own child. Only the shim calls this."""
 
     def limit() -> None:  # pragma: no cover - runs in the forked child
         if memory_limit is None:
@@ -129,6 +203,12 @@ def measure(
         raise FileExistsError(f"{output} exists; the harness never overwrites.")
 
     full_env = {**os.environ, **(env or {})}
+
+    if shutil.which(command[0]) is None and not Path(command[0]).exists():
+        return Measurement(
+            wall_s=0.0, maxrss_bytes=0, exit_code=127, status="n/a",
+            stderr_tail=f"{command[0]} is not installed",
+        )
 
     # Output goes to temporary files, not pipes. A pipe would have to be
     # drained with communicate(), and communicate() reaps the child -- after
@@ -205,17 +285,37 @@ def _looks_like_oom(stderr: str) -> bool:
     return any(m in stderr for m in markers)
 
 
-def main(argv: List[str]) -> int:  # pragma: no cover - CLI entry
-    """Measure a command given after `--`, printing JSON."""
-    if "--" not in argv:
-        print("usage: python -m benchmarks._measure [--output P] -- CMD...")
-        return 2
-    split = argv.index("--")
-    head, command = argv[:split], argv[split + 1 :]
-    output = None
-    if "--output" in head:
-        output = Path(head[head.index("--output") + 1])
-    print(json.dumps(measure(command, output=output).as_dict(), indent=2))
+def main(argv: List[str]) -> int:  # pragma: no cover - runs as the shim
+    """Measure the command after `--` and print one JSON object.
+
+    This is the shim `measure()` re-invokes; it is also usable by hand:
+
+        python benchmarks/_measure.py --timeout 60 -- adata view f.h5ad
+    """
+    parser = argparse.ArgumentParser(description="Measure one command.")
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--timeout", type=float, default=900.0)
+    parser.add_argument("--memory-limit", type=int, default=DEFAULT_MEMORY_LIMIT)
+    parser.add_argument("--no-memory-limit", action="store_true")
+    parser.add_argument("--cwd", type=Path)
+    parser.add_argument("--env", action="append", default=[])
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args(argv)
+
+    command = args.command[1:] if args.command[:1] == ["--"] else args.command
+    if not command:
+        parser.error("no command given after --")
+
+    extra = dict(pair.split("=", 1) for pair in args.env)
+    result = _measure_here(
+        command,
+        output=args.output,
+        timeout_s=args.timeout,
+        memory_limit=None if args.no_memory_limit else args.memory_limit,
+        env=extra or None,
+        cwd=args.cwd,
+    )
+    print(json.dumps(result.as_dict()))
     return 0
 
 

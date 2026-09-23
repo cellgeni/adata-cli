@@ -27,6 +27,15 @@ by the complexity guards instead.
 
 <!-- results -->
 
+## How peak memory is measured
+
+Each measured command is forked from a small shim process, not from the benchmark
+runner itself. On Linux a forked child inherits its parent's resident pages and
+`execve` folds that into the `maxrss` the kernel reports, so a child of a fat parent
+cannot appear small: with the runner holding 330 MB, a process allocating nothing
+measured 326 MB. The shim brings that floor down to about 8 MB, uniform across every
+contender and visible in the `startup` row.
+
 ## A caveat on the streaming claim
 
 Peak memory is not flat in input size. Over a 256× span at a fixed chunk, peak

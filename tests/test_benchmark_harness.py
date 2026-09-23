@@ -16,22 +16,65 @@ import pytest
 from benchmarks._measure import Measurement, _looks_like_oom, measure
 
 
-def test_peak_rss_is_attributed_to_the_right_child():
-    """The reason the harness uses `os.wait4` rather than `getrusage`.
+#: A child that allocates nothing should cost about what a bare interpreter
+#: costs. Generous, because that depends on the build; far below the ballast
+#: below, which is the point.
+FLOOR_CEILING = 60 * 1024**2
+
+#: Allocated by the parent before measuring, to make an inherited floor
+#: impossible to miss.
+BALLAST = 300 * 1024**2
+
+
+def test_peak_rss_is_the_child_s_own_and_carries_no_floor():
+    """Two ways this number can lie, both of which it has.
 
     `RUSAGE_CHILDREN` is a running maximum over every child a process has
-    ever reaped, so a 400 MB case followed by a 1 kB one would report 400 MB
-    twice and every later row would inherit the largest earlier peak.
+    reaped, so a 400 MB case makes every later one look like 400 MB. `wait4`
+    fixes that.
+
+    Worse, and what CI caught: on Linux a forked child inherits its parent's
+    resident pages, and `execve` folds that into the `maxrss` `wait4` reports.
+    A child of a fat parent could not appear small however little it used.
+    Measured under python:3.12-slim before the fix -- parent at 329.6 MB, a
+    no-op child reported 326.4 MB. `posix_spawn` reported 329.5 MB, so
+    dropping `preexec_fn` would not have helped; measuring from a shim
+    reported 8.1 MB.
+
+    macOS resets the high-water mark at exec and shows none of this, so this
+    is mostly a Linux guard -- which is the platform the benchmark runs on.
+
+    The test holds ballast in the parent for its whole duration so that an
+    inherited floor cannot hide.
     """
+    ballast = bytearray(BALLAST)
+    ballast[::4096] = b"\x01" * len(ballast[::4096])  # make it resident
+
+    baseline = measure([sys.executable, "-c", "pass"])
     big = measure([sys.executable, "-c", "x = bytearray(400 * 1024 * 1024)"])
     small = measure([sys.executable, "-c", "x = bytearray(1024)"])
 
-    assert big.status == "ok" and small.status == "ok"
-    assert big.maxrss_bytes > 300 * 1024**2, big
-    assert small.maxrss_bytes < big.maxrss_bytes / 4, (
-        f"peak RSS leaked between children: {small.maxrss_bytes} after "
-        f"{big.maxrss_bytes}"
+    assert {baseline.status, big.status, small.status} == {"ok"}
+
+    # No floor: a child that allocates nothing looks like nothing, even though
+    # this process is holding 300 MB.
+    assert baseline.maxrss_bytes < FLOOR_CEILING, (
+        f"a no-op child reported {baseline.maxrss_bytes / 1e6:.0f} MB while "
+        f"this process held {BALLAST / 1e6:.0f} MB of ballast. The measured "
+        "peak is inheriting the parent's resident pages, so every benchmark "
+        "row would be floored at roughly the runner's own footprint."
     )
+
+    # Isolation: the small child resembles the baseline, not the big one that
+    # ran before it.
+    assert big.maxrss_bytes > 300 * 1024**2, big
+    assert small.maxrss_bytes < baseline.maxrss_bytes * 2, (
+        f"peak RSS leaked between children: {small.maxrss_bytes / 1e6:.0f} MB "
+        f"for a 1 KB allocation, against a {baseline.maxrss_bytes / 1e6:.0f} MB "
+        f"baseline, after a {big.maxrss_bytes / 1e6:.0f} MB child"
+    )
+
+    del ballast
 
 
 def test_a_hang_is_reported_as_a_timeout_with_its_output_size(tmp_path):
@@ -84,11 +127,22 @@ def test_an_ordinary_failure_is_not_mistaken_for_an_oom():
 
 
 def test_the_harness_refuses_to_overwrite_an_existing_output(tmp_path):
-    """A stale output would be sized and reported as this run's work."""
+    """A stale output would be sized and reported as this run's work.
+
+    Checked in the parent, not the shim, so it surfaces as an exception the
+    caller must fix rather than as a quiet "failed" row.
+    """
     existing = tmp_path / "already.h5ad"
     existing.write_bytes(b"old")
     with pytest.raises(FileExistsError):
         measure([sys.executable, "-c", "pass"], output=existing)
+
+
+def test_a_missing_binary_is_a_result_not_a_crash():
+    """`h5ls` ships with the HDF5 tools and is often simply absent."""
+    result = measure(["/nonexistent-binary-for-tests"])
+    assert result.status == "n/a"
+    assert "not installed" in result.stderr_tail
 
 
 def test_maxrss_is_normalised_to_bytes():

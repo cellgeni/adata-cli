@@ -49,18 +49,45 @@ ENVIRONMENTS: Dict[str, List[str]] = {
 
 
 def build_environments(root: Path, wanted: List[str]) -> Dict[str, Path]:
-    """Create one venv per baseline and return its interpreter."""
+    """Create one venv per baseline and return its interpreter.
+
+    The package list is recorded beside the venv and rebuilt when it changes.
+    Checking only that the interpreter exists means a reused `--work`
+    directory keeps whatever was installed the first time: adding `dask` to
+    ENVIRONMENTS had no effect on an existing tree, and `concat_on_disk`
+    went on failing with ModuleNotFoundError as though that were a finding
+    about anndata.
+    """
     interpreters: Dict[str, Path] = {}
     for name in wanted:
         venv = root / name
         python = venv / "bin" / "python"
-        if not python.exists():
-            print(f"[env] building {name}", flush=True)
-            subprocess.run(["uv", "venv", str(venv)], check=True, capture_output=True)
+        stamp = venv / ".packages"
+        wanted_packages = "\n".join(sorted(ENVIRONMENTS[name]))
+        current = stamp.read_text() if stamp.exists() else None
+
+        if not python.exists() or current != wanted_packages:
+            if current is not None and current != wanted_packages:
+                print(f"[env] {name}: package list changed, rebuilding", flush=True)
+            else:
+                print(f"[env] building {name}", flush=True)
+            # --clear because a rebuild runs over an existing tree; without
+            # it `uv venv` refuses and the run dies before any measurement.
+            done = subprocess.run(
+                ["uv", "venv", "--clear", str(venv)],
+                capture_output=True,
+                text=True,
+            )
+            if done.returncode != 0:
+                raise RuntimeError(
+                    f"could not create the {name} environment at {venv}:\n"
+                    + (done.stderr or done.stdout)
+                )
             subprocess.run(
                 ["uv", "pip", "install", "--python", str(python), *ENVIRONMENTS[name]],
                 check=True,
             )
+            stamp.write_text(wanted_packages)
         interpreters[name] = python
     return interpreters
 
@@ -142,13 +169,8 @@ def _run_contender(
 
     # Read-only cases produce nothing to size.
     watched = None if (case.output_suffix == "" and target == output) else target
-    if shutil.which(command[0]) is None and not Path(command[0]).exists():
-        # A contender whose binary is not installed -- `h5ls` comes with the
-        # HDF5 tools and is often absent. Missing is a result, not a crash.
-        return Measurement(
-            wall_s=0.0, maxrss_bytes=0, exit_code=127, status="n/a",
-            stderr_tail=f"{command[0]} is not installed",
-        )
+    # A contender whose binary is not installed -- `h5ls` ships with the HDF5
+    # tools and is often absent -- comes back as `n/a` from `measure`.
     return measure(command, output=watched, timeout_s=timeout_s, env=env)
 
 
