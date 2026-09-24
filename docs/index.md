@@ -34,8 +34,11 @@ docker run --rm -it -v /path/to/data:/data \
   out in `.h5ad`, and what this tool does with it.
 - **[Element spec: Zarr](ELEMENTS_zarr.md)** — the same for `.zarr`, including
   the v2/v3 differences.
-- **[Testing](TESTING.md)** — how the suite is organised, and how compatibility
-  is verified against six real anndata releases.
+- **[Testing](TESTING.md)** — how the suite is organised, how compatibility is
+  verified against six real anndata releases, and the complexity guards that
+  keep cost regressions out.
+- **[Benchmarks](BENCHMARKS.md)** — peak memory and wall time against anndata
+  and scanpy, remeasured and republished on every release.
 
 ## At a glance
 
@@ -47,6 +50,8 @@ adata export dataframe data.h5ad obs   # obs as CSV, on stdout
 adata subset data.h5ad -o cortex.h5ad --obs-query "cluster == Cortex_2"
 adata split  data.h5ad --by sample -o per_sample/
 adata concat per_sample/*.h5ad -o merged.h5ad --join outer --label sample
+
+adata convert data.h5ad X -o small.h5ad --dtype float32
 
 adata create new.h5ad --n-obs 5000 --n-var 2000
 adata import sparse new.h5ad X counts.mtx --inplace

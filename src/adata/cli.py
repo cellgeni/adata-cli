@@ -6,9 +6,11 @@ from typing import Optional, Sequence, List
 from rich.console import Console
 import typer
 
+from adata.core.convert import LAYOUTS
 from adata.commands import (
-    MERGE_STRATEGIES,
+    MERGE_CHOICES,
     concat_stores,
+    convert_store,
     create_store,
     split_store,
     list_store,
@@ -413,12 +415,14 @@ def concat(
     merge: Optional[str] = typer.Option(
         None,
         "--merge",
-        help="How to reconcile var columns: same, unique, first, only (default: drop)",
+        help="How to reconcile var columns: drop, same, unique, first, only "
+        "(default: drop)",
     ),
     uns_merge: Optional[str] = typer.Option(
         None,
         "--uns-merge",
-        help="How to reconcile uns: same, unique, first, only (default: drop)",
+        help="How to reconcile uns: drop, same, unique, first, only "
+        "(default: drop)",
     ),
     fill_value: float = typer.Option(
         0.0, "--fill-value", help="Value for dense cells introduced by an outer join"
@@ -442,12 +446,17 @@ def concat(
         adata concat a.h5ad b.h5ad -o m.h5ad --keys a,b --index-unique - --uns-merge same
     """
     for name, value in (("--merge", merge), ("--uns-merge", uns_merge)):
-        if value is not None and value not in MERGE_STRATEGIES:
+        if value is not None and value not in MERGE_CHOICES:
             console.print(
                 f"[bold red]Error:[/] {name} must be one of: "
-                f"{', '.join(MERGE_STRATEGIES)}"
+                f"{', '.join(MERGE_CHOICES)}"
             )
             raise typer.Exit(code=1)
+
+    # "drop" is the default, and naming it explicitly has to be allowed: a
+    # config that spells out the default should not be rejected.
+    merge = None if merge == "drop" else merge
+    uns_merge = None if uns_merge == "drop" else uns_merge
 
     try:
         concat_stores(
@@ -462,6 +471,134 @@ def concat(
             uns_merge=uns_merge,
             fill_value=fill_value,
             chunk_rows=chunk_rows,
+            zarr_format=zarr_format,
+        )
+    except Exception as e:
+        console.print(f"[bold red]Error:[/] {e}")
+        raise typer.Exit(code=1)
+
+
+# ============================================================================
+# CONVERT command
+# ============================================================================
+@app.command("convert")
+def convert(
+    file: Path = typer.Argument(
+        ...,
+        help="Input .h5ad/.zarr",
+        exists=True,
+        readable=True,
+        dir_okay=True,
+        file_okay=True,
+    ),
+    entries: Optional[List[str]] = typer.Argument(
+        None,
+        help="Matrix paths to convert, e.g. 'X', 'layers/counts', 'raw/X'",
+    ),
+    output: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output .h5ad/.zarr path. Required unless --inplace.",
+        dir_okay=True,
+        file_okay=True,
+    ),
+    inplace: bool = typer.Option(
+        False,
+        "--inplace",
+        help="Modify source file directly.",
+    ),
+    convert_all: bool = typer.Option(
+        False,
+        "--all",
+        help="Convert X, every layer, and raw/X",
+    ),
+    dtype: Optional[str] = typer.Option(
+        None,
+        "--dtype",
+        help="New dtype for the values, e.g. float32",
+    ),
+    indices_dtype: Optional[str] = typer.Option(
+        None,
+        "--indices-dtype",
+        help="New dtype for sparse indices: int32 or int64",
+    ),
+    layout: Optional[str] = typer.Option(
+        None,
+        "--layout",
+        help="Target layout: csr, csc, dense or sparse",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Convert despite a lossy cast or a large size increase",
+    ),
+    in_memory: bool = typer.Option(
+        False,
+        "--in-memory",
+        help="Transpose in memory instead of streaming (faster if it fits)",
+    ),
+    chunk_rows: int = typer.Option(
+        1024,
+        "--chunk",
+        "-C",
+        help="Row chunk size for dense matrices",
+    ),
+    zarr_format: Optional[int] = typer.Option(
+        None,
+        "--zarr-format",
+        help="Zarr spec version to write (defaults to the source store's)",
+    ),
+) -> None:
+    """
+    Change a matrix's dtype, layout or density.
+
+    Counts held as float64 cost twice the disk and twice the read for no
+    information; a tool that wants CSC cannot use a CSR store; and concat
+    refuses inputs whose encodings disagree. All three are this command.
+
+    A cast that would not round-trip is refused before anything is written,
+    as is a densification that would inflate the store; --force overrides
+    both. Transposing streams by default, so it works on matrices too large
+    to load.
+
+    Examples:
+        adata convert data.h5ad X -o out.h5ad --dtype float32
+        adata convert data.h5ad X -o out.h5ad --layout csc
+        adata convert data.h5ad X --inplace --dtype float32 --indices-dtype int32
+        adata convert data.h5ad --all -o out.h5ad --dtype float32
+    """
+    if not inplace and output is None:
+        console.print(
+            "[bold red]Error:[/] Output file is required. "
+            "Use --output/-o or --inplace.",
+        )
+        raise typer.Exit(code=1)
+
+    if layout is not None and layout not in LAYOUTS:
+        console.print(
+            f"[bold red]Error:[/] --layout must be one of: {', '.join(LAYOUTS)}."
+        )
+        raise typer.Exit(code=1)
+
+    if zarr_format is not None and zarr_format not in (2, 3):
+        console.print("[bold red]Error:[/] --zarr-format must be 2 or 3.")
+        raise typer.Exit(code=1)
+
+    try:
+        convert_store(
+            file=file,
+            entries=list(entries) if entries else None,
+            output=output,
+            console=console,
+            dtype=dtype,
+            indices_dtype=indices_dtype,
+            layout=layout,
+            convert_all=convert_all,
+            inplace=inplace,
+            chunk_rows=chunk_rows,
+            in_memory=in_memory,
+            force=force,
             zarr_format=zarr_format,
         )
     except Exception as e:

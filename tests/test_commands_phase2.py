@@ -758,3 +758,179 @@ def test_split_rejects_a_bad_zarr_format(tmp_path, sample):
     )
     assert result.exit_code == 1
     assert "must be 2 or 3" in _out(result)
+
+
+# ---------------------------------------------------------------------------
+# concat --merge cost
+#
+# These assert how often a var column is read, not how long the merge takes.
+# The hang reported against 0.5.1 was invisible to every correctness test in
+# this file because all of them use two or three variables, and the defect was
+# quadratic in the number of variables: `tuple(read_str_all(col)[i] for i in
+# where)` re-evaluated `read_str_all` once per target variable. A wall-clock
+# assertion would be flaky on shared CI; a read count is exact.
+
+
+def _count_var_column_reads(monkeypatch):
+    """Count full-column reads performed while merging var."""
+    from adata.core import concat as concat_mod
+
+    calls: list = []
+    original = concat_mod.read_str_all
+
+    def counting(obj, *args, **kwargs):
+        calls.append(getattr(obj, "name", "?"))
+        return original(obj, *args, **kwargs)
+
+    monkeypatch.setattr(concat_mod, "read_str_all", counting)
+    return calls
+
+
+def _two_stores_with_var_columns(tmp_path, n_var: int, n_col: int) -> list:
+    genes = [f"g{i}" for i in range(n_var)]
+    var = pd.DataFrame(
+        {f"col{c}": [f"v{c}-{i}" for i in range(n_var)] for c in range(n_col)},
+        index=genes,
+    )
+    paths = []
+    for name, cells in (("a", ["c1", "c2"]), ("b", ["c3", "c4"])):
+        path = tmp_path / f"{name}.h5ad"
+        ad.AnnData(
+            X=np.ones((2, n_var), dtype="float32"),
+            obs=pd.DataFrame(index=cells),
+            var=var.copy(),
+        ).write_h5ad(path)
+        paths.append(path)
+    return paths
+
+
+@pytest.mark.parametrize("n_var", [4, 64])
+def test_concat_merge_same_reads_each_var_column_once_per_input(
+    tmp_path, monkeypatch, n_var
+):
+    """`--merge same` must not scale with the number of variables.
+
+    Two inputs and three var columns is six reads whatever n_var is. The
+    parametrisation is the whole point: an implementation whose cost grows
+    with n_var fails the second case while passing the first.
+    """
+    a, b = _two_stores_with_var_columns(tmp_path, n_var=n_var, n_col=3)
+    calls = _count_var_column_reads(monkeypatch)
+
+    out = tmp_path / "m.h5ad"
+    result = runner.invoke(
+        app, ["concat", str(a), str(b), "-o", str(out), "--merge", "same"]
+    )
+    assert result.exit_code == 0, _out(result)
+    assert len(calls) == 6, f"{len(calls)} reads for {n_var} vars: {calls[:10]}"
+
+    var = ad.read_h5ad(out).var
+    assert list(var.columns) == ["col0", "col1", "col2"]
+    assert var["col0"].tolist() == [f"v0-{i}" for i in range(n_var)]
+
+
+def test_concat_merge_first_does_not_read_var_column_values(
+    tmp_path, monkeypatch
+):
+    """`first` decides on presence alone, so it reads no column values."""
+    a, b = _two_stores_with_var_columns(tmp_path, n_var=64, n_col=3)
+    calls = _count_var_column_reads(monkeypatch)
+
+    out = tmp_path / "m.h5ad"
+    result = runner.invoke(
+        app, ["concat", str(a), str(b), "-o", str(out), "--merge", "first"]
+    )
+    assert result.exit_code == 0, _out(result)
+    assert calls == [], f"'first' read {len(calls)} columns it did not compare"
+    assert list(ad.read_h5ad(out).var.columns) == ["col0", "col1", "col2"]
+
+
+def test_concat_merge_drop_is_accepted_and_keeps_no_var_columns(tmp_path):
+    """`drop` is the documented default, so it has to be sayable."""
+    a, b = _two_stores_with_var_columns(tmp_path, n_var=4, n_col=2)
+    out = tmp_path / "m.h5ad"
+    result = runner.invoke(
+        app,
+        ["concat", str(a), str(b), "-o", str(out),
+         "--merge", "drop", "--uns-merge", "drop"],
+    )
+    assert result.exit_code == 0, _out(result)
+
+    got = ad.read_h5ad(out)
+    assert list(got.var.columns) == []
+    assert dict(got.uns) == {}
+
+
+# ---------------------------------------------------------------------------
+# concat refuses mismatched matrix encodings
+#
+# The check has been there since concat was written and nothing exercised it.
+# It is the error a user is most likely to meet with real per-sample files,
+# since whether a matrix lands as CSR or CSC depends on how it was made.
+
+
+def _store_with_layout(path, layout, *, cells, layer=None):
+    matrix = sparse.csr_matrix(np.ones((len(cells), 3), dtype="float32"))
+    if layout == "csc":
+        matrix = matrix.tocsc()
+    elif layout == "dense":
+        matrix = matrix.toarray()
+    obj = ad.AnnData(
+        X=matrix,
+        obs=pd.DataFrame(index=cells),
+        var=pd.DataFrame(index=["g1", "g2", "g3"]),
+    )
+    if layer is not None:
+        obj.layers["counts"] = (
+            sparse.csr_matrix(np.ones((len(cells), 3), dtype="float32"))
+            if layer == "csr"
+            else np.ones((len(cells), 3), dtype="float32")
+        )
+    obj.write_h5ad(path)
+    return path
+
+
+@pytest.mark.parametrize(
+    "left,right", [("csr", "csc"), ("csr", "dense"), ("csc", "dense")]
+)
+def test_concat_refuses_mismatched_x_encodings(tmp_path, left, right):
+    a = _store_with_layout(tmp_path / "a.h5ad", left, cells=["c1", "c2"])
+    b = _store_with_layout(tmp_path / "b.h5ad", right, cells=["c3", "c4"])
+    out = tmp_path / "m.h5ad"
+
+    result = runner.invoke(app, ["concat", str(a), str(b), "-o", str(out)])
+    assert result.exit_code == 1
+    text = _out(result)
+    assert "Cannot concatenate 'X'" in text
+    # The error has to name the way out, which until `convert` existed it
+    # could not do.
+    assert "adata convert" in text and "--layout" in text
+    assert not out.exists(), "nothing may be written when the check fails"
+
+
+def test_concat_refuses_mismatched_layer_encodings(tmp_path):
+    a = _store_with_layout(tmp_path / "a.h5ad", "csr", cells=["c1", "c2"],
+                           layer="csr")
+    b = _store_with_layout(tmp_path / "b.h5ad", "csr", cells=["c3", "c4"],
+                           layer="dense")
+    out = tmp_path / "m.h5ad"
+
+    result = runner.invoke(app, ["concat", str(a), str(b), "-o", str(out)])
+    assert result.exit_code == 1
+    assert "layers/counts" in _out(result)
+
+
+def test_concat_succeeds_once_the_encodings_are_converted(tmp_path):
+    """The suggested fix has to actually work, so the test follows it."""
+    a = _store_with_layout(tmp_path / "a.h5ad", "csr", cells=["c1", "c2"])
+    b = _store_with_layout(tmp_path / "b.h5ad", "csc", cells=["c3", "c4"])
+
+    converted = tmp_path / "b-csr.h5ad"
+    assert runner.invoke(
+        app, ["convert", str(b), "X", "-o", str(converted), "--layout", "csr"]
+    ).exit_code == 0
+
+    out = tmp_path / "m.h5ad"
+    result = runner.invoke(app, ["concat", str(a), str(converted), "-o", str(out)])
+    assert result.exit_code == 0, _out(result)
+    assert ad.read_h5ad(out).shape == (4, 3)

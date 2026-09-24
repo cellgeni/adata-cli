@@ -81,6 +81,52 @@ adata subset data.h5ad --inplace --obs barcodes.txt
 `raw/` is carried over and matched against its **own** var axis, which usually
 holds more genes than the main object.
 
+## `convert`
+
+Change a matrix's dtype, layout or density. Counts held as float64 cost twice
+the disk and twice the read for no information; a tool that wants CSC cannot
+use a CSR store; and `concat` refuses inputs whose encodings disagree.
+
+```bash
+adata convert data.h5ad X -o out.h5ad --dtype float32
+adata convert data.h5ad X -o out.h5ad --layout csc
+adata convert data.h5ad X --inplace --dtype float32 --indices-dtype int32
+adata convert data.h5ad --all -o out.h5ad --dtype float32
+adata convert data.h5ad layers/counts -o out.h5ad --layout dense --force
+```
+
+| Flag | Meaning |
+|---|---|
+| `--output`, `-o` | Output path. Required unless `--inplace` |
+| `--inplace` | Replace the source (written to a temporary path first) |
+| `--all` | Convert `X`, every layer and `raw/X` |
+| `--dtype` | New dtype for the values, e.g. `float32` |
+| `--indices-dtype` | New dtype for sparse indices: `int32` or `int64` |
+| `--layout` | `csr`, `csc`, `dense` or `sparse` |
+| `--force` | Convert despite a lossy cast or a large size increase |
+| `--in-memory` | Transpose in memory rather than streaming |
+| `--chunk`, `-C` | Row chunk size for dense matrices |
+| `--zarr-format` | Zarr version to write; defaults to the source's |
+
+Two things are refused before anything is written. A cast that would not
+round-trip -- checked by casting every value and casting it back, not by
+comparing dtypes -- and a densification that would inflate the store beyond
+four times its size. `--force` overrides either, and the message says how
+many values would change or how large the result would be.
+
+The index dtype is **preserved** unless `--indices-dtype` asks otherwise, so
+narrowing the values does not silently widen the indices and leave the file
+bigger than it started. `indices` and `indptr` keep their own widths, which
+can differ: a narrow matrix with more than 2^31 nonzeros needs int64 offsets
+over int32 coordinates, and both are range-checked before writing.
+
+The output path may not name the input; use `--inplace`, which writes to a
+temporary file and swaps it in only once the conversion has finished.
+
+Transposing streams by default and works on matrices too large to load, at
+the cost of two extra passes over the nonzeros. `--in-memory` is faster when
+the matrix fits.
+
 ## `split`
 
 One store per distinct value of a column.
@@ -118,7 +164,7 @@ adata concat a.h5ad b.h5ad -o m.h5ad --keys a,b --index-unique - --uns-merge sam
 | `--label` | Add an obs column recording each cell's source |
 | `--keys` | Names for the inputs; defaults to their filenames |
 | `--index-unique` | Delimiter for suffixing obs names with their key |
-| `--merge` / `--uns-merge` | `same`, `unique`, `first`, `only`; default drops |
+| `--merge` / `--uns-merge` | `drop` (default), `same`, `unique`, `first`, `only` |
 | `--fill-value` | Value for dense cells introduced by an outer join |
 
 obs columns keep their dtypes: categoricals union their category sets, nullable

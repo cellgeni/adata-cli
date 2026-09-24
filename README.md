@@ -4,7 +4,7 @@ A command-line tool for exploring huge AnnData stores (`.h5ad` and `.zarr`) with
 
 ## Features
 
-- Streaming access to very large `.h5ad` and `.zarr` stores
+- Streaming access to very large `.h5ad` and `.zarr` stores — see [the benchmarks](docs/BENCHMARKS.md) for what that costs in practice, including where loading the file outright is faster
 - Auto-detects `.h5ad` files vs `.zarr` directories
 - Chunked processing for dense and sparse matrices (CSR/CSC)
 - Reads every AnnData on-disk layout, from 0.7.x through the current spec, and always writes the current one
@@ -56,6 +56,7 @@ Run help at any level (e.g. `adata --help`, `adata export --help`).
 - `subset` – stream and write a filtered copy, selected by obs/var name lists (`--obs`/`--var`) or by expression (`--obs-query`/`--var-query`).
 - `split` – write one store per distinct value of an annotation column, with a CSV manifest.
 - `concat` – concatenate stores along the obs axis, with `--join inner|outer` and merge strategies for var and uns.
+- `convert` – change a matrix's dtype, layout (CSR/CSC/dense) or density, streaming; refuses a lossy cast or a large size increase unless forced.
 - `export` – extract data from a store; subcommands: `dataframe` (any dataframe group to CSV), `array` (dense to `.npy`), `sparse` (CSR/CSC to `.mtx`), `dict` (JSON), `image` (PNG). Results go to stdout when no `--output` is given.
 - `import` – write new data into a store at any path; subcommands: `dataframe` (CSV), `array` (`.npy`), `sparse` (`.mtx`), `dict` (JSON), `image` (PNG/JPEG/TIFF).
 
@@ -78,12 +79,26 @@ adata split  data.h5ad --by sample -o per_sample/
 adata concat per_sample/*.h5ad -o merged.h5ad --join outer --label sample
 ```
 
+### Shrinking a store, and making encodings agree
+
+```bash
+adata convert data.h5ad X --inplace --dtype float32
+adata convert data.h5ad --all -o small.h5ad --dtype float32 --indices-dtype int32
+adata convert data.h5ad X -o csc.h5ad --layout csc
+```
+
+Counts written as float64 halve with no loss — and `convert` proves that
+before it writes, by casting every value and casting it back. `concat`
+refuses inputs whose matrices disagree about CSR versus CSC; `--layout` is
+how you make them agree.
+
 ## Documentation
 
 - [Get started](docs/GET_STARTED.md) — a short tutorial
 - [Command reference](docs/COMMANDS.md) — every command and flag
 - [Element spec: HDF5](docs/ELEMENTS_h5ad.md) / [Zarr](docs/ELEMENTS_zarr.md) — the on-disk format, and what this tool does with it
-- [Testing](docs/TESTING.md) — how the suite is organised, and how compatibility is verified against six anndata releases
+- [Testing](docs/TESTING.md) — how the suite is organised, how compatibility is verified against six anndata releases, and the complexity guards that keep cost regressions out
+- [Benchmarks](docs/BENCHMARKS.md) — peak memory and wall time against anndata and scanpy, remeasured on every release
 - [Changelog](CHANGELOG.md)
 
 ## Docker
