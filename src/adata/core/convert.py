@@ -166,21 +166,33 @@ def check_cast(dataset: Any, target: np.dtype, *, chunk: int = DEFAULT_CHUNK) ->
     return report
 
 
-def check_index_dtype(group: Any, target: np.dtype, shape: Tuple[int, int]) -> None:
-    """Refuse an index dtype that cannot address this matrix.
+def check_index_dtype(
+    group: Any,
+    index_dtype: np.dtype,
+    pointer_dtype: np.dtype,
+    shape: Tuple[int, int],
+) -> None:
+    """Refuse index dtypes that cannot address this matrix.
 
-    Cheaper than `check_cast`: the largest index is bounded by the dimensions
-    and the nonzero count, so no pass over the data is needed.
+    Cheaper than `check_cast`: the largest value each array must hold is
+    bounded by the dimensions and the nonzero count, so no pass over the
+    data is needed. `indices` holds coordinates, bounded by the larger
+    dimension; `indptr` holds offsets, bounded by nnz. They are checked
+    separately because they can legitimately need different widths.
     """
-    info = np.iinfo(target)
     nnz = int(group["indices"].shape[0])
-    largest = max(nnz, int(shape[0]), int(shape[1]))
-    if largest > info.max:
-        raise ValueError(
-            f"{target} cannot index this matrix: it holds {nnz:,} nonzeros in "
-            f"a {shape[0]:,} x {shape[1]:,} grid, and {target} tops out at "
-            f"{info.max:,}. Use int64."
-        )
+    for name, dtype, largest, what in (
+        ("indices", index_dtype, max(int(shape[0]), int(shape[1])), "coordinates"),
+        ("indptr", pointer_dtype, nnz, "offsets"),
+    ):
+        limit = int(np.iinfo(dtype).max)
+        if largest > limit:
+            raise ValueError(
+                f"{dtype} cannot hold this matrix's {what}: {name} must reach "
+                f"{largest:,} for a {shape[0]:,} x {shape[1]:,} matrix with "
+                f"{nnz:,} nonzeros, and {dtype} tops out at {limit:,}. "
+                "Use int64."
+            )
 
 
 def _stored_bytes(obj: Any) -> int:
@@ -329,12 +341,13 @@ def _write_sparse_arrays(
     *,
     data_dtype: np.dtype,
     index_dtype: np.dtype,
+    pointer_dtype: np.dtype,
     source: Any,
 ) -> None:
     for name, values, dtype, template in (
         ("data", data, data_dtype, source["data"]),
         ("indices", indices, index_dtype, source["indices"]),
-        ("indptr", indptr, index_dtype, source["indptr"]),
+        ("indptr", indptr, pointer_dtype, source["indptr"]),
     ):
         cast = values.astype(dtype, copy=False)
         dataset = _sparse_dataset(group, name, dtype, cast.size, template)
@@ -349,6 +362,7 @@ def cast_sparse(
     *,
     data_dtype: np.dtype,
     index_dtype: np.dtype,
+    pointer_dtype: np.dtype,
     chunk: int = DEFAULT_CHUNK,
 ) -> None:
     """Rewrite a sparse matrix with new dtypes, keeping its layout.
@@ -373,9 +387,9 @@ def cast_sparse(
             index_dtype, copy=False
         )
 
-    indptr = np.asarray(src.obj["indptr"][...]).astype(index_dtype, copy=False)
+    indptr = np.asarray(src.obj["indptr"][...]).astype(pointer_dtype, copy=False)
     out_indptr = _sparse_dataset(
-        group, "indptr", index_dtype, indptr.size, src.obj["indptr"]
+        group, "indptr", pointer_dtype, indptr.size, src.obj["indptr"]
     )
     out_indptr[:] = indptr
 
@@ -387,6 +401,7 @@ def transpose_sparse_in_memory(
     *,
     data_dtype: np.dtype,
     index_dtype: np.dtype,
+    pointer_dtype: np.dtype = np.dtype("int64"),
 ) -> None:
     """Swap CSR<->CSC by loading the matrix and sorting it once.
 
@@ -419,6 +434,7 @@ def transpose_sparse_in_memory(
         out_indptr,
         data_dtype=data_dtype,
         index_dtype=index_dtype,
+        pointer_dtype=pointer_dtype,
         source=src.obj,
     )
 
@@ -430,6 +446,7 @@ def transpose_sparse_streaming(
     *,
     data_dtype: np.dtype,
     index_dtype: np.dtype,
+    pointer_dtype: np.dtype = np.dtype("int64"),
     chunk: int = DEFAULT_CHUNK,
     bucket_entries: Optional[int] = None,
     console: Optional[Console] = None,
@@ -474,10 +491,32 @@ def transpose_sparse_streaming(
     # what makes the peak follow the setting the caller chose: with a fixed
     # bucket size, anything below it went into a single bucket and the
     # "streaming" path quietly held the whole matrix.
-    per_bucket = max(MIN_BUCKET_ENTRIES, int(bucket_entries or chunk))
+    # An explicit request is honoured as given; the floor applies only to
+    # the value derived from `chunk`, where it stops a tiny chunk producing
+    # thousands of buckets whose overhead outweighs the saving.
+    per_bucket = (
+        max(1, int(bucket_entries))
+        if bucket_entries
+        else max(MIN_BUCKET_ENTRIES, int(chunk))
+    )
     n_buckets = max(1, int(np.ceil(nnz / per_bucket))) if nnz else 1
     n_buckets = min(n_buckets, n_major_out) or 1
-    bounds = np.linspace(0, n_major_out, n_buckets + 1).astype(np.int64)
+
+    # Split by nonzero count, not by coordinate. Equal-width bounds put
+    # nearly everything in one bucket whenever the matrix is skewed -- and
+    # single-cell matrices are: a handful of genes carry most of the
+    # counts. Measured on one such matrix, the largest of three equal-width
+    # buckets held 88% of the entries, so the bucket, not the chunk, set
+    # the peak. `counts` is already to hand from pass 1.
+    cumulative = out_indptr
+    targets = np.linspace(0, nnz, n_buckets + 1)[1:-1]
+    bounds = np.concatenate((
+        [0],
+        np.searchsorted(cumulative, targets, side="left").astype(np.int64),
+        [n_major_out],
+    ))
+    bounds = np.unique(bounds)
+    n_buckets = len(bounds) - 1
     if console is not None and n_buckets > 1:
         console.print(
             f"[dim]Transposing {nnz:,} nonzeros through {n_buckets} buckets[/]"
@@ -547,9 +586,9 @@ def transpose_sparse_streaming(
     finally:
         del dst_parent[scratch_name]
 
-    cast_indptr = out_indptr.astype(index_dtype, copy=False)
+    cast_indptr = out_indptr.astype(pointer_dtype, copy=False)
     dataset = _sparse_dataset(
-        group, "indptr", index_dtype, cast_indptr.size, src.obj["indptr"]
+        group, "indptr", pointer_dtype, cast_indptr.size, src.obj["indptr"]
     )
     dataset[:] = cast_indptr
 
@@ -598,10 +637,14 @@ def densify(
             major = np.repeat(
                 np.arange(hi - lo, dtype=np.int64), np.diff(indptr[lo : hi + 1])
             )
+            # Repeated coordinates are legal in a CSR/CSC store and mean
+            # their sum, which is what scipy's own `toarray` produces.
+            # Plain assignment keeps whichever came last, so a
+            # non-canonical input silently changed value on densifying.
             if csr:
-                block[major, minor] = data
+                np.add.at(block, (major, minor), data)
             else:
-                block[minor, major] = data
+                np.add.at(block, (minor, major), data)
         if csr:
             dst[lo:hi, :] = block
         else:
@@ -616,6 +659,7 @@ def sparsify(
     enc: str,
     data_dtype: np.dtype,
     index_dtype: np.dtype,
+    pointer_dtype: np.dtype = np.dtype("int64"),
     chunk_rows: int = 1024,
     console: Optional[Console] = None,
 ) -> Tuple[int, float]:
@@ -654,7 +698,7 @@ def sparsify(
         ))
 
     indptr = np.concatenate(([0], np.cumsum(counts, dtype=np.int64)))
-    create_dataset(group, "indptr", data=indptr.astype(index_dtype, copy=False))
+    create_dataset(group, "indptr", data=indptr.astype(pointer_dtype, copy=False))
 
 
     nnz = int(indptr[-1])
@@ -718,6 +762,11 @@ class Plan:
     layout: str
     data_dtype: np.dtype
     index_dtype: np.dtype
+    #: `indptr` is tracked apart from `indices` because the two can
+    #: legitimately differ: a narrow matrix with more than 2^31 nonzeros
+    #: needs int64 offsets over int32 column indices. Inferring one from
+    #: the other silently overflowed the offsets and corrupted the matrix.
+    pointer_dtype: np.dtype = np.dtype("int64")
     report: Optional[CastReport] = None
 
 
@@ -738,13 +787,16 @@ def plan_conversion(
     data_dtype = np.dtype(dtype) if dtype is not None else src.dtype
 
     if index_dtype is not None:
-        idx_dtype = np.dtype(index_dtype)
+        idx_dtype = ptr_dtype = np.dtype(index_dtype)
     elif src.sparse:
-        # Keep what the source used. Defaulting to int64 silently doubled
-        # the index arrays of every int32 store that passed through.
+        # Keep what the source used, each independently. Defaulting to
+        # int64 doubled the index arrays of every int32 store; inferring
+        # indptr from indices narrowed the offsets of every store that
+        # needed them wider.
         idx_dtype = np.dtype(src.obj["indices"].dtype)
+        ptr_dtype = np.dtype(src.obj["indptr"].dtype)
     else:
-        idx_dtype = np.dtype("int64")
+        idx_dtype = ptr_dtype = np.dtype("int64")
 
     report: Optional[CastReport] = None
     if dtype is not None and data_dtype != src.dtype:
@@ -757,8 +809,10 @@ def plan_conversion(
             colour = "dim" if report.lossless else "yellow"
             console.print(f"[{colour}]{name}: {message}[/]")
 
-    if src.sparse and index_dtype is not None and not force:
-        check_index_dtype(src.obj, idx_dtype, src.shape)
+    # Always, not only when asked: an inferred dtype can be too narrow too,
+    # and a silently overflowed offset is indistinguishable from corruption.
+    if src.sparse and not force:
+        check_index_dtype(src.obj, idx_dtype, ptr_dtype, src.shape)
 
     if target_layout == "dense" and src.sparse:
         projected = src.shape[0] * src.shape[1] * data_dtype.itemsize
@@ -766,7 +820,7 @@ def plan_conversion(
             _stored_bytes(src.obj), projected, force=force, what=f"{name} as dense"
         )
 
-    return Plan(src, target_layout, data_dtype, idx_dtype, report)
+    return Plan(src, target_layout, data_dtype, idx_dtype, ptr_dtype, report)
 
 
 def convert_matrix(
@@ -799,6 +853,7 @@ def convert_matrix(
     target_layout = plan.layout
     data_dtype = plan.data_dtype
     idx_dtype = plan.index_dtype
+    ptr_dtype = plan.pointer_dtype
 
     # --- then write -------------------------------------------------------
     if target_layout == "dense":
@@ -816,6 +871,7 @@ def convert_matrix(
             enc=target_layout,
             data_dtype=data_dtype,
             index_dtype=idx_dtype,
+            pointer_dtype=ptr_dtype,
             chunk_rows=chunk_rows,
             console=console,
         )
@@ -828,6 +884,7 @@ def convert_matrix(
             name,
             data_dtype=data_dtype,
             index_dtype=idx_dtype,
+            pointer_dtype=ptr_dtype,
             chunk=chunk,
         )
         return
@@ -844,5 +901,6 @@ def convert_matrix(
         name,
         data_dtype=data_dtype,
         index_dtype=idx_dtype,
+        pointer_dtype=ptr_dtype,
         **extra,
     )

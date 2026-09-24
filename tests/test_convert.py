@@ -255,18 +255,6 @@ def test_a_lossless_cast_says_so(tmp_path):
     assert "round-trips" in _out(result)
 
 
-def test_an_index_dtype_too_small_to_address_the_matrix_is_refused(tmp_path):
-    from adata.core.convert import check_index_dtype
-
-    store = _store(tmp_path / "in.h5ad", _matrix())
-    with pytest.raises(ValueError, match="cannot index this matrix"):
-        # 3 billion columns cannot be addressed by int32, whatever the nnz.
-        check_index_dtype(
-            _FakeGroup(nnz=10), np.dtype("int32"), (10, 3_000_000_000)
-        )
-    assert store.exists()
-
-
 class _FakeGroup:
     """Just enough of a sparse group for the index-range check."""
 
@@ -276,6 +264,57 @@ class _FakeGroup:
     def __getitem__(self, key):
         assert key == "indices"
         return type("D", (), {"shape": (self._nnz,)})()
+
+
+def test_an_index_dtype_too_small_to_address_the_matrix_is_refused():
+    """indices and indptr are bounded by different things, so both are checked.
+
+    `indices` holds coordinates, bounded by the larger dimension; `indptr`
+    holds offsets, bounded by nnz. A matrix can legitimately need int64 for
+    one and not the other.
+    """
+    from adata.core.convert import check_index_dtype
+
+    wide = _FakeGroup(nnz=10)
+    with pytest.raises(ValueError, match="cannot hold this matrix's coordinates"):
+        check_index_dtype(
+            wide, np.dtype("int32"), np.dtype("int64"), (10, 3_000_000_000)
+        )
+
+    many = _FakeGroup(nnz=3_000_000_000)
+    with pytest.raises(ValueError, match="cannot hold this matrix's offsets"):
+        check_index_dtype(many, np.dtype("int64"), np.dtype("int32"), (10, 10))
+
+    # Narrow matrix, huge nnz: int32 coordinates are fine, offsets are not.
+    check_index_dtype(
+        _FakeGroup(nnz=10), np.dtype("int32"), np.dtype("int64"), (10, 10)
+    )
+
+
+def test_indptr_keeps_its_own_width(tmp_path):
+    """A store with int32 indices and int64 indptr must keep both.
+
+    Inferring indptr's dtype from indices narrowed the offsets of any
+    matrix with more than 2^31 nonzeros, which corrupts it silently.
+    """
+    import h5py
+
+    store = _store(tmp_path / "in.h5ad", _matrix())
+    with h5py.File(store, "a") as handle:
+        pointers = handle["X/indptr"][...]
+        coordinates = handle["X/indices"][...]
+        del handle["X/indptr"], handle["X/indices"]
+        handle["X"].create_dataset("indptr", data=pointers.astype("int64"))
+        handle["X"].create_dataset("indices", data=coordinates.astype("int32"))
+
+    out = tmp_path / "out.h5ad"
+    assert runner.invoke(
+        app, ["convert", str(store), "X", "-o", str(out), "--dtype", "float32"]
+    ).exit_code == 0
+
+    with h5py.File(out) as handle:
+        assert handle["X/indptr"].dtype == np.dtype("int64"), "offsets narrowed"
+        assert handle["X/indices"].dtype == np.dtype("int32")
 
 
 # ---------------------------------------------------------------------------
@@ -479,3 +518,176 @@ def test_a_missing_entry_names_the_path(tmp_path):
     )
     assert result.exit_code == 1
     assert "layers/nope" in _out(result)
+
+
+# ---------------------------------------------------------------------------
+# what review found
+#
+# Five findings on the first version of this command, four of them able to
+# change or destroy data while reporting success. Each gets a test.
+
+
+def test_an_output_that_names_the_input_is_refused(tmp_path):
+    """Writing over the store being read from destroyed it.
+
+    HDF5 happens to refuse the second open; Zarr does not, and the command
+    completed successfully leaving a store with zero nonzeros where the
+    data had been.
+    """
+    matrix = _matrix()
+    store = _store(tmp_path / "in.h5ad", matrix)
+
+    result = runner.invoke(
+        app, ["convert", str(store), "X", "-o", str(store), "--dtype", "float32"]
+    )
+    assert result.exit_code == 1
+    assert "Output path is the input" in _out(result)
+    assert np.array_equal(ad.read_h5ad(store).X.toarray(), matrix.toarray())
+
+
+def test_an_output_that_aliases_the_input_through_a_relative_path_is_refused(
+    tmp_path,
+):
+    matrix = _matrix()
+    store = _store(tmp_path / "in.h5ad", matrix)
+    alias = tmp_path / "sub" / ".." / "in.h5ad"
+    (tmp_path / "sub").mkdir()
+
+    result = runner.invoke(
+        app, ["convert", str(store), "X", "-o", str(alias), "--dtype", "float32"]
+    )
+    assert result.exit_code == 1
+    assert np.array_equal(ad.read_h5ad(store).X.toarray(), matrix.toarray())
+
+
+def test_an_explicitly_named_obsm_matrix_is_actually_converted(tmp_path):
+    """Only `layers` and `raw` were descended into, so this silently no-opped.
+
+    The command reported success and copied the matrix over unchanged,
+    which is the worst way to get this wrong: the user has no signal.
+    """
+    matrix = _matrix()
+    obj = ad.AnnData(
+        X=matrix,
+        obs=pd.DataFrame(index=[f"c{i}" for i in range(matrix.shape[0])]),
+        var=pd.DataFrame(index=[f"g{i}" for i in range(matrix.shape[1])]),
+    )
+    obj.obsm["X_pca"] = np.ones((matrix.shape[0], 4), dtype="float64")
+    store = tmp_path / "in.h5ad"
+    obj.write_h5ad(store)
+
+    out = tmp_path / "out.h5ad"
+    result = runner.invoke(
+        app,
+        ["convert", str(store), "obsm/X_pca", "-o", str(out), "--dtype", "float32"],
+    )
+    assert result.exit_code == 0, _out(result)
+
+    got = ad.read_h5ad(out)
+    assert got.obsm["X_pca"].dtype == np.dtype("float32")
+    assert np.array_equal(got.obsm["X_pca"], obj.obsm["X_pca"].astype("float32"))
+    assert got.X.dtype == matrix.dtype, "X should not have been touched"
+
+
+def test_densifying_sums_duplicate_coordinates(tmp_path):
+    """A repeated coordinate means the sum, which is what scipy produces.
+
+    Legal in a CSR store and not what anndata writes, so it takes a
+    hand-built file to reach -- but plain assignment kept whichever entry
+    came last and changed the matrix's values on the way to dense.
+    """
+    import h5py
+
+    store = _store(tmp_path / "in.h5ad", sparse.csr_matrix(np.zeros((2, 3))))
+    with h5py.File(store, "a") as handle:
+        for key in ("data", "indices", "indptr"):
+            del handle["X"][key]
+        handle["X"].create_dataset("data", data=np.array([1.0, 2.0]))
+        handle["X"].create_dataset("indices", data=np.array([1, 1]))
+        handle["X"].create_dataset("indptr", data=np.array([0, 2, 2]))
+
+    assert ad.read_h5ad(store).X.toarray()[0, 1] == 3.0, "scipy sums them"
+
+    out = tmp_path / "dense.h5ad"
+    assert runner.invoke(
+        app,
+        ["convert", str(store), "X", "-o", str(out), "--layout", "dense",
+         "--force"],
+    ).exit_code == 0
+    assert np.asarray(ad.read_h5ad(out).X)[0, 1] == 3.0
+
+
+def test_transpose_buckets_are_balanced_by_nonzeros_not_by_coordinate(
+    tmp_path, monkeypatch
+):
+    """A skewed matrix must not land in one bucket.
+
+    Single-cell matrices are skewed -- a few genes carry most of the counts
+    -- so equal-width coordinate bounds defeat the streaming guarantee
+    exactly where it matters. Measured on the matrix below, the largest of
+    three equal-width buckets held 88% of the entries, so the bucket rather
+    than the chunk set the peak.
+    """
+    import adata.core.subset as subset_module
+    from adata.core.convert import describe, transpose_sparse_streaming
+    from adata.storage import open_store
+
+    rng = np.random.default_rng(0)
+    n = 400
+    rows, cols = [], []
+    for row in range(n):
+        for _ in range(20):
+            rows.append(row)
+            cols.append(
+                int(rng.integers(0, 5)) if rng.random() < 0.95
+                else int(rng.integers(0, n))
+            )
+    skewed = sparse.csr_matrix((np.ones(len(rows)), (rows, cols)), shape=(n, n))
+    store = _store(tmp_path / "skew.h5ad", skewed)
+
+    # `transpose_sparse_streaming` imports `_append` from this module when it
+    # runs, so this is the binding it will pick up.
+    per_bucket: dict = {}
+    original = subset_module._append
+
+    def watching_append(dataset, values):
+        name = str(getattr(dataset, "name", "") or getattr(dataset, "path", ""))
+        if "major" in name:
+            per_bucket[name] = per_bucket.get(name, 0) + int(values.size)
+        return original(dataset, values)
+
+    monkeypatch.setattr(subset_module, "_append", watching_append)
+
+    out = tmp_path / "out.h5ad"
+    with open_store(store, "r") as src, open_store(out, "w") as dst:
+        transpose_sparse_streaming(
+            describe(src.root["X"]),
+            dst.root,
+            "X",
+            data_dtype=np.dtype("float64"),
+            index_dtype=np.dtype("int64"),
+            chunk=1000,
+            bucket_entries=1000,
+        )
+
+    sizes = sorted(per_bucket.values(), reverse=True)
+    assert len(sizes) > 1, f"expected several buckets, saw {per_bucket}"
+    assert sizes[0] <= skewed.nnz * 0.5, (
+        f"the largest bucket held {sizes[0]} of {skewed.nnz} nonzeros "
+        f"({sizes[0] / skewed.nnz:.0%}); buckets must be balanced by count, "
+        "not by coordinate range"
+    )
+
+    # Read X back directly: this wrote only the matrix, not a whole store.
+    import h5py
+
+    expected = skewed.tocsc()
+    with h5py.File(out) as handle:
+        got = sparse.csc_matrix(
+            (handle["X/data"][...], handle["X/indices"][...],
+             handle["X/indptr"][...]),
+            shape=tuple(handle["X"].attrs["shape"]),
+        )
+    assert np.array_equal(got.toarray(), expected.toarray()), (
+        "balancing the buckets changed the result"
+    )

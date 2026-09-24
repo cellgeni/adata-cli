@@ -23,7 +23,15 @@ Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 
   Transposing streams by default, holding one bucket of nonzeros rather than
   the matrix, so it works on files too large to load; `--in-memory` is
-  faster when the matrix fits.
+  faster when the matrix fits. Buckets are balanced by nonzero count rather
+  than by coordinate range, because a single-cell matrix is skewed -- a few
+  genes carry most of the counts -- and equal-width bounds put most of one
+  in a single bucket.
+
+  `--indices-dtype` is checked against both what `indices` must address and
+  what `indptr` must reach, which differ: a narrow matrix with more than
+  2^31 nonzeros needs int64 offsets over int32 coordinates. Both are
+  preserved from the source when not specified.
 
 - **`concat` now names the command to run** when inputs disagree about a
   matrix encoding. The check itself is not new, but nothing tested it and it

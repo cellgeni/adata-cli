@@ -116,7 +116,12 @@ many values would change or how large the result would be.
 
 The index dtype is **preserved** unless `--indices-dtype` asks otherwise, so
 narrowing the values does not silently widen the indices and leave the file
-bigger than it started.
+bigger than it started. `indices` and `indptr` keep their own widths, which
+can differ: a narrow matrix with more than 2^31 nonzeros needs int64 offsets
+over int32 coordinates, and both are range-checked before writing.
+
+The output path may not name the input; use `--inplace`, which writes to a
+temporary file and swaps it in only once the conversion has finished.
 
 Transposing streams by default and works on matrices too large to load, at
 the cost of two extra passes over the nonzeros. `--in-memory` is faster when
