@@ -3,7 +3,12 @@
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
-## Unreleased
+## 0.6.0
+
+Adds `adata convert`, and fixes four quadratic paths that made `concat` and
+`split` appear to hang on real data. Three of the four were found by a new
+suite of complexity guards, which now run on every pull request; the first
+was reported from a pipeline that had to kill twelve tasks after 98 minutes.
 
 ### Added
 
@@ -37,33 +42,6 @@ Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
   matrix encoding. The check itself is not new, but nothing tested it and it
   could not suggest a fix, because there was none.
 
-### Fixed
-
-- **`concat --merge` never finished on a real store.** Aligning a var column
-  onto the target index re-read the whole column from disk once per target
-  variable, so the cost was quadratic: at 36,601 variables a merge that should
-  take a fraction of a second ran for hours at 100% CPU with the output file
-  never growing past its header. Reported against 0.5.1 (REQ-71798), where 12
-  of 13 pipeline tasks had to be killed after 98 minutes. The column is now
-  read once per input, and `--merge first` / `--merge only`, which decide on
-  presence alone, read no column values at all.
-- **`concat` was quadratic in the number of categories** in an obs column.
-  Category merging probed a list rather than a dict: 2,096,128 string
-  comparisons to union 1,024 categories, and around 5e9 for a 100k-category
-  column. Found by the new guards.
-- **`split --by` was quadratic**, O(n_rows x n_groups). `group_indices` grouped
-  rows with `np.nonzero(values == label)` inside a loop over distinct labels,
-  rescanning each chunk once per label: at 4,096 rows, 16,384 elements scanned
-  for 4 groups and 1,048,576 for 256. A million cells split by a thousand
-  samples is ~10^9 comparisons. One `np.unique` pass per chunk makes it flat
-  in the group count. Found by the new guards; order of first appearance,
-  which names the output files, is unchanged.
-- **`concat` built a Python object per row** for nullable and string obs
-  columns, then walked the list twice more. Filling a typed buffer by slice
-  removes three full passes over every such column.
-
-### Added
-
 - **Complexity guards in the test suite** (`tests/test_performance.py`).
   Cost regressions now fail at merge time. They count operations rather than
   seconds -- h5py and zarr reads, Zarr store traffic, Python allocation and
@@ -75,6 +53,47 @@ Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
   Two claims are now enforced rather than described -- `view` and `ls` read
   **zero** data elements at any store size, and streaming stays far below the
   input curve at a fixed `--chunk`.
+
+- **A comparative benchmark** (`benchmarks/`), run on every tag against
+  anndata and against scanpy where scanpy has a real equivalent. Reports peak
+  RSS, wall time and output size; publishes to
+  [docs/BENCHMARKS.md](docs/BENCHMARKS.md) and the release notes. Report-only
+  -- it never fails a build. Fifteen cases, covering every command with a real
+  baseline, including `h5ls -r` for `ls` and the rows where adata-cli is the
+  slower of the two.
+
+- **`--merge drop` and `--uns-merge drop` are accepted.** `drop` was already
+  the documented default behaviour but was rejected as a value, so a config
+  could not state it explicitly.
+
+### Fixed
+
+- **`concat --merge` never finished on a real store.** Aligning a var column
+  onto the target index re-read the whole column from disk once per target
+  variable, so the cost was quadratic: at 36,601 variables a merge that should
+  take a fraction of a second ran for hours at 100% CPU with the output file
+  never growing past its header. Reported against 0.5.1 (REQ-71798), where 12
+  of 13 pipeline tasks had to be killed after 98 minutes. The column is now
+  read once per input, and `--merge first` / `--merge only`, which decide on
+  presence alone, read no column values at all.
+
+- **`concat` was quadratic in the number of categories** in an obs column.
+  Category merging probed a list rather than a dict: 2,096,128 string
+  comparisons to union 1,024 categories, and around 5e9 for a 100k-category
+  column. Found by the new guards.
+
+- **`split --by` was quadratic**, O(n_rows x n_groups). `group_indices` grouped
+  rows with `np.nonzero(values == label)` inside a loop over distinct labels,
+  rescanning each chunk once per label: at 4,096 rows, 16,384 elements scanned
+  for 4 groups and 1,048,576 for 256. A million cells split by a thousand
+  samples is ~10^9 comparisons. One `np.unique` pass per chunk makes it flat
+  in the group count. Found by the new guards; order of first appearance,
+  which names the output files, is unchanged.
+
+- **`concat` built a Python object per row** for nullable and string obs
+  columns, then walked the list twice more. Filling a typed buffer by slice
+  removes three full passes over every such column.
+
 - **Copying variable-length strings ignored its own read budget.** The width
   of a vlen element was assumed to be 64 bytes, because h5py reports the
   itemsize of a pointer, so the step was the same 524,288 elements whatever
@@ -84,6 +103,7 @@ Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
   sampled from the first 256 elements. Reported by an automated review on
   PR #14 and confirmed by measurement; `uns` can hold arbitrary text, so this
   was not a width the layer could assume.
+
 - **Peak RSS in the benchmark was floored by the runner's own memory on Linux.**
   A forked child inherits its parent's resident pages and `execve` folds that
   into the `maxrss` the kernel reports, so every contender would have measured
@@ -93,16 +113,6 @@ Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
   child goes from 326 MB to 8 MB. Caught by `test_benchmark_harness.py`, which
   exists for exactly this. The published figures were measured on macOS, which
   resets the high-water mark at exec, and are unchanged.
-- **A comparative benchmark** (`benchmarks/`), run on every tag against
-  anndata and against scanpy where scanpy has a real equivalent. Reports peak
-  RSS, wall time and output size; publishes to
-  [docs/BENCHMARKS.md](docs/BENCHMARKS.md) and the release notes. Report-only
-  -- it never fails a build. Fifteen cases, covering every command with a real
-  baseline, including `h5ls -r` for `ls` and the rows where adata-cli is the
-  slower of the two.
-- **`--merge drop` and `--uns-merge drop` are accepted.** `drop` was already
-  the documented default behaviour but was rejected as a value, so a config
-  could not state it explicitly.
 
 ## 0.5.1
 
