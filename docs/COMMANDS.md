@@ -18,6 +18,7 @@ Run `adata <command> --help` for the authoritative flag list.
 - [subset](#subset)
 - [split](#split)
 - [concat](#concat)
+- [convert](#convert)
 - [create](#create)
 - [export](#export)
 - [import](#import)

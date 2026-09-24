@@ -26,7 +26,7 @@ from adata.commands import export_image as export_image_cmd
 
 app = typer.Typer(
     help="Streaming CLI for huge AnnData .h5ad and .zarr stores "
-    "(view, ls, subset, split, concat, export, import)."
+    "(view, ls, create, subset, split, concat, convert, export, import)."
 )
 # Use stderr for status/progress to keep stdout clean for data output
 # force_terminal=True ensures Rich output is visible even in non-TTY environments
