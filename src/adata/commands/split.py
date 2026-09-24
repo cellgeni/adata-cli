@@ -3,7 +3,7 @@
 Requested in issue #2, modelled on cellgeni/scraft's `split_h5ad` but
 streaming: the source is never loaded into memory, only the column being split
 on is read, and each output is produced by the same subset machinery used by
-`adata subset`.
+`adata subset`, fanned out so every matrix is read once for all groups.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import numpy as np
 from rich.console import Console
 
 from adata.core.select import group_indices
-from adata.core.subset import subset_h5ad
+from adata.core.subset import split_h5ad
 from adata.storage import detect_backend, open_store
 
 
@@ -112,19 +112,22 @@ def split_store(
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    for label, out_path, _ in planned:
-        indices = np.sort(groups[label])
-        subset_h5ad(
-            file=file,
-            output=out_path,
-            obs_file=None,
-            var_file=None,
-            chunk_rows=chunk_rows,
-            console=console,
-            obs_indices=indices if axis == "obs" else None,
-            var_indices=indices if axis == "var" else None,
-            zarr_format=zarr_format,
-        )
+    # One call for every group, so each matrix is read once rather than once
+    # per group.
+    split_h5ad(
+        file,
+        [
+            (
+                out_path,
+                np.sort(groups[label]) if axis == "obs" else None,
+                np.sort(groups[label]) if axis == "var" else None,
+            )
+            for label, out_path, _ in planned
+        ],
+        chunk_rows=chunk_rows,
+        console=console,
+        zarr_format=zarr_format,
+    )
 
     if manifest:
         _write_manifest(file, output_dir, column, planned, console)

@@ -3,6 +3,42 @@
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
+## 0.6.1
+
+Makes the outputs of `subset`, `split` and `concat` the size anndata writes
+(they were about twice that), and makes `split` read each matrix once rather
+than once per group. In 0.6.0 a hand-written anndata loop split the ci-tier
+benchmark 7x faster than `split` did; `split` is now the faster of the two.
+
+### Fixed
+
+- **`subset`, `split` and `concat` wrote sparse matrices about twice as large
+  as they needed to be.** Every sparse output widened `indices` and `indptr`
+  to int64, whatever the source used, and was written without the source's
+  compression, so with an lzf input the `data` and `indices` came out
+  uncompressed. Outputs now keep the source's index dtypes and storage
+  settings. `concat` widens only when the combined matrix could not
+  be addressed otherwise. `convert` already did this; the code next to it
+  did not.
+
+- **`split` read the whole matrix once per group.** It ran a separate subset
+  for each group. When groups were interleaved through the file, as samples
+  usually are, each subset read nearly all of X, so a split into k groups
+  read and decompressed X k times: 56.7 s against 7.8 s for a hand-written
+  anndata loop in the 0.6.0 benchmark. `split` now reads each matrix once
+  and shares every block out among all the outputs. It holds up to a quarter
+  of the file-descriptor limit open at once, and makes one pass per batch
+  beyond that. `subset` shares the same writer, which now gathers rows in
+  one vectorised step instead of a Python loop over rows, and skips blocks
+  that hold none of the selected rows. A new guard in
+  `tests/test_performance.py` checks that split's reads of X do not grow
+  with the number of groups.
+
+  Dataframe columns are no longer read through an h5py fancy index, which
+  cost 0.38 s per column per group on 50,000 cells. They are now read as
+  contiguous blocks and selected in memory. With both changes, the ci-tier
+  benchmark on a laptop splits in 1.6 s against anndata's 2.3 s.
+
 ## 0.6.0
 
 Adds `adata convert`, and fixes four quadratic paths that made `concat` and

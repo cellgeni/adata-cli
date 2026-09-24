@@ -389,6 +389,45 @@ def _matrix_kind(obj: Any) -> str:
     return "other"
 
 
+def _widen_to_hold(dtype: np.dtype, largest: int) -> np.dtype:
+    """`dtype`, or the narrowest of int32/int64 wider than it that holds `largest`."""
+    dtype = np.dtype(dtype)
+    if largest <= np.iinfo(dtype).max:
+        return dtype
+    for candidate in (np.int32, np.int64):
+        if largest <= np.iinfo(candidate).max:
+            return np.dtype(np.result_type(dtype, candidate))
+    return np.dtype(np.int64)
+
+
+def _concat_index_dtypes(
+    sources: List[Any], n_minor: int
+) -> Tuple[np.dtype, np.dtype]:
+    """The `indices` and `indptr` dtypes for a concatenation of `sources`.
+
+    The widest the inputs used, so int32 inputs give an int32 output rather
+    than the int64 every output used to get. That is widened only when the
+    result could not be addressed otherwise: `indices` must reach the
+    output's minor dimension, and `indptr` its total nonzero count, which is
+    known before writing as the sum of the inputs'. Both are checked against
+    the chosen dtype's own limit, not int32's, since the spec allows
+    narrower index arrays and an int16 `indptr` would otherwise wrap.
+    """
+    indices = np.result_type(*[s["indices"].dtype for s in sources])
+    indptr = np.result_type(*[s["indptr"].dtype for s in sources])
+    nnz = sum(int(s["data"].shape[0]) for s in sources)
+    return _widen_to_hold(indices, n_minor), _widen_to_hold(indptr, nnz)
+
+
+def _write_indptr(
+    group: Any, indptr: List[int], dtype: np.dtype, template: Any
+) -> None:
+    from adata.core.subset import _sparse_dataset
+
+    values = np.asarray(indptr, dtype=np.int64).astype(dtype, copy=False)
+    _sparse_dataset(group, "indptr", dtype, values.size, template)[:] = values
+
+
 def _concat_sparse(
     dst_parent: Any,
     name: str,
@@ -403,7 +442,7 @@ def _concat_sparse(
     Absent columns need no fill: a sparse matrix's zeros are implicit, so
     dropped entries simply do not appear in the output.
     """
-    from adata.core.subset import _append, _growable
+    from adata.core.subset import _append, _growable_like
 
     group = dst_parent.create_group(name)
     spec.set_encoding(group, spec.CSR_MATRIX)
@@ -412,8 +451,11 @@ def _concat_sparse(
     set_shape_attr(group, (n_rows, n_cols))
 
     dtype = np.result_type(*[s["data"].dtype for s in sources])
-    out_data = _growable(group, "data", dtype)
-    out_indices = _growable(group, "indices", np.int64)
+    index_dtype, pointer_dtype = _concat_index_dtypes(sources, n_cols)
+    out_data = _growable_like(group, "data", dtype, sources[0]["data"])
+    out_indices = _growable_like(
+        group, "indices", index_dtype, sources[0]["indices"]
+    )
     indptr = [0]
     nnz = 0
 
@@ -449,7 +491,7 @@ def _concat_sparse(
                 _append(out_indices, np.concatenate(kept_idx))
                 _append(out_data, np.concatenate(kept_data).astype(dtype))
 
-    create_dataset(group, "indptr", data=np.asarray(indptr, dtype=np.int64))
+    _write_indptr(group, indptr, pointer_dtype, sources[0]["indptr"])
 
 
 def _concat_dense(
@@ -509,7 +551,7 @@ def _concat_csc(
     input's row offset added. Because every input's column is already sorted
     and the offsets increase, the result is sorted without a re-sort.
     """
-    from adata.core.subset import _append, _growable
+    from adata.core.subset import _append, _growable_like
     from adata.elements.write import set_shape_attr
 
     group = dst_parent.create_group(name)
@@ -517,8 +559,11 @@ def _concat_csc(
     set_shape_attr(group, (n_rows, n_cols))
 
     dtype = np.result_type(*[s["data"].dtype for s in sources])
-    out_data = _growable(group, "data", dtype)
-    out_indices = _growable(group, "indices", np.int64)
+    index_dtype, pointer_dtype = _concat_index_dtypes(sources, n_rows)
+    out_data = _growable_like(group, "data", dtype, sources[0]["data"])
+    out_indices = _growable_like(
+        group, "indices", index_dtype, sources[0]["indices"]
+    )
     indptr = [0]
     nnz = 0
 
@@ -547,7 +592,7 @@ def _concat_csc(
             nnz += int(sum(len(r) for r in rows))
         indptr.append(nnz)
 
-    create_dataset(group, "indptr", data=np.asarray(indptr, dtype=np.int64))
+    _write_indptr(group, indptr, pointer_dtype, sources[0]["indptr"])
 
 
 def check_matrix_encodings(roots: List[Any], console: Console) -> None:
