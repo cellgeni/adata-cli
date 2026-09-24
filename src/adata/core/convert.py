@@ -31,6 +31,7 @@ from rich.console import Console
 
 from adata.elements import spec
 from adata.elements.write import set_shape_attr
+from adata.core.subset import _growable_like, _sparse_dataset
 from adata.storage import (
     copy_attrs,
     create_dataset,
@@ -296,41 +297,6 @@ def _new_sparse_group(
     spec.set_encoding(group, enc)
     set_shape_attr(group, shape)
     return group
-
-
-def _sparse_dataset(
-    group: Any, name: str, dtype: np.dtype, n: int, template: Any
-) -> Any:
-    """A 1-D dataset of `n` elements laid out like `template`.
-
-    Forwarding compression and chunking matters more here than anywhere
-    else: the point of a dtype change is usually to make the file smaller,
-    and creating the output with a fixed 65,536-element chunk made a
-    2,400-nonzero matrix allocate 786 KB of mostly empty chunk -- eight
-    times the source, from a conversion asked for to halve it.
-    """
-    from adata.core.subset import _clamp_chunks
-
-    backend = "zarr" if is_zarr_group(group) else "hdf5"
-    kw = dataset_create_kwargs(template, target_backend=backend, dst_parent=group)
-    kw = _clamp_chunks(kw, max(1, n))
-    if "chunks" not in kw and n:
-        kw["chunks"] = (min(n, 1 << 16),)
-    return create_dataset(group, name, shape=(n,), dtype=dtype, **kw)
-
-
-def _growable_like(group: Any, name: str, dtype: np.dtype, template: Any) -> Any:
-    """Like `_sparse_dataset`, but extensible for a size not yet known."""
-    backend = "zarr" if is_zarr_group(group) else "hdf5"
-    kw = dataset_create_kwargs(template, target_backend=backend, dst_parent=group)
-    kw.pop("shards", None)
-    chunks = kw.pop("chunks", None)
-    step = int(chunks[0]) if chunks else 1 << 16
-    if is_zarr_group(group):
-        return group.create_array(name, shape=(0,), dtype=dtype, chunks=(step,), **kw)
-    return group.create_dataset(
-        name, shape=(0,), maxshape=(None,), dtype=dtype, chunks=(step,), **kw
-    )
 
 
 def _write_sparse_arrays(

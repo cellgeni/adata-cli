@@ -464,14 +464,21 @@ def test_h5ad_to_zarr_conversion_reads_grow_linearly(tmp_path):
     assert_grows_linearly(measure, what="h5ad to zarr", axis="n_obs")
 
 
-def test_split_reads_grow_linearly_in_group_count(tmp_path):
+def test_split_reads_grow_linearly_in_group_count(tmp_path, monkeypatch):
     """Splitting into k groups must stay linear in k at fixed store size.
 
     n_obs is held constant deliberately. Scaling rows alongside groups would
     make the total legitimately quadratic -- k passes over 4k rows -- and the
     guard would be measuring the fixture, not the implementation.
+
+    The output batch is raised above the largest k: batching adds one pass
+    per batch, a step the linearity check would misread as curvature.
+    `test_split_in_batches_matches_split_in_one` covers the batches.
     """
     from adata.commands.split import split_store
+    from adata.core import subset
+
+    monkeypatch.setattr(subset, "MAX_OPEN_OUTPUTS", 1024)
 
     n_obs = 512
 
@@ -490,6 +497,39 @@ def test_split_reads_grow_linearly_in_group_count(tmp_path):
 
     assert_grows_linearly(
         measure, what="split --by", axis="n_groups", sizes=(8, 32, 128)
+    )
+
+
+def test_split_reads_the_matrix_once_whatever_the_group_count(tmp_path, monkeypatch):
+    """X is read once for all groups, not once per group.
+
+    Linear growth in k, which the guard above accepts, is exactly what split
+    used to do: it subset once per group, and with interleaved groups each
+    subset read the span of its own rows -- nearly all of X. On the release
+    benchmark that was 56.7 s against 7.8 s for a naive anndata loop. The
+    other elements are still written per group, so only X is counted here.
+    """
+    from adata.commands.split import split_store
+    from adata.core import subset
+
+    monkeypatch.setattr(subset, "MAX_OPEN_OUTPUTS", 1024)
+    n_obs = 256
+
+    def measure(n: int) -> int:
+        source = _store(
+            tmp_path / f"x{n}.h5ad", name="x", n_obs=n_obs, n_var=64, n_categories=n
+        )
+        with count_io() as io:
+            split_store(source, "ct", tmp_path / f"ox{n}", QUIET, manifest=False)
+        read = sum(
+            v for k, v in io.by_name.items() if k.endswith(("X/data", "X/indices"))
+        )
+        # Every nonzero at least once: the counters can see these reads.
+        assert read >= 2 * n_obs * 64, io.by_name
+        return read
+
+    assert_independent_of(
+        measure, what="split X reads", axis="n_groups", sizes=(2, 128)
     )
 
 
