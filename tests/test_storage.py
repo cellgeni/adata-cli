@@ -393,3 +393,77 @@ def test_clamping_handles_one_dimensional_chunks():
 
     assert _clamp_chunks({"chunks": (100,)}, 5)["chunks"] == (5,)
     assert _clamp_chunks({}, 5) == {}
+
+
+# ---------------------------------------------------------------------------
+# read sizing
+
+
+def test_read_step_grows_past_a_pathological_source_chunk():
+    """A `(1, n_cols)` source must not be copied one row per read.
+
+    Forwarding the source's chunk height meant inheriting whatever the writer
+    chose. On a network filesystem each read is a round-trip, so a row-chunked
+    million-cell store spent the whole copy waiting on latency.
+    """
+    from adata.storage import TARGET_READ_BYTES, _chunk_step, _row_bytes
+
+    shape, chunks, dtype = (1_000_000, 30_000), (1, 30_000), np.dtype("float32")
+    step = _chunk_step(shape, chunks, dtype)
+
+    assert step > 1, "the source chunk height is no longer used verbatim"
+    assert step * _row_bytes(shape, dtype) >= TARGET_READ_BYTES // 2
+
+
+def test_read_step_stays_a_whole_number_of_source_chunks():
+    """Reading part of a chunk still costs decompressing all of it."""
+    from adata.storage import _chunk_step
+
+    for chunk_rows in (1, 7, 100, 65_536):
+        step = _chunk_step((10_000_000,), (chunk_rows,), np.dtype("int64"))
+        assert step % chunk_rows == 0
+
+
+def test_read_step_never_exceeds_the_dataset():
+    from adata.storage import _chunk_step
+
+    assert _chunk_step((10,), (1,), np.dtype("int64")) == 10
+    assert _chunk_step((), None, np.dtype("int64")) == 1
+    assert _chunk_step((0,), None, np.dtype("int64")) == 1
+
+
+def test_read_step_bounds_peak_memory():
+    """A wide unchunked source used to read 1024 rows however wide they were."""
+    from adata.storage import TARGET_READ_BYTES, _chunk_step, _row_bytes
+
+    cases = [
+        ((1_000_000, 30_000), None, np.dtype("float32")),
+        ((1_000_000, 50), (1, 50), np.dtype("float32")),
+        ((200_000_000,), (65_536,), np.dtype("int64")),
+    ]
+    for shape, chunks, dtype in cases:
+        step = _chunk_step(shape, chunks, dtype)
+        assert step * _row_bytes(shape, dtype) <= 2 * TARGET_READ_BYTES
+
+
+def test_row_bytes_does_not_trust_a_vlen_itemsize():
+    """h5py reports itemsize 8 for vlen str -- that is the pointer, not the text."""
+    import h5py
+
+    from adata.storage import VLEN_ELEMENT_BYTES, _row_bytes
+
+    assert _row_bytes((10,), h5py.string_dtype(encoding="utf-8")) == VLEN_ELEMENT_BYTES
+    assert _row_bytes((10,), np.dtype("O")) == VLEN_ELEMENT_BYTES
+    assert _row_bytes((10, 4), np.dtype("float32")) == 16
+
+
+def test_copy_dataset_of_a_row_chunked_source_round_trips(new_store):
+    """The larger read step must not change what lands on disk."""
+    path, opener = new_store()
+    with opener("a") as root:
+        from adata.storage import create_dataset
+
+        values = np.arange(400, dtype="float32").reshape(100, 4)
+        create_dataset(root["uns"], "src", data=values, chunks=(1, 4))
+        copy_dataset(root["uns"]["src"], root["uns"], "dst")
+        assert np.array_equal(root["uns"]["dst"][...], values)

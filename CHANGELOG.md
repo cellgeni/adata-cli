@@ -3,6 +3,117 @@
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
+## Unreleased
+
+### Fixed
+
+- **`concat --merge` never finished on a real store.** Aligning a var column
+  onto the target index re-read the whole column from disk once per target
+  variable, so the cost was quadratic: at 36,601 variables a merge that should
+  take a fraction of a second ran for hours at 100% CPU with the output file
+  never growing past its header. Reported against 0.5.1 (REQ-71798), where 12
+  of 13 pipeline tasks had to be killed after 98 minutes. The column is now
+  read once per input, and `--merge first` / `--merge only`, which decide on
+  presence alone, read no column values at all.
+- **`concat` was quadratic in the number of categories** in an obs column.
+  Category merging probed a list rather than a dict: 2,096,128 string
+  comparisons to union 1,024 categories, and around 5e9 for a 100k-category
+  column. Found by the new guards.
+- **`split --by` was quadratic**, O(n_rows x n_groups). `group_indices` grouped
+  rows with `np.nonzero(values == label)` inside a loop over distinct labels,
+  rescanning each chunk once per label: at 4,096 rows, 16,384 elements scanned
+  for 4 groups and 1,048,576 for 256. A million cells split by a thousand
+  samples is ~10^9 comparisons. One `np.unique` pass per chunk makes it flat
+  in the group count. Found by the new guards; order of first appearance,
+  which names the output files, is unchanged.
+- **`concat` built a Python object per row** for nullable and string obs
+  columns, then walked the list twice more. Filling a typed buffer by slice
+  removes three full passes over every such column.
+
+### Added
+
+- **Complexity guards in the test suite** (`tests/test_performance.py`).
+  Cost regressions now fail at merge time. They count operations rather than
+  seconds -- h5py and zarr reads, Zarr store traffic, Python allocation and
+  executed lines -- and assert that successive increments grow no faster than
+  linearly, so nothing here can fail because a CI runner was busy. See
+  [docs/TESTING.md](docs/TESTING.md#performance). Every subcommand is covered:
+  `ls`, `view`, `create`, all five `export` and all five `import` variants,
+  `split` on both axes, and the `concat` options nothing else reached.
+  Two claims are now enforced rather than described -- `view` and `ls` read
+  **zero** data elements at any store size, and streaming stays far below the
+  input curve at a fixed `--chunk`.
+- **Copying variable-length strings ignored its own read budget.** The width
+  of a vlen element was assumed to be 64 bytes, because h5py reports the
+  itemsize of a pointer, so the step was the same 524,288 elements whatever
+  the data held: 2 GiB per read at 4 KiB elements against a stated 32 MiB
+  budget, and for any array shorter than that step, the whole array in one
+  go. Copying 200,000 strings of 4 KiB peaked at 827 MB. The width is now
+  sampled from the first 256 elements. Reported by an automated review on
+  PR #14 and confirmed by measurement; `uns` can hold arbitrary text, so this
+  was not a width the layer could assume.
+- **Peak RSS in the benchmark was floored by the runner's own memory on Linux.**
+  A forked child inherits its parent's resident pages and `execve` folds that
+  into the `maxrss` the kernel reports, so every contender would have measured
+  at least what `benchmarks/run.py` used to build the fixtures — around
+  200 MB — and the tables would have read "everything costs about the same".
+  Commands are now forked from a small shim: with a 330 MB parent, a no-op
+  child goes from 326 MB to 8 MB. Caught by `test_benchmark_harness.py`, which
+  exists for exactly this. The published figures were measured on macOS, which
+  resets the high-water mark at exec, and are unchanged.
+- **A comparative benchmark** (`benchmarks/`), run on every tag against
+  anndata and against scanpy where scanpy has a real equivalent. Reports peak
+  RSS, wall time and output size; publishes to
+  [docs/BENCHMARKS.md](docs/BENCHMARKS.md) and the release notes. Report-only
+  -- it never fails a build. Fifteen cases, covering every command with a real
+  baseline, including `h5ls -r` for `ls` and the rows where adata-cli is the
+  slower of the two.
+- **`--merge drop` and `--uns-merge drop` are accepted.** `drop` was already
+  the documented default behaviour but was rejected as a value, so a config
+  could not state it explicitly.
+
+## 0.5.1
+
+Makes the container image usable from Nextflow, and stops `copy_dataset`
+reading one row at a time from row-chunked stores.
+
+### Fixed
+
+- **Copying a row-chunked store was dominated by read latency.** The read step
+  was the source's chunk height verbatim, so a store chunked `(1, n_cols)` was
+  copied one row per read. On a network filesystem (Lustre, NFS) each read is a
+  round-trip, so a million-row copy spent nearly all of its time waiting. Reads
+  are now sized to a 32 MiB budget, rounded down to a whole number of source
+  chunks. A `(1_000_000, 30_000)` float32 store chunked `(1, 30_000)` goes from
+  1 row per read to 279.
+- Read sizing no longer trusts `itemsize` for variable-length strings. h5py
+  reports 8 there because the value is a pointer, which overestimated the row
+  count by an order of magnitude and broke the memory bound.
+
+### Container
+
+- **The image could not be used from a Nextflow process.** Nextflow requires
+  `/bin/bash` to be the container entrypoint, so `ENTRYPOINT ["adata"]` made
+  every Docker- and Podman-backed task fail with `No such command
+  '/bin/bash'`. Apptainer was unaffected, as `singularity exec` ignores the
+  entrypoint.
+- **Task metrics were silently lost.** `procps` is absent from the base image,
+  so Nextflow could not run `ps` to collect them. The required tool set
+  (`bash`, `ps`, `awk`, `date`, `grep`, `sed`, `tail`, `tee`) is now installed
+  and asserted at build time.
+- `PYTHONNOUSERSITE` is set, so a bind-mounted `$HOME` under Apptainer can no
+  longer shadow the image's virtualenv with the user's `~/.local` packages.
+- `XDG_CACHE_HOME` points at `/tmp`, so the image tolerates being run under an
+  arbitrary UID with no writable `$HOME`.
+- Added a `.dockerignore`. Local builds were copying the host's `.venv`,
+  `.git` and `.pytest_cache` into the image.
+
+### Changed
+
+- **The image no longer sets an entrypoint, so the command must be named
+  explicitly:** `docker run IMAGE adata view file.h5ad`, where `docker run
+  IMAGE view file.h5ad` previously worked.
+
 ## 0.5.0
 
 Renamed from `h5ad` to `adata-cli`, restored compatibility with current

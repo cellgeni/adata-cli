@@ -48,6 +48,8 @@ from adata.storage import (
 )
 
 MERGE_STRATEGIES = ("same", "unique", "first", "only")
+#: What the CLI accepts. "drop" is the default and maps to no merge at all.
+MERGE_CHOICES = ("drop",) + MERGE_STRATEGIES
 
 
 def _index_union(per_input: Sequence[List[str]]) -> List[str]:
@@ -174,6 +176,16 @@ class _Missing:
 _MISSING = _Missing()
 
 
+class _Present:
+    """Stands for a column whose value was not read, only its presence."""
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "<present>"
+
+
+_PRESENT = _Present()
+
+
 def _equal(a: Any, b: Any) -> bool:
     if isinstance(a, _Incomparable) or isinstance(b, _Incomparable):
         return False
@@ -212,15 +224,20 @@ def _concat_categorical(
     concatenated directly. A row from an input lacking the column gets code
     -1, which anndata reads back as a missing value.
     """
-    categories: List[str] = []
+    # Hash lookup, not list membership. `if category not in categories` on a
+    # list is O(k) per probe and so O(k^2) over the union -- around 2 million
+    # string comparisons at 1024 categories, and 5 billion at 100k. It reads
+    # the same number of bytes either way, so only a comparison count sees it.
+    lookup: Dict[str, int] = {}
     for col in columns:
         if col is None:
             continue
         for category in read_categories(col):
-            if category not in categories:
-                categories.append(str(category))
+            text = str(category)
+            if text not in lookup:
+                lookup[text] = len(lookup)
 
-    lookup = {c: i for i, c in enumerate(categories)}
+    categories = list(lookup)
     ordered = all(is_ordered(c) for c in columns if c is not None)
 
     codes = np.full(sum(lengths), -1, dtype=np.int64)
@@ -277,33 +294,35 @@ def _concat_masked(
 
     total = sum(lengths)
     mask = np.ones(total, dtype=bool)
-    values: List[Any] = [None] * total
+    present = [c for c in columns if c is not None]
+
+    # Fill a typed buffer by slice, rather than a Python list of length
+    # n_obs one element at a time. The list cost an object per row and three
+    # full passes over it, which is what made obs concatenation the most
+    # allocation-hungry part of a streamed concat.
+    if enc == spec.NULLABLE_STRING_ARRAY:
+        from adata.elements.read import decode_str_array
+
+        filled = np.empty(total, dtype=object)
+        filled[:] = ""
+    else:
+        decode_str_array = None
+        dtype = np.result_type(*[c["values"].dtype for c in present])
+        filled = np.zeros(total, dtype=dtype)
 
     offset = 0
     for col, length in zip(columns, lengths):
         if col is not None:
             chunk = np.asarray(col["values"][...])
-            chunk_mask = np.asarray(col["mask"][...], dtype=bool)
-            for i in range(length):
-                values[offset + i] = chunk[i]
-            mask[offset : offset + length] = chunk_mask
+            if decode_str_array is not None:
+                chunk = decode_str_array(chunk)
+            filled[offset : offset + length] = chunk
+            mask[offset : offset + length] = np.asarray(
+                col["mask"][...], dtype=bool
+            )
         offset += length
 
-    if enc == spec.NULLABLE_STRING_ARRAY:
-        from adata.elements.read import decode_str_array
-
-        filled = [
-            "" if v is None else decode_str_array(np.asarray([v]))[0] for v in values
-        ]
-        write_masked(parent, name, filled, mask, enc)
-        return
-
-    present = [c for c in columns if c is not None]
-    dtype = np.result_type(*[c["values"].dtype for c in present])
-    filled_num = np.array(
-        [0 if v is None else v for v in values], dtype=dtype
-    )
-    write_masked(parent, name, filled_num, mask, enc)
+    write_masked(parent, name, filled, mask, enc)
 
 
 def _concat_string(
@@ -945,13 +964,25 @@ def _write_var(
     positions = [_column_map(target_var, names) for names in var_names]
     written: List[str] = []
 
+    # "first" and "only" decide on presence alone, so the column values are
+    # never read for them.
+    compares = merge in ("same", "unique")
+
     for name in candidates:
         aligned: List[Any] = []
         for group, where in zip(groups, positions):
             if name not in group or (where < 0).any():
                 aligned.append(_MISSING)
                 continue
-            aligned.append(tuple(read_str_all(group[name])[i] for i in where))
+            if not compares:
+                aligned.append(_PRESENT)
+                continue
+            # Read the column once and index the result. Reading it inside the
+            # generator -- as an earlier version did -- re-read the whole
+            # column for every target variable, which is quadratic and turns a
+            # 36k-var merge into hours of pure CPU.
+            values = read_str_all(group[name])
+            aligned.append(tuple(values[i] for i in where))
 
         keep, _ = _merge_values(aligned, merge)
         if not keep:

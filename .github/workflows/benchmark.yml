@@ -1,0 +1,137 @@
+# Comparative benchmark: adata-cli against anndata and scanpy.
+#
+# Report-only, by design. Wall time on a shared runner is too noisy to gate a
+# release on, and a benchmark that can block a publish stops being run. What
+# *does* gate merges is tests/test_performance.py, which counts operations
+# rather than seconds and lives in the ordinary test job.
+#
+# Its own file rather than a job in publish.yml: at the `ci` tier this takes
+# the better part of an hour, and hanging that off the release graph would
+# either delay the PyPI publish or paint the release run red for a report.
+name: Benchmark
+
+on:
+  push:
+    tags: ["*"]
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: Input size
+        type: choice
+        options: [smoke, ci, large]
+        default: ci
+      publish:
+        description: Commit the results to docs/ on main
+        type: boolean
+        default: false
+
+concurrency:
+  group: benchmark-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  benchmark:
+    name: adata-cli vs anndata/scanpy
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # Job level, not step level: a report must never mark a release red.
+    continue-on-error: true
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      # The checked-out source, not the published wheel. Benchmarking the
+      # wheel would mean waiting on publish-pypi and then on index
+      # propagation, for a measurement that would come out the same.
+      - name: Install adata-cli
+        run: uv sync --extra dev --frozen
+
+      - name: Show free space
+        run: df -h /
+
+      - name: Run
+        run: |
+          uv run python -m benchmarks.run \
+            --tier "${{ inputs.tier || 'ci' }}" \
+            --out results.json \
+            --work "$RUNNER_TEMP/bench"
+
+      - name: Render
+        run: |
+          uv run python -m benchmarks.report results.json --out summary.md
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-${{ github.ref_name }}
+          path: |
+            results.json
+            summary.md
+          retention-days: 90
+
+      # docs/ is the durable home: artifacts expire, and one absolute number
+      # with nothing to compare it against says very little. The page is
+      # already served by Pages from docs/, so this needs no extra machinery.
+      - name: Publish to docs
+        if: github.ref_type == 'tag' || inputs.publish
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # A tag build is on a detached HEAD; the page belongs on main.
+          git fetch origin main
+          git checkout -B main origin/main
+          uv run python -m benchmarks.report results.json --docs docs --publish
+          git add docs/BENCHMARKS.md docs/benchmarks
+          if git diff --cached --quiet; then
+            echo "nothing to publish"; exit 0
+          fi
+          git commit -m "Benchmark results for ${{ github.ref_name }} [skip ci]"
+          # Another job may have landed on main in the meantime.
+          for attempt in 1 2 3; do
+            if git push origin main; then exit 0; fi
+            git pull --rebase origin main
+          done
+          echo "could not push benchmark results"; exit 1
+
+      # Best effort, and last: releases here are cut by hand, so this job may
+      # well run before one exists. The docs page is authoritative either way.
+      - name: Append to the release notes
+        if: github.ref_type == 'tag'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.ref_name }}"
+          gh release view "$tag" >/dev/null 2>&1 || {
+            echo "no release for $tag yet; skipping"; exit 0
+          }
+          gh release view "$tag" --json body -q .body > body.md
+          # Idempotent: replace any block this job wrote before.
+          python - <<'PY'
+          import pathlib, re
+          body = pathlib.Path("body.md").read_text()
+          summary = pathlib.Path("summary.md").read_text()
+          block = (
+              "<!-- benchmark:start -->\n\n"
+              "<details><summary>Benchmark vs anndata/scanpy</summary>\n\n"
+              f"{summary}\n</details>\n\n<!-- benchmark:end -->"
+          )
+          pattern = re.compile(
+              r"<!-- benchmark:start -->.*?<!-- benchmark:end -->", re.S
+          )
+          body = (
+              pattern.sub(block, body)
+              if pattern.search(body)
+              else body.rstrip() + "\n\n" + block + "\n"
+          )
+          pathlib.Path("body.md").write_text(body)
+          PY
+          gh release edit "$tag" --notes-file body.md

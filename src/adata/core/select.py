@@ -100,11 +100,31 @@ def group_indices(
         values = np.asarray(
             col_chunk_as_strings(group, column, start, end, cache), dtype=str
         )
-        for label in dict.fromkeys(values.tolist()):
+
+        # One pass over the chunk, whatever the number of distinct labels.
+        # Taking `np.nonzero(values == label)` per label -- as an earlier
+        # version did -- rescanned the whole chunk once per label, so the
+        # cost was O(n_rows * n_groups): a million cells split by a thousand
+        # samples came to 10^9 comparisons, and `split` looked like a hang.
+        uniques, first_seen, codes = np.unique(
+            values, return_index=True, return_inverse=True
+        )
+        codes = codes.ravel()
+
+        # Sorting the codes puts each label's positions in one contiguous
+        # run, so every group is a slice rather than a search.
+        by_code = np.argsort(codes, kind="stable")
+        run_starts = np.searchsorted(codes[by_code], np.arange(len(uniques)), "left")
+        run_ends = np.searchsorted(codes[by_code], np.arange(len(uniques)), "right")
+
+        # `np.unique` sorts; `order` has to stay in order of first appearance,
+        # because it names the output files.
+        for code in np.argsort(first_seen, kind="stable"):
+            label = str(uniques[code])
             if label not in buckets:
                 buckets[label] = []
                 order.append(label)
-            buckets[label].append(np.nonzero(values == label)[0] + start)
+            buckets[label].append(by_code[run_starts[code] : run_ends[code]] + start)
 
     return (
         {k: np.concatenate(v).astype(np.int64) for k, v in buckets.items()},

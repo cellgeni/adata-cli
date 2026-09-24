@@ -22,7 +22,7 @@ Or run it without installing anything:
 
 ```bash
 docker run --rm -it -v /path/to/data:/data \
-    quay.io/cellgeni/adata-cli:latest view /data/your_file.h5ad
+    quay.io/cellgeni/adata-cli:latest adata view /data/your_file.h5ad
 ```
 
 ## Documentation
@@ -34,8 +34,11 @@ docker run --rm -it -v /path/to/data:/data \
   out in `.h5ad`, and what this tool does with it.
 - **[Element spec: Zarr](ELEMENTS_zarr.md)** — the same for `.zarr`, including
   the v2/v3 differences.
-- **[Testing](TESTING.md)** — how the suite is organised, and how compatibility
-  is verified against six real anndata releases.
+- **[Testing](TESTING.md)** — how the suite is organised, how compatibility is
+  verified against six real anndata releases, and the complexity guards that
+  keep cost regressions out.
+- **[Benchmarks](BENCHMARKS.md)** — peak memory and wall time against anndata
+  and scanpy, remeasured and republished on every release.
 
 ## At a glance
 
