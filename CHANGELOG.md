@@ -3,7 +3,12 @@
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
-## Unreleased
+## 0.6.1
+
+Makes the outputs of `subset`, `split` and `concat` the size anndata writes
+(they were about twice that), and makes `split` read each matrix once rather
+than once per group. In 0.6.0 a hand-written anndata loop split the ci-tier
+benchmark 7x faster than `split` did; `split` is now the faster of the two.
 
 ### Fixed
 
