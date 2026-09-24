@@ -265,3 +265,56 @@ def test_every_relative_link_resolves_inside_the_published_site(page):
         + "\nUse an absolute https://github.com/... URL for anything outside "
         "docs/."
     )
+
+
+# ---------------------------------------------------------------------------
+# every command is documented
+#
+# The tests above check one direction: that everything the docs claim really
+# exists. They say nothing about the reverse, so `convert` shipped in 0.6.0
+# with a section in COMMANDS.md that the table of contents never listed, and
+# an app help string that named neither it nor `create`. Both were invisible
+# to a suite that only walks from the docs to the code.
+#
+# Derived from the Click tree rather than a hardcoded list, so a command
+# added tomorrow is covered without anyone remembering to add it here.
+
+
+def _visible_commands():
+    import typer
+
+    command = typer.main.get_command(app)
+    return sorted(
+        name for name, sub in command.commands.items() if not sub.hidden
+    )
+
+
+COMMANDS_MD = (REPO / "docs" / "COMMANDS.md").read_text()
+
+
+@pytest.mark.parametrize("name", _visible_commands())
+def test_every_command_has_a_section_in_the_reference(name):
+    assert f"## `{name}`" in COMMANDS_MD, (
+        f"`adata {name}` has no `## \\`{name}\\`` section in docs/COMMANDS.md"
+    )
+
+
+@pytest.mark.parametrize("name", _visible_commands())
+def test_every_command_is_in_the_table_of_contents(name):
+    contents = COMMANDS_MD.split("---", 1)[0]
+    assert f"](#{name})" in contents, (
+        f"`adata {name}` is missing from the table of contents in "
+        "docs/COMMANDS.md. The link text has no backticks: `- [name](#name)`."
+    )
+
+
+@pytest.mark.parametrize("name", _visible_commands())
+def test_every_command_is_named_in_the_app_help(name):
+    """`adata --help` opens with a list; a command absent from it is hidden
+    in plain sight, since that line is the first thing anyone reads."""
+    import typer
+
+    help_text = typer.main.get_command(app).help or ""
+    assert name in help_text, (
+        f"`{name}` is missing from the app help string in cli.py: {help_text!r}"
+    )
