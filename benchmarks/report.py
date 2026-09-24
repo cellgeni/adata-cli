@@ -20,6 +20,10 @@ from typing import Dict, List, Optional
 
 from benchmarks.cases import by_name
 
+#: Links out of `docs/` cannot be relative: GitHub Pages serves that
+#: directory as the site root, so `../` and bare directory paths 404.
+REPO = "https://github.com/cellgeni/adata-cli"
+
 
 def _bytes(n: int) -> str:
     if not n:
@@ -186,7 +190,7 @@ def history_table(docs: Path) -> str:
         "### History",
         "",
         "`concat-inner` on adata-cli, run by run. Full results for each are "
-        "in [`docs/benchmarks/`](benchmarks/).",
+        f"in [`docs/benchmarks/`]({REPO}/tree/main/docs/benchmarks).",
         "",
         "| Run | Ref | Tier | Wall time | Peak RSS | Raw |",
         "|---|---|---|---|---|---|",

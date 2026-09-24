@@ -1,7 +1,7 @@
 # Benchmarks
 
 adata-cli measured against anndata, and against scanpy wherever scanpy has a real
-equivalent. The [`Benchmark`](../.github/workflows/benchmark.yml) workflow rewrites
+equivalent. The [`Benchmark`](https://github.com/cellgeni/adata-cli/blob/main/.github/workflows/benchmark.yml) workflow rewrites
 this page on every tag and keeps each run's raw numbers in `docs/benchmarks/`.
 
 **Peak RSS is the headline, not wall time.** This tool exists so that memory is set
@@ -218,7 +218,7 @@ Rows marked `n/a` are operations the baseline does not offer; that is a result, 
 
 ### History
 
-`concat-inner` on adata-cli, run by run. Full results for each are in [`docs/benchmarks/`](benchmarks/).
+`concat-inner` on adata-cli, run by run. Full results for each are in [`docs/benchmarks/`](https://github.com/cellgeni/adata-cli/tree/main/docs/benchmarks).
 
 | Run | Ref | Tier | Wall time | Peak RSS | Raw |
 |---|---|---|---|---|---|

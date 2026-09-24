@@ -211,3 +211,57 @@ def test_options_claimed_in_prose_exist(option, command, source):
         f"{source}: prose says {command} supports {option}, "
         f"but the command does not accept it"
     )
+
+
+# ---------------------------------------------------------------------------
+# links that have to work on the published site
+#
+# GitHub Pages serves `docs/` as the site root, so a relative link out of it
+# cannot resolve: `../.github/workflows/benchmark.yml` and a bare
+# `benchmarks/` both went live as 404s on the 0.6.0 release page. Checked
+# offline against the filesystem, so it costs nothing and needs no network.
+
+
+def _relative_links(text: str):
+    """(link, target) for every relative markdown link, fragments stripped."""
+    for match in re.finditer(r"\]\(([^)\s]+)\)", text):
+        link = match.group(1)
+        if link.startswith(("http://", "https://", "mailto:", "#")):
+            continue
+        target = link.split("#", 1)[0]
+        if target:
+            yield link, target
+
+
+DOC_PAGES = sorted((REPO / "docs").glob("*.md"))
+
+
+@pytest.mark.parametrize("page", DOC_PAGES, ids=lambda p: p.name)
+def test_every_relative_link_resolves_inside_the_published_site(page):
+    """A relative link must point at something Pages actually serves.
+
+    Jekyll rewrites `TESTING.md` to `/TESTING.html`, so a `.md` target is
+    fine; anything reached with `../`, or a bare directory with no index,
+    is not, and has to be an absolute URL to GitHub instead.
+    """
+    broken = []
+    for link, target in _relative_links(page.read_text()):
+        resolved = (page.parent / target).resolve()
+        try:
+            inside = resolved.is_relative_to((REPO / "docs").resolve())
+        except AttributeError:  # pragma: no cover - Python < 3.9
+            inside = str(resolved).startswith(str((REPO / "docs").resolve()))
+
+        if not inside:
+            broken.append(f"{link} -- leaves docs/, so Pages cannot serve it")
+        elif not resolved.exists():
+            broken.append(f"{link} -- no such file")
+        elif resolved.is_dir() and not (resolved / "index.md").exists():
+            broken.append(f"{link} -- a directory with no index page")
+
+    assert not broken, (
+        f"{page.name} has links that 404 on the published site:\n  "
+        + "\n  ".join(broken)
+        + "\nUse an absolute https://github.com/... URL for anything outside "
+        "docs/."
+    )
