@@ -859,3 +859,78 @@ def test_concat_merge_drop_is_accepted_and_keeps_no_var_columns(tmp_path):
     got = ad.read_h5ad(out)
     assert list(got.var.columns) == []
     assert dict(got.uns) == {}
+
+
+# ---------------------------------------------------------------------------
+# concat refuses mismatched matrix encodings
+#
+# The check has been there since concat was written and nothing exercised it.
+# It is the error a user is most likely to meet with real per-sample files,
+# since whether a matrix lands as CSR or CSC depends on how it was made.
+
+
+def _store_with_layout(path, layout, *, cells, layer=None):
+    matrix = sparse.csr_matrix(np.ones((len(cells), 3), dtype="float32"))
+    if layout == "csc":
+        matrix = matrix.tocsc()
+    elif layout == "dense":
+        matrix = matrix.toarray()
+    obj = ad.AnnData(
+        X=matrix,
+        obs=pd.DataFrame(index=cells),
+        var=pd.DataFrame(index=["g1", "g2", "g3"]),
+    )
+    if layer is not None:
+        obj.layers["counts"] = (
+            sparse.csr_matrix(np.ones((len(cells), 3), dtype="float32"))
+            if layer == "csr"
+            else np.ones((len(cells), 3), dtype="float32")
+        )
+    obj.write_h5ad(path)
+    return path
+
+
+@pytest.mark.parametrize(
+    "left,right", [("csr", "csc"), ("csr", "dense"), ("csc", "dense")]
+)
+def test_concat_refuses_mismatched_x_encodings(tmp_path, left, right):
+    a = _store_with_layout(tmp_path / "a.h5ad", left, cells=["c1", "c2"])
+    b = _store_with_layout(tmp_path / "b.h5ad", right, cells=["c3", "c4"])
+    out = tmp_path / "m.h5ad"
+
+    result = runner.invoke(app, ["concat", str(a), str(b), "-o", str(out)])
+    assert result.exit_code == 1
+    text = _out(result)
+    assert "Cannot concatenate 'X'" in text
+    # The error has to name the way out, which until `convert` existed it
+    # could not do.
+    assert "adata convert" in text and "--layout" in text
+    assert not out.exists(), "nothing may be written when the check fails"
+
+
+def test_concat_refuses_mismatched_layer_encodings(tmp_path):
+    a = _store_with_layout(tmp_path / "a.h5ad", "csr", cells=["c1", "c2"],
+                           layer="csr")
+    b = _store_with_layout(tmp_path / "b.h5ad", "csr", cells=["c3", "c4"],
+                           layer="dense")
+    out = tmp_path / "m.h5ad"
+
+    result = runner.invoke(app, ["concat", str(a), str(b), "-o", str(out)])
+    assert result.exit_code == 1
+    assert "layers/counts" in _out(result)
+
+
+def test_concat_succeeds_once_the_encodings_are_converted(tmp_path):
+    """The suggested fix has to actually work, so the test follows it."""
+    a = _store_with_layout(tmp_path / "a.h5ad", "csr", cells=["c1", "c2"])
+    b = _store_with_layout(tmp_path / "b.h5ad", "csc", cells=["c3", "c4"])
+
+    converted = tmp_path / "b-csr.h5ad"
+    assert runner.invoke(
+        app, ["convert", str(b), "X", "-o", str(converted), "--layout", "csr"]
+    ).exit_code == 0
+
+    out = tmp_path / "m.h5ad"
+    result = runner.invoke(app, ["concat", str(a), str(converted), "-o", str(out)])
+    assert result.exit_code == 0, _out(result)
+    assert ad.read_h5ad(out).shape == (4, 3)

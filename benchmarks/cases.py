@@ -485,6 +485,61 @@ CASES: List[Case] = [
             ),
         ],
     ),
+    # -- convert ------------------------------------------------------------
+    Case(
+        name="convert-dtype",
+        question="Rewrite X as float32.",
+        contenders=[
+            Contender(
+                "adata-cli",
+                argv=[
+                    "adata", "convert", "{input0}", "X", "-o", "{output}",
+                    "--dtype", "float32", "--force",
+                ],
+            ),
+            Contender(
+                "anndata (in memory)",
+                script=_py(
+                    "obj = ad.read_h5ad(IN[0])\n"
+                    "obj.X = obj.X.astype('float32')\n"
+                    "obj.write_h5ad(OUT, compression=COMPRESSION)\n"
+                ),
+            ),
+            Contender(
+                "scanpy",
+                unsupported="no dtype rewrite; scanpy defers to anndata",
+            ),
+        ],
+    ),
+    Case(
+        name="convert-layout",
+        question="Transpose X from CSR to CSC.",
+        contenders=[
+            Contender(
+                "adata-cli (streaming)",
+                argv=[
+                    "adata", "convert", "{input0}", "X", "-o", "{output}",
+                    "--layout", "csc",
+                ],
+            ),
+            Contender(
+                "adata-cli (--in-memory)",
+                argv=[
+                    "adata", "convert", "{input0}", "X", "-o", "{output}",
+                    "--layout", "csc", "--in-memory",
+                ],
+            ),
+            Contender(
+                "anndata (in memory)",
+                script=_py(
+                    "obj = ad.read_h5ad(IN[0])\n"
+                    "obj.X = obj.X.tocsc()\n"
+                    "obj.write_h5ad(OUT, compression=COMPRESSION)\n"
+                ),
+            ),
+        ],
+        tags=["headline"],
+    ),
     # -- the claim itself -------------------------------------------------
     Case(
         name="rss-vs-size",
