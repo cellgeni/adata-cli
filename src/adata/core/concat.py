@@ -561,10 +561,13 @@ def check_matrix_encodings(roots: List[Any], console: Console) -> None:
         kinds = {_matrix_kind(s) for s in sources}
         if kinds in ({spec.CSR_MATRIX}, {spec.CSC_MATRIX}, {"dense"}):
             return
+        wanted = sorted(kinds)[0]
         raise ValueError(
             f"Cannot concatenate {label!r}: inputs use "
             f"{', '.join(sorted(kinds))}. Every input must use the same "
-            "encoding -- convert them to match first."
+            f"encoding. Convert them to match first, e.g. "
+            f"`adata convert INPUT {label} -o converted.h5ad --layout "
+            f"{'dense' if wanted == 'dense' else wanted.removesuffix('_matrix')}`."
         )
 
     if all("X" in r for r in roots):
@@ -624,6 +627,9 @@ def _concat_matrix(
         )
         return True
 
+    # A backstop. `check_matrix_encodings` runs before the output store is
+    # created and should have raised already; this catches an element it
+    # does not cover, where failing late still beats writing nonsense.
     raise ValueError(
         f"Cannot concatenate {name!r}: inputs use {', '.join(sorted(kinds))}."
     )

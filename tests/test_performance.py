@@ -1138,3 +1138,126 @@ def test_copying_wide_strings_does_not_read_the_whole_array(tmp_path):
         f"{TARGET_READ_BYTES / 1e6:.0f} MB read budget. A step larger than "
         "the array means the whole array is read in one go."
     )
+
+
+# ---------------------------------------------------------------------------
+# convert
+#
+# The streaming transpose exists because the in-memory one does not scale.
+# That is a claim about peak memory, so it is the peak that is asserted --
+# a correctness test cannot tell the two implementations apart, which is
+# exactly why they are both allowed to exist.
+
+
+def _sparse_store(path: Path, n_obs: int, n_var: int = 32, density: float = 0.2):
+    rng = np.random.default_rng(0)
+    matrix = sparse.random(
+        n_obs, n_var, density=density, format="csr", dtype="float32",
+        random_state=rng,
+    )
+    ad.AnnData(
+        X=matrix,
+        obs=pd.DataFrame(index=[f"c{i}" for i in range(n_obs)]),
+        var=pd.DataFrame(index=[f"g{i}" for i in range(n_var)]),
+    ).write_h5ad(path)
+    return path
+
+
+def _convert(source: Path, out: Path, **kwargs):
+    from adata.commands.convert import convert_store
+
+    convert_store(source, ["X"], out, QUIET, **kwargs)
+
+
+def test_convert_dtype_reads_grow_linearly_in_nonzeros(tmp_path):
+    def measure(n: int) -> int:
+        source = _sparse_store(tmp_path / f"cd{n}.h5ad", n)
+        with count_io() as io:
+            _convert(source, tmp_path / f"od{n}.h5ad", dtype="float64")
+        return io.work
+
+    assert_grows_linearly(measure, what="convert --dtype", axis="nnz")
+
+
+@pytest.mark.parametrize("layout", ["csc", "dense"])
+def test_convert_layout_reads_grow_linearly(tmp_path, layout):
+    def measure(n: int) -> int:
+        source = _sparse_store(tmp_path / f"cl{layout}{n}.h5ad", n)
+        with count_io() as io:
+            _convert(
+                source, tmp_path / f"ol{layout}{n}.h5ad", layout=layout, force=True
+            )
+        return io.work
+
+    assert_grows_linearly(measure, what=f"convert --layout {layout}", axis="n_obs")
+
+
+@pytest.mark.slow
+def test_the_streaming_transpose_does_not_hold_the_matrix(tmp_path):
+    """Peak allocation must not track nnz. This is the whole point of it.
+
+    Measured against the in-memory path in the same run, which does hold the
+    matrix and therefore does grow -- so the comparison shows the difference
+    is real rather than an artefact of how the fixture is built.
+    """
+
+    def peak(n: int, in_memory: bool) -> int:
+        source = _sparse_store(tmp_path / f"tp{in_memory}{n}.h5ad", n, n_var=64)
+        with count_allocations() as measured:
+            _convert(
+                source,
+                tmp_path / f"otp{in_memory}{n}.h5ad",
+                layout="csc",
+                in_memory=in_memory,
+                chunk=4096,
+            )
+        return measured[0]
+
+    small, large = 256, 8192
+    streaming = peak(large, False) / max(1, peak(small, False))
+    loaded = peak(large, True) / max(1, peak(small, True))
+
+    assert streaming < loaded, (
+        f"the streaming transpose grew {streaming:.1f}x over a 32x larger "
+        f"matrix and the in-memory one grew {loaded:.1f}x -- if streaming is "
+        "not the cheaper of the two it has no reason to exist"
+    )
+    assert streaming <= 8.0, (
+        f"streaming transpose peak grew {streaming:.1f}x for 32x the "
+        "nonzeros; it is supposed to be bounded by the chunk"
+    )
+
+
+def test_the_transpose_streams_unless_asked_not_to(tmp_path):
+    """The safe path is the default; --in-memory is opt-in.
+
+    Asserted by watching which function runs, because the two produce
+    identical output and no result can distinguish them.
+    """
+    import adata.core.convert as convert_module
+
+    called: List[str] = []
+    for name in ("transpose_sparse_streaming", "transpose_sparse_in_memory"):
+        original = getattr(convert_module, name)
+
+        def record(*args, _name=name, _original=original, **kwargs):
+            called.append(_name)
+            return _original(*args, **kwargs)
+
+        setattr(convert_module, name, record)
+
+    try:
+        source = _sparse_store(tmp_path / "d.h5ad", 64)
+        _convert(source, tmp_path / "default.h5ad", layout="csc")
+        assert called == ["transpose_sparse_streaming"], called
+
+        called.clear()
+        _convert(source, tmp_path / "asked.h5ad", layout="csc", in_memory=True)
+        assert called == ["transpose_sparse_in_memory"], called
+    finally:
+        for name in ("transpose_sparse_streaming", "transpose_sparse_in_memory"):
+            setattr(
+                convert_module, name, getattr(convert_module, name).__wrapped__
+                if hasattr(getattr(convert_module, name), "__wrapped__")
+                else getattr(convert_module, name)
+            )

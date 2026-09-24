@@ -5,6 +5,30 @@ Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 
 ## Unreleased
 
+### Added
+
+- **`adata convert` changes a matrix's dtype, layout or density on disk**
+  ([#13](https://github.com/cellgeni/adata-cli/issues/13)). Counts stored as
+  float64 halve with `--dtype float32`; `--indices-dtype int32` halves the
+  index arrays of a matrix small enough to address that way; `--layout
+  csr|csc` transposes between the sparse encodings; `--layout dense|sparse`
+  changes the density. Works on `X`, any layer, `raw/X` or any 2-D array by
+  path, and on all of them at once with `--all`.
+
+  A cast that would not round-trip is refused before anything is written --
+  every value is cast and cast back, because whether float64 counts survive
+  float32 depends on the counts, not on the dtypes. So is a densification
+  that would inflate the store beyond four times its size. `--force`
+  overrides either, and both messages say what they measured.
+
+  Transposing streams by default, holding one bucket of nonzeros rather than
+  the matrix, so it works on files too large to load; `--in-memory` is
+  faster when the matrix fits.
+
+- **`concat` now names the command to run** when inputs disagree about a
+  matrix encoding. The check itself is not new, but nothing tested it and it
+  could not suggest a fix, because there was none.
+
 ### Fixed
 
 - **`concat --merge` never finished on a real store.** Aligning a var column

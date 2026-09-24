@@ -51,6 +51,8 @@ adata subset data.h5ad -o cortex.h5ad --obs-query "cluster == Cortex_2"
 adata split  data.h5ad --by sample -o per_sample/
 adata concat per_sample/*.h5ad -o merged.h5ad --join outer --label sample
 
+adata convert data.h5ad X -o small.h5ad --dtype float32
+
 adata create new.h5ad --n-obs 5000 --n-var 2000
 adata import sparse new.h5ad X counts.mtx --inplace
 ```
