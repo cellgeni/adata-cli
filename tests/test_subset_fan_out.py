@@ -317,6 +317,13 @@ def test_concat_index_dtypes_widen_only_when_needed():
 
     assert _concat_index_dtypes(small, limit + 1) == (np.int64, np.int32)
 
+    # Narrower than int32: checked against its own limit, not int32's. Two
+    # int16 indptrs of 20,000 nonzeros each need offsets up to 40,000.
+    narrow = [_Fake(20_000, np.int16, np.int16), _Fake(20_000, np.int16, np.int16)]
+    assert _concat_index_dtypes(narrow, 100) == (np.int16, np.int32)
+    assert _concat_index_dtypes(narrow[:1], 40_000) == (np.int32, np.int16)
+    assert _concat_index_dtypes(narrow[:1], 100) == (np.int16, np.int16)
+
     # A wider input is never narrowed.
     mixed = [_Fake(10), _Fake(10, indices=np.int64, indptr=np.int64)]
     assert _concat_index_dtypes(mixed, 1000) == (np.int64, np.int64)
@@ -350,3 +357,31 @@ def test_take_rows_reads_blocks_not_a_fancy_index(tmp_path, monkeypatch, block):
             )
         with pytest.raises(ValueError, match="sorted and unique"):
             subset_mod._take_rows(f["n"], np.array([2, 1]))
+
+
+def test_concat_widens_a_narrow_indptr_rather_than_wrapping_it(tmp_path):
+    """End to end: int16 inputs whose combined nnz overflows int16."""
+    parts = []
+    for s in range(2):
+        rng = np.random.default_rng(s)
+        dense = (rng.random((200, 200)) < 0.6).astype("float32")  # ~24,000 nnz
+        path = tmp_path / f"n{s}.h5ad"
+        ad.AnnData(
+            X=sparse.csr_matrix(dense),
+            obs=pd.DataFrame(index=[f"n{s}-{i}" for i in range(200)]),
+            var=pd.DataFrame(index=[f"g{i}" for i in range(200)]),
+        ).write_h5ad(path)
+        with h5py.File(path, "r+") as f:
+            for key in ("indices", "indptr"):
+                values = f[f"X/{key}"][...]
+                del f[f"X/{key}"]
+                f[f"X/{key}"] = values.astype(np.int16)
+        parts.append(path)
+
+    out = tmp_path / "n.h5ad"
+    concat_on_disk(parts, out, QUIET)
+    with h5py.File(out, "r") as f:
+        assert f["X/indices"].dtype == np.int16
+        assert f["X/indptr"].dtype == np.int32
+    expected = sparse.vstack([ad.read_h5ad(p).X for p in parts]).toarray()
+    np.testing.assert_array_equal(ad.read_h5ad(out).X.toarray(), expected)

@@ -389,26 +389,34 @@ def _matrix_kind(obj: Any) -> str:
     return "other"
 
 
+def _widen_to_hold(dtype: np.dtype, largest: int) -> np.dtype:
+    """`dtype`, or the narrowest of int32/int64 wider than it that holds `largest`."""
+    dtype = np.dtype(dtype)
+    if largest <= np.iinfo(dtype).max:
+        return dtype
+    for candidate in (np.int32, np.int64):
+        if largest <= np.iinfo(candidate).max:
+            return np.dtype(np.result_type(dtype, candidate))
+    return np.dtype(np.int64)
+
+
 def _concat_index_dtypes(
     sources: List[Any], n_minor: int
 ) -> Tuple[np.dtype, np.dtype]:
     """The `indices` and `indptr` dtypes for a concatenation of `sources`.
 
     The widest the inputs used, so int32 inputs give an int32 output rather
-    than the int64 every output used to get. That is widened to int64 only
-    when the result could not be addressed otherwise: `indices` must reach
-    the output's minor dimension, and `indptr` its total nonzero count,
-    which is known before writing as the sum of the inputs'.
+    than the int64 every output used to get. That is widened only when the
+    result could not be addressed otherwise: `indices` must reach the
+    output's minor dimension, and `indptr` its total nonzero count, which is
+    known before writing as the sum of the inputs'. Both are checked against
+    the chosen dtype's own limit, not int32's, since the spec allows
+    narrower index arrays and an int16 `indptr` would otherwise wrap.
     """
-    limit = np.iinfo(np.int32).max
     indices = np.result_type(*[s["indices"].dtype for s in sources])
     indptr = np.result_type(*[s["indptr"].dtype for s in sources])
     nnz = sum(int(s["data"].shape[0]) for s in sources)
-    if n_minor > limit:
-        indices = np.result_type(indices, np.int64)
-    if nnz > limit:
-        indptr = np.result_type(indptr, np.int64)
-    return np.dtype(indices), np.dtype(indptr)
+    return _widen_to_hold(indices, n_minor), _widen_to_hold(indptr, nnz)
 
 
 def _write_indptr(

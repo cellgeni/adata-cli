@@ -17,7 +17,7 @@ benchmark 7x faster than `split` did; `split` is now the faster of the two.
   to int64, whatever the source used, and was written without the source's
   compression, so with an lzf input the `data` and `indices` came out
   uncompressed. Outputs now keep the source's index dtypes and storage
-  settings. `concat` widens to int64 only when the combined matrix could not
+  settings. `concat` widens only when the combined matrix could not
   be addressed otherwise. `convert` already did this; the code next to it
   did not.
 
