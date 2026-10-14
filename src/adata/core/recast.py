@@ -23,9 +23,14 @@ store is worse than a refusal:
 
 from __future__ import annotations
 
+import os
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
+import h5py
 import numpy as np
 from rich.console import Console
 
@@ -39,6 +44,7 @@ from adata.storage import (
     fit_chunks,
     is_dataset,
     is_group,
+    is_hdf5_group,
     is_zarr_group,
 )
 
@@ -406,6 +412,39 @@ def transpose_sparse_in_memory(
     )
 
 
+@contextmanager
+def _scratch_group(dst_parent: Any, name: str) -> Iterator[Any]:
+    """A group for the transpose's intermediate buckets, gone afterwards.
+
+    HDF5 never returns the space of a deleted dataset to the file, so scratch
+    written into an HDF5 output stayed in it as dead space: a streamed
+    transpose came out three times the size of an in-memory one. On HDF5 the
+    scratch is a separate file beside the output instead. Deleting from a
+    Zarr store frees the space, so there it stays in place.
+    """
+    if not is_hdf5_group(dst_parent):
+        group = dst_parent.create_group(name)
+        try:
+            yield group
+        finally:
+            del dst_parent[name]
+        return
+
+    # Beside the output rather than in the system temp directory, which on
+    # a cluster node is often far too small for a matrix's worth of entries.
+    where = Path(str(dst_parent.file.filename)).parent
+    fd, path = tempfile.mkstemp(
+        prefix=".adata-", suffix=".transpose-scratch.h5",
+        dir=str(where) if where.is_dir() else None,
+    )
+    os.close(fd)
+    try:
+        with h5py.File(path, "w") as handle:
+            yield handle.create_group(name)
+    finally:
+        os.unlink(path)
+
+
 def transpose_sparse_streaming(
     src: Matrix,
     dst_parent: Any,
@@ -496,9 +535,7 @@ def transpose_sparse_streaming(
     out_indices = _sparse_dataset(group, "indices", index_dtype, nnz, source_indices)
     written = 0
 
-    scratch_name = f"__{name}_transpose_scratch__"
-    scratch = dst_parent.create_group(scratch_name)
-    try:
+    with _scratch_group(dst_parent, f"__{name}_transpose_scratch__") as scratch:
         buckets = [
             (
                 _growable(scratch, f"major{b}", np.int64),
@@ -550,8 +587,6 @@ def transpose_sparse_streaming(
                 data_dtype, copy=False
             )
             written += count
-    finally:
-        del dst_parent[scratch_name]
 
     cast_indptr = out_indptr.astype(pointer_dtype, copy=False)
     dataset = _sparse_dataset(

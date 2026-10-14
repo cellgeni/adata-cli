@@ -43,6 +43,13 @@ Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 
 ### Fixed
 
+- **`recast --layout` left its h5ad output up to three times too large.**
+  The streaming transpose kept its intermediate buckets in the output and
+  deleted them when done, but HDF5 never returns a deleted dataset's space
+  to the file. On a 20,000 x 2,000 matrix at 5% the output was 55 MB where
+  the in-memory transpose wrote 17 MB. The buckets now go in a separate
+  file beside the output, removed afterwards; Zarr outputs were unaffected.
+
 - **Writing an h5ad with a `None` in it to Zarr failed.** anndata stores
   `None` as a null, which on HDF5 is an empty dataspace with no value to
   read, and copying one raised `TypeError: float() argument must be a string
