@@ -181,6 +181,39 @@ def test_subset_roundtrips_through_anndata(reference, out_fmt, tmp_path):
     assert "counts" in got.layers
 
 
+@pytest.mark.parametrize("out_fmt", ["h5ad", "zarr"])
+def test_subset_of_a_store_holding_nulls_crosses_backends(fmt, out_fmt, tmp_path):
+    """anndata writes `None` as a null: an empty HDF5 dataspace, or a 0-d bool
+    on Zarr, where it also stands in for a missing `raw`.
+
+    An empty dataspace has no value to read, so copying one to Zarr raised a
+    TypeError, taking down `subset -o out.zarr` of any h5ad with a `None`
+    anywhere in `uns`. The reference store has none, which is how it went
+    unnoticed.
+    """
+    obj = ad.AnnData(
+        X=sparse.csr_matrix(np.eye(N_OBS, N_VAR, dtype="float32")),
+        obs=pd.DataFrame(index=[f"cell_{i}" for i in range(N_OBS)]),
+        var=pd.DataFrame(index=[f"gene_{i}" for i in range(N_VAR)]),
+    )
+    obj.uns["params"] = {"layer": None, "k": 5}
+    source = tmp_path / f"nulls.{fmt}"
+    obj.write_h5ad(source) if fmt == "h5ad" else obj.write_zarr(source)
+
+    names = tmp_path / "keep.txt"
+    names.write_text("cell_0\ncell_2\n")
+    out = tmp_path / f"subset.{out_fmt}"
+    result = runner.invoke(
+        app, ["subset", str(source), "-o", str(out), "--obs", str(names)]
+    )
+    assert result.exit_code == 0, result.stdout + (result.stderr or "")
+
+    got = _read(out)
+    assert got.shape == (2, N_VAR)
+    assert got.raw is None
+    assert got.uns["params"] == {"layer": None, "k": 5}
+
+
 def test_subset_matches_var_on_raws_own_axis(reference, tmp_path):
     """raw/ carries its own var axis and must be matched against it."""
     names = tmp_path / "vkeep.txt"

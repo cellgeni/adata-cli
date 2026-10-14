@@ -340,6 +340,11 @@ raises `Expected an ArrayArrayCodec`, because the v3 string data type encodes
 variable length itself. This tool drops the filter and resolves the dtype for
 the target rather than reusing the source's.
 
+Codecs travel only between stores of the same Zarr version. Across backends
+none do: an HDF5 dataset written to Zarr gets zarr-python's default codec, and
+a compressed Zarr array written to HDF5 becomes a gzip dataset at level 4
+(h5py's default). An array that was not compressed stays uncompressed.
+
 Note also that `zarr-python` flags both `NullTerminatedBytes` (what `dtype="S"`
 produces) and `FixedLengthUTF32` (what `<U` produces) as having no v3
 specification, and warns that other Zarr libraries may not be able to read

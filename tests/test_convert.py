@@ -208,6 +208,25 @@ def test_indices_can_be_narrowed_when_asked(tmp_path):
     assert np.array_equal(ad.read_h5ad(out).X.toarray(), _matrix().toarray())
 
 
+@pytest.mark.parametrize("args", [["--dtype", "float32"], ["--layout", "csc"]])
+def test_an_all_zero_compressed_matrix_converts(tmp_path, args):
+    """A compressed store chunks even its empty arrays, and fitting that chunk
+    to zero elements produced `(1,)`, which h5py rejects for a `(0,)` array."""
+    obj = ad.AnnData(
+        X=sparse.csr_matrix((6, 4), dtype="float64"),
+        obs=pd.DataFrame(index=[f"c{i}" for i in range(6)]),
+        var=pd.DataFrame(index=[f"g{i}" for i in range(4)]),
+    )
+    store = tmp_path / "zeros.h5ad"
+    obj.write_h5ad(store, compression="gzip")
+    out = tmp_path / "out.h5ad"
+
+    result = runner.invoke(app, ["convert", str(store), "X", "-o", str(out), *args])
+    assert result.exit_code == 0, _out(result)
+    got = ad.read_h5ad(out).X
+    assert got.shape == (6, 4) and got.nnz == 0
+
+
 # ---------------------------------------------------------------------------
 # refusing before writing
 

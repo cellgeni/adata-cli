@@ -34,6 +34,7 @@ from adata.storage import (
     copy_tree,
     dataset_create_kwargs,
     detect_backend,
+    fit_chunks,
     is_dataset,
     is_group,
     is_zarr_group,
@@ -161,7 +162,7 @@ def _copy_rows(
     kw = dataset_create_kwargs(
         src_ds, target_backend=target_backend, dst_parent=dst_parent
     )
-    kw = _clamp_chunks(kw, len(indices))
+    kw = fit_chunks(kw, (len(indices),), backend=target_backend)
     ds = create_dataset(
         dst_parent,
         name,
@@ -170,35 +171,6 @@ def _copy_rows(
     )
     copy_attrs(src_ds.attrs, ds.attrs, target_backend=target_backend)
     return ds
-
-
-def _clamp_chunks(kw: dict, *out_shape: int) -> dict:
-    """Shrink a forwarded chunk shape to fit the subset's dimensions.
-
-    h5py rejects a chunk larger than the dataset, so a chunked source subset
-    below its own chunk size would otherwise fail outright.
-
-    Zarr additionally requires a shard to be a whole number of chunks, so a
-    clamped chunk invalidates the source's shard geometry. Sharding is a
-    storage-layout choice rather than data, so it is dropped and left to the
-    backend rather than recomputed into something arbitrary.
-    """
-    chunks = kw.get("chunks")
-    if not isinstance(chunks, (tuple, list)) or not chunks:
-        return kw
-
-    original = tuple(int(c) for c in chunks)
-    clamped = tuple(
-        min(c, out_shape[i]) if i < len(out_shape) and out_shape[i] > 0 else c
-        for i, c in enumerate(original)
-    )
-    if clamped == original:
-        return kw
-
-    kw = dict(kw)
-    kw["chunks"] = clamped
-    kw.pop("shards", None)
-    return kw
 
 
 def subset_axis_group(
@@ -342,7 +314,7 @@ def fan_out_dense_matrix(
         kw = dataset_create_kwargs(
             src, target_backend=target_backend, dst_parent=dst_parent
         )
-        kw = _clamp_chunks(kw, out_obs, out_var)
+        kw = fit_chunks(kw, (out_obs, out_var), backend=target_backend)
         dst = create_dataset(
             dst_parent, name, shape=(out_obs, out_var), dtype=src.dtype, **kw
         )
@@ -569,7 +541,7 @@ def _sparse_dataset(
     """
     backend = _target_backend(group)
     kw = dataset_create_kwargs(template, target_backend=backend, dst_parent=group)
-    kw = _clamp_chunks(kw, max(1, n))
+    kw = fit_chunks(kw, (n,), backend=backend)
     if "chunks" not in kw and n:
         kw["chunks"] = (min(n, 1 << 16),)
     return create_dataset(group, name, shape=(n,), dtype=dtype, **kw)
