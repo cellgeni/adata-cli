@@ -610,8 +610,8 @@ def check_matrix_encodings(roots: List[Any], console: Console) -> None:
         raise ValueError(
             f"Cannot concatenate {label!r}: inputs use "
             f"{', '.join(sorted(kinds))}. Every input must use the same "
-            f"encoding. Convert them to match first, e.g. "
-            f"`adata convert INPUT {label} -o converted.h5ad --layout "
+            f"encoding. Recast them to match first, e.g. "
+            f"`adata recast INPUT {label} -o converted.h5ad --layout "
             f"{'dense' if wanted == 'dense' else wanted.removesuffix('_matrix')}`."
         )
 

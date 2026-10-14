@@ -6,11 +6,13 @@ from typing import Optional, Sequence, List
 from rich.console import Console
 import typer
 
-from adata.core.convert import LAYOUTS
+from adata.conversion import FORMATS, Options
+from adata.core.recast import LAYOUTS
 from adata.commands import (
     MERGE_CHOICES,
     concat_stores,
     convert_store,
+    recast_store,
     create_store,
     split_store,
     list_store,
@@ -26,7 +28,7 @@ from adata.commands import export_image as export_image_cmd
 
 app = typer.Typer(
     help="Streaming CLI for huge AnnData .h5ad and .zarr stores "
-    "(view, ls, create, subset, split, concat, convert, export, import)."
+    "(view, ls, create, subset, split, concat, convert, recast, export, import)."
 )
 # Use stderr for status/progress to keep stdout clean for data output
 # force_terminal=True ensures Rich output is visible even in non-TTY environments
@@ -481,8 +483,212 @@ def concat(
 # ============================================================================
 # CONVERT command
 # ============================================================================
-@app.command("convert")
+#: The flags `recast` has and format conversion does not. Until 1.0.0, any of
+#: them on `convert` means the old meaning of the command, and it forwards.
+_RECAST_FLAGS = {
+    "inplace": "--inplace",
+    "convert_all": "--all",
+    "dtype": "--dtype",
+    "indices_dtype": "--indices-dtype",
+    "layout": "--layout",
+}
+
+#: Flags that only shape a recast; given without one of the above they have
+#: nothing to act on.
+_RECAST_ONLY_FLAGS = {"in_memory": "--in-memory", "chunk_rows": "--chunk"}
+
+#: Format-conversion flags, by parameter name, as `Options.given` spells them.
+_CONVERT_FLAGS = {
+    "zarr_format": "--zarr-format",
+    "compression": "--compression",
+    "force": "--force",
+    "overwrite": "--overwrite",
+}
+
+
+def _given(ctx: typer.Context, flags: dict) -> List[str]:
+    """The flags among `flags` that were actually typed, not defaulted."""
+    from click.core import ParameterSource
+
+    return [
+        flag
+        for name, flag in flags.items()
+        if ctx.get_parameter_source(name) not in (None, ParameterSource.DEFAULT)
+    ]
+
+
+@app.command("convert", context_settings={"allow_extra_args": True})
 def convert(
+    ctx: typer.Context,
+    file: Path = typer.Argument(
+        ...,
+        help="Input file or store",
+        exists=True,
+        readable=True,
+        dir_okay=True,
+        file_okay=True,
+    ),
+    output: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output path; its extension picks the format (.h5ad, .zarr)",
+        dir_okay=True,
+        file_okay=True,
+    ),
+    from_format: Optional[str] = typer.Option(
+        None,
+        "--from",
+        help=f"Input format, if it cannot be detected: {', '.join(FORMATS)}",
+    ),
+    to_format: Optional[str] = typer.Option(
+        None,
+        "--to",
+        help=f"Output format, if the extension does not say: {', '.join(FORMATS)}",
+    ),
+    zarr_format: Optional[int] = typer.Option(
+        None,
+        "--zarr-format",
+        help="Zarr spec version to write (defaults to the source store's, else 3)",
+    ),
+    compression: Optional[str] = typer.Option(
+        None,
+        "--compression",
+        help="none, gzip or lzf for h5ad; none, gzip, zstd or blosc for zarr "
+        "(defaults to the source's)",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Convert despite a lossy or inflating result",
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Replace an existing output",
+    ),
+    # Deprecated: recast's flags, so `convert` keeps working as it did until
+    # 1.0.0. Hidden from --help; the old matrix paths arrive in ctx.args.
+    inplace: bool = typer.Option(False, "--inplace", hidden=True),
+    convert_all: bool = typer.Option(False, "--all", hidden=True),
+    dtype: Optional[str] = typer.Option(None, "--dtype", hidden=True),
+    indices_dtype: Optional[str] = typer.Option(None, "--indices-dtype", hidden=True),
+    layout: Optional[str] = typer.Option(None, "--layout", hidden=True),
+    in_memory: bool = typer.Option(False, "--in-memory", hidden=True),
+    chunk_rows: int = typer.Option(1024, "--chunk", "-C", hidden=True),
+) -> None:
+    """
+    Convert a store to another format.
+
+    The output's extension picks the format: .h5ad or .zarr. Converting
+    between them copies every element, streamed, keeping the source's
+    chunking and compression where the target can express them.
+
+    Nothing is written until every check has passed, and the output is moved
+    into place only once complete: a failed conversion leaves nothing
+    behind. An existing output is refused unless --overwrite is given.
+
+    To change a matrix's dtype, layout or density, use `recast`. Until 1.0.0,
+    `convert` given recast's flags still forwards to it, with a warning.
+
+    Examples:
+        adata convert data.h5ad -o data.zarr
+        adata convert data.zarr -o data.h5ad --compression gzip
+        adata convert data.zarr -o v3.zarr --zarr-format 3
+    """
+    entries = list(ctx.args)
+    recast_flags = _given(ctx, _RECAST_FLAGS)
+
+    try:
+        if recast_flags:
+            mixed = _given(
+                ctx,
+                {
+                    "from_format": "--from",
+                    "to_format": "--to",
+                    "compression": "--compression",
+                    "overwrite": "--overwrite",
+                },
+            )
+            if mixed:
+                raise ValueError(
+                    f"{', '.join(mixed)} cannot be combined with "
+                    f"{', '.join(recast_flags)}: the first change a store's "
+                    "format, the second its matrices. Run `adata recast` for "
+                    "the matrices."
+                )
+            console.print(
+                "[yellow]Warning:[/] 'convert' with "
+                f"{', '.join(recast_flags)} is deprecated and will be removed "
+                "in 1.0.0; use 'recast' instead.",
+            )
+            if not inplace and output is None:
+                raise ValueError("Output file is required. Use --output/-o or --inplace.")
+            if layout is not None and layout not in LAYOUTS:
+                raise ValueError(f"--layout must be one of: {', '.join(LAYOUTS)}.")
+            if zarr_format is not None and zarr_format not in (2, 3):
+                raise ValueError("--zarr-format must be 2 or 3.")
+            recast_store(
+                file=file,
+                entries=entries or None,
+                output=output,
+                console=console,
+                dtype=dtype,
+                indices_dtype=indices_dtype,
+                layout=layout,
+                convert_all=convert_all,
+                inplace=inplace,
+                chunk_rows=chunk_rows,
+                in_memory=in_memory,
+                force=force,
+                zarr_format=zarr_format,
+            )
+            return
+
+        if entries:
+            hint = (
+                f" To write it, pass -o {entries[0]}."
+                if output is None and len(entries) == 1
+                else ""
+            )
+            raise ValueError(
+                f"Unexpected argument{'s' if len(entries) > 1 else ''}: "
+                f"{' '.join(entries)}. convert takes one input.{hint} To change "
+                "a matrix's dtype or layout, use `adata recast`."
+            )
+        stray = _given(ctx, _RECAST_ONLY_FLAGS)
+        if stray:
+            raise ValueError(
+                f"{', '.join(stray)} {'applies' if len(stray) == 1 else 'apply'} "
+                "to `adata recast`, not to format conversion."
+            )
+        if output is None:
+            raise ValueError("Output path is required: pass -o/--output.")
+
+        convert_store(
+            file,
+            output,
+            console,
+            src_format=from_format,
+            dst_format=to_format,
+            options=Options(
+                given=frozenset(_given(ctx, _CONVERT_FLAGS)),
+                zarr_format=zarr_format,
+                compression=compression,
+                force=force,
+                overwrite=overwrite,
+            ),
+        )
+    except Exception as e:
+        console.print(f"[bold red]Error:[/] {e}")
+        raise typer.Exit(code=1)
+
+
+# ============================================================================
+# RECAST command
+# ============================================================================
+@app.command("recast")
+def recast(
     file: Path = typer.Argument(
         ...,
         help="Input .h5ad/.zarr",
@@ -493,7 +699,7 @@ def convert(
     ),
     entries: Optional[List[str]] = typer.Argument(
         None,
-        help="Matrix paths to convert, e.g. 'X', 'layers/counts', 'raw/X'",
+        help="Matrix paths to recast, e.g. 'X', 'layers/counts', 'raw/X'",
     ),
     output: Optional[Path] = typer.Option(
         None,
@@ -511,7 +717,7 @@ def convert(
     convert_all: bool = typer.Option(
         False,
         "--all",
-        help="Convert X, every layer, and raw/X",
+        help="Recast X, every layer, and raw/X",
     ),
     dtype: Optional[str] = typer.Option(
         None,
@@ -531,7 +737,7 @@ def convert(
     force: bool = typer.Option(
         False,
         "--force",
-        help="Convert despite a lossy cast or a large size increase",
+        help="Recast despite a lossy cast or a large size increase",
     ),
     in_memory: bool = typer.Option(
         False,
@@ -562,11 +768,13 @@ def convert(
     both. Transposing streams by default, so it works on matrices too large
     to load.
 
+    This was `convert` until 0.7.0; `convert` now changes a store's format.
+
     Examples:
-        adata convert data.h5ad X -o out.h5ad --dtype float32
-        adata convert data.h5ad X -o out.h5ad --layout csc
-        adata convert data.h5ad X --inplace --dtype float32 --indices-dtype int32
-        adata convert data.h5ad --all -o out.h5ad --dtype float32
+        adata recast data.h5ad X -o out.h5ad --dtype float32
+        adata recast data.h5ad X -o out.h5ad --layout csc
+        adata recast data.h5ad X --inplace --dtype float32 --indices-dtype int32
+        adata recast data.h5ad --all -o out.h5ad --dtype float32
     """
     if not inplace and output is None:
         console.print(
@@ -586,7 +794,7 @@ def convert(
         raise typer.Exit(code=1)
 
     try:
-        convert_store(
+        recast_store(
             file=file,
             entries=list(entries) if entries else None,
             output=output,

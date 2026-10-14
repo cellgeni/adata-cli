@@ -6,4 +6,5 @@ from adata.commands.ls import list_store
 from adata.commands.create import create_store
 from adata.commands.split import split_store
 from adata.commands.concat import MERGE_CHOICES, MERGE_STRATEGIES, concat_stores
+from adata.commands.recast import recast_store
 from adata.commands.convert import convert_store

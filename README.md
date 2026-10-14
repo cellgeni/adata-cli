@@ -8,7 +8,7 @@ A command-line tool for exploring huge AnnData stores (`.h5ad` and `.zarr`) with
 - Auto-detects `.h5ad` files vs `.zarr` directories
 - Chunked processing for dense and sparse matrices (CSR/CSC)
 - Reads every AnnData on-disk layout, from 0.7.x through the current spec, and always writes the current one
-- Converts between HDF5 and Zarr (v2 and v3) in either direction
+- Converts between HDF5 and Zarr (v2 and v3) in either direction with `adata convert`
 - Rich terminal output with progress indicators, kept on stderr so results pipe cleanly
 
 **Documentation: [cellgeni.github.io/adata-cli](https://cellgeni.github.io/adata-cli/)**
@@ -56,7 +56,8 @@ Run help at any level (e.g. `adata --help`, `adata export --help`).
 - `subset` – stream and write a filtered copy, selected by obs/var name lists (`--obs`/`--var`) or by expression (`--obs-query`/`--var-query`).
 - `split` – write one store per distinct value of an annotation column, with a CSV manifest.
 - `concat` – concatenate stores along the obs axis, with `--join inner|outer` and merge strategies for var and uns.
-- `convert` – change a matrix's dtype, layout (CSR/CSC/dense) or density, streaming; refuses a lossy cast or a large size increase unless forced.
+- `convert` – change a store's format: h5ad ↔ Zarr v2/v3, streaming, with the output written beside its destination and moved into place only once complete.
+- `recast` – change a matrix's dtype, layout (CSR/CSC/dense) or density, streaming; refuses a lossy cast or a large size increase unless forced. Called `convert` until 0.7.0.
 - `export` – extract data from a store; subcommands: `dataframe` (any dataframe group to CSV), `array` (dense to `.npy`), `sparse` (CSR/CSC to `.mtx`), `dict` (JSON), `image` (PNG). Results go to stdout when no `--output` is given.
 - `import` – write new data into a store at any path; subcommands: `dataframe` (CSV), `array` (`.npy`), `sparse` (`.mtx`), `dict` (JSON), `image` (PNG/JPEG/TIFF).
 
@@ -82,15 +83,22 @@ adata concat per_sample/*.h5ad -o merged.h5ad --join outer --label sample
 ### Shrinking a store, and making encodings agree
 
 ```bash
-adata convert data.h5ad X --inplace --dtype float32
-adata convert data.h5ad --all -o small.h5ad --dtype float32 --indices-dtype int32
-adata convert data.h5ad X -o csc.h5ad --layout csc
+adata recast data.h5ad X --inplace --dtype float32
+adata recast data.h5ad --all -o small.h5ad --dtype float32 --indices-dtype int32
+adata recast data.h5ad X -o csc.h5ad --layout csc
 ```
 
-Counts written as float64 halve with no loss — and `convert` proves that
+Counts written as float64 halve with no loss — and `recast` proves that
 before it writes, by casting every value and casting it back. `concat`
 refuses inputs whose matrices disagree about CSR versus CSC; `--layout` is
 how you make them agree.
+
+### Changing format
+
+```bash
+adata convert data.h5ad -o data.zarr
+adata convert data.zarr -o data.h5ad --compression gzip
+```
 
 ## Documentation
 

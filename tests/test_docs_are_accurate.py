@@ -100,7 +100,7 @@ def _command_path(tokens: List[str]) -> List[str]:
 
 _GROUPS = {"export", "import"}
 _TOP_LEVEL = {
-    "view", "ls", "subset", "split", "concat", "convert", "create",
+    "view", "ls", "subset", "split", "concat", "convert", "recast", "create",
     "export", "import",
 }
 _SUBCOMMANDS = {

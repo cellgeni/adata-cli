@@ -267,7 +267,7 @@ def describe(obj: Any) -> Matrix:
         return Matrix(obj, "dense", (int(obj.shape[0]), int(obj.shape[1])), obj.dtype)
 
     raise ValueError(
-        f"Not a matrix: encoding {enc!r}. `convert` handles X, layers, raw/X "
+        f"Not a matrix: encoding {enc!r}. `recast` handles X, layers, raw/X "
         "and any 2-D dense array."
     )
 

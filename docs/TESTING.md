@@ -23,6 +23,8 @@ and the compatibility suite as a separate job.
 | `test_anndata_roundtrip.py` | anndata writes the fixtures, reads back our output |
 | `test_anndata_versions.py` | Compatibility with six real anndata releases (see below) |
 | `test_commands_phase2.py`, `test_commands_coverage.py`, `test_cli.py` | Command surfaces and error paths |
+| `test_convert.py` | `convert` between every backend pair, read back by anndata; its refusals, staging, and the forwarding of recast's old flags |
+| `test_recast.py` | `recast` against scipy: casts, transposes, density changes and every refusal |
 | `test_performance.py` | Complexity guards -- what an operation costs, not how long it takes (see below) |
 | `test_benchmark_harness.py` | That the benchmark's measurement is trustworthy |
 | `test_subset.py`, `test_export.py`, `test_import.py`, `test_info_read.py`, `test_zarr.py`, `test_query.py` | Per-feature unit tests |
@@ -232,7 +234,8 @@ should scale with, scale only that, and hold everything else fixed.
 | `export dataframe` | n_obs, n_obs_columns | linear |
 | `export array`, `sparse` (both paths), `dict`, `image` | elements, nnz, keys, pixels | linear |
 | `import dataframe`, `array`, `sparse`, `dict`, `image` | rows, elements, nnz, keys, pixels | linear in writes |
-| h5ad to zarr | n_obs | linear |
+| h5ad to zarr (`subset`), `convert` both directions | n_obs | linear |
+| `recast --dtype`, `--layout csc`, `--layout dense` | nnz, n_obs | linear; the streaming transpose's **peak memory** is bounded |
 
 The `slow` marker is on the three guards that build a 65,536-row store; they still gate
 merges, and `-m "not slow"` skips them locally. `perf` is on the tracing guards.

@@ -5,6 +5,42 @@ Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 
 ## Unreleased
 
+### Added
+
+- **`adata convert` changes a store's format**
+  ([#20](https://github.com/cellgeni/adata-cli/issues/20),
+  [#22](https://github.com/cellgeni/adata-cli/issues/22)). This release
+  converts between h5ad and Zarr v2/v3 in any direction; the output's
+  extension picks the format. Every element is copied as it is, streamed,
+  keeping chunking and, where the target can express it, compression;
+  `--compression` chooses instead. A Zarr output keeps the source's version
+  unless `--zarr-format` says otherwise.
+
+  Everything is checked before anything is written, and the output is
+  written beside its destination and moved into place only once complete,
+  so a failed conversion leaves nothing behind. An existing output is
+  refused unless `--overwrite` is given. A flag that does not apply to the
+  conversion asked for is refused rather than ignored.
+
+  Formats are registered in `adata.conversion`, each with the converters
+  that read and write it; 10x HDF5, MTX folders, loom and others follow as
+  separate issues under #20.
+
+### Changed
+
+- **The matrix command `convert` is now `recast`**
+  ([#21](https://github.com/cellgeni/adata-cli/issues/21)). It changes a
+  matrix's dtype, layout or density exactly as `convert` did in 0.6; the
+  name `convert` now means format conversion. The hint `concat` prints for
+  mismatched encodings names `recast`.
+
+### Deprecated
+
+- **`convert` with `recast`'s flags.** Given any of `--dtype`,
+  `--indices-dtype`, `--layout`, `--all` or `--inplace`, `convert` still
+  runs `recast` as before, with a warning. **This is removed in 1.0.0**,
+  with the `h5ad` command name and the `info` alias.
+
 ### Fixed
 
 - **Writing an h5ad with a `None` in it to Zarr failed.** anndata stores
