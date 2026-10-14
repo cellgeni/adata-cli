@@ -23,8 +23,25 @@ Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
   conversion asked for is refused rather than ignored.
 
   Formats are registered in `adata.conversion`, each with the converters
-  that read and write it; 10x HDF5, MTX folders, loom and others follow as
-  separate issues under #20.
+  that read and write it; MTX folders, loom and others follow as separate
+  issues under #20.
+
+- **`convert` reads and writes 10x Genomics HDF5 matrices**
+  ([#23](https://github.com/cellgeni/adata-cli/issues/23)): Cell Ranger's
+  `*_feature_bc_matrix.h5`, v2 and v3+, and the same layout from Space
+  Ranger, Xenium and CellBender. Reading gives what
+  `scanpy.read_10x_h5(gex_only=False)` gives, column for column -- checked
+  against scanpy itself in CI -- except that `X` keeps the integer counts
+  and the run's metadata is kept in `uns["cellranger"]`. `--feature-type`
+  keeps one type, `--split-feature-types` writes one output per type from a
+  single pass over the matrix, `--genome` picks a genome, and `--var-names`
+  and `--make-unique` do what scanpy's options of the same name do.
+
+  Writing produces the Cell Ranger 3+ layout from X, `raw/X` or any layer
+  (`--layer`), for CellBender, SoupX, DropletUtils and Seurat: gzip and
+  fixed-width strings, which PyTables -- and so CellBender -- needs. A file
+  imported by `convert` exports with its metadata intact, and the round
+  trip reproduces Cell Ranger's file dataset for dataset.
 
 ### Changed
 

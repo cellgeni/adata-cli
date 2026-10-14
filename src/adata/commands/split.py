@@ -9,7 +9,6 @@ on is read, and each output is produced by the same subset machinery used by
 from __future__ import annotations
 
 import csv
-import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -19,34 +18,7 @@ from rich.console import Console
 from adata.core.select import group_indices
 from adata.core.subset import split_h5ad
 from adata.storage import detect_backend, open_store
-
-
-def sanitize_label(label: str) -> str:
-    """Turn a column value into something safe to use as a filename."""
-    text = (label or "").strip()
-    if not text:
-        return "NA"
-    text = text.replace("/", "_").replace("\\", "_")
-    text = re.sub(r"\s+", "_", text)
-    text = re.sub(r"[^A-Za-z0-9_.-]+", "", text)
-    return text or "NA"
-
-
-def unique_names(labels: List[str]) -> Dict[str, str]:
-    """Map each label to a distinct filename stem.
-
-    Sanitising can map two different labels onto the same stem ("a/b" and
-    "a b"), so collisions get a numeric suffix rather than silently
-    overwriting one another.
-    """
-    used: Dict[str, int] = {}
-    mapping: Dict[str, str] = {}
-    for label in labels:
-        base = sanitize_label(label)
-        count = used.get(base, 0)
-        used[base] = count + 1
-        mapping[label] = base if count == 0 else f"{base}_{count}"
-    return mapping
+from adata.util.names import unique_names
 
 
 def split_store(

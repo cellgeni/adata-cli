@@ -22,6 +22,19 @@ class Options:
     force: bool = False
     overwrite: bool = False
 
+    # Reading a 10x matrix.
+    genome: Optional[str] = None
+    var_names: str = "gene_symbols"
+    make_unique: bool = False
+    feature_type: Optional[str] = None
+    split_feature_types: bool = False
+
+    # Writing a 10x matrix.
+    layer: Optional[str] = None
+    gene_ids_column: Optional[str] = None
+    gene_names_column: Optional[str] = None
+    feature_types_column: Optional[str] = None
+
 
 @dataclass
 class ConversionPlan:

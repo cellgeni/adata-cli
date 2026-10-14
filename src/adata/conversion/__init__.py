@@ -17,6 +17,7 @@ from typing import Dict, FrozenSet, List, Optional
 
 import h5py
 
+from adata.conversion import tenx
 from adata.conversion.anndata_copy import AnnDataCopy
 from adata.conversion.base import ConversionPlan, Converter, Format, Options
 from adata.storage import has_valid_anndata_root_attrs, is_zarr_path
@@ -65,6 +66,14 @@ FORMATS: Dict[str, Format] = {
         anndata=True,
         sniff=is_zarr_path,
     ),
+    "10x-h5": Format(
+        name="10x-h5",
+        description="10x Genomics feature-barcode matrix (Cell Ranger v2 or v3)",
+        extensions=(".h5",),
+        sniff=tenx.sniff,
+        importer=tenx.TenxImport(),
+        exporter=tenx.TenxExport(),
+    ),
 }
 
 _ANNDATA_COPY = AnnDataCopy()
@@ -83,6 +92,8 @@ def detect_format(path: Path) -> str:
     Content comes first because extensions lie: Cell Ranger, loompy and
     plenty of hand-rolled pipelines all write `.h5`. The AnnData check runs
     last, since its fallback -- `obs` and `var` groups -- is the weakest test.
+    Only AnnData falls back to the extension: another format's content check
+    is the final word, so a plain HDF5 file named `.h5` is not taken for 10x.
     """
     path = Path(path)
     for fmt in FORMATS.values():
@@ -93,7 +104,7 @@ def detect_format(path: Path) -> str:
             return fmt.name
     suffix = path.suffix.lower()
     for fmt in FORMATS.values():
-        if suffix in fmt.extensions:
+        if (fmt.anndata or fmt.sniff is None) and suffix in fmt.extensions:
             return fmt.name
     raise ValueError(
         f"Cannot tell what format '{path}' is. Pass --from, one of: {_names()}."

@@ -46,6 +46,8 @@ from adata.storage import (
     is_group,
     is_hdf5_group,
     is_zarr_group,
+    with_compression,
+    zarr_format_of,
 )
 
 #: Layouts the user can ask for. "sparse" means "whichever sparse encoding
@@ -456,6 +458,7 @@ def transpose_sparse_streaming(
     chunk: int = DEFAULT_CHUNK,
     bucket_entries: Optional[int] = None,
     console: Optional[Console] = None,
+    compression: Optional[str] = None,
 ) -> None:
     """Swap CSR<->CSC without loading the matrix.
 
@@ -531,8 +534,12 @@ def transpose_sparse_streaming(
     # nnz is invariant under a transpose, so the output can be sized now and
     # written by slice rather than grown block by block.
     group = _new_sparse_group(src, dst_parent, name, target, src.shape)
-    out_data = _sparse_dataset(group, "data", data_dtype, nnz, source_data)
-    out_indices = _sparse_dataset(group, "indices", index_dtype, nnz, source_indices)
+    out_data = _sparse_dataset(
+        group, "data", data_dtype, nnz, source_data, compression=compression
+    )
+    out_indices = _sparse_dataset(
+        group, "indices", index_dtype, nnz, source_indices, compression=compression
+    )
     written = 0
 
     with _scratch_group(dst_parent, f"__{name}_transpose_scratch__") as scratch:
@@ -590,7 +597,8 @@ def transpose_sparse_streaming(
 
     cast_indptr = out_indptr.astype(pointer_dtype, copy=False)
     dataset = _sparse_dataset(
-        group, "indptr", pointer_dtype, cast_indptr.size, src.obj["indptr"]
+        group, "indptr", pointer_dtype, cast_indptr.size, src.obj["indptr"],
+        compression=compression,
     )
     dataset[:] = cast_indptr
 
@@ -664,6 +672,7 @@ def sparsify(
     pointer_dtype: np.dtype = np.dtype("int64"),
     chunk_rows: int = 1024,
     console: Optional[Console] = None,
+    compression: Optional[str] = None,
 ) -> Tuple[int, float]:
     """Write a dense array out as CSR or CSC, a block at a time.
 
@@ -683,8 +692,12 @@ def sparsify(
     spec.set_encoding(group, enc)
     set_shape_attr(group, src.shape)
 
-    out_data = _growable_like(group, "data", data_dtype, src.obj)
-    out_indices = _growable_like(group, "indices", index_dtype, src.obj)
+    out_data = _growable_like(
+        group, "data", data_dtype, src.obj, compression=compression
+    )
+    out_indices = _growable_like(
+        group, "indices", index_dtype, src.obj, compression=compression
+    )
     counts: List[int] = []
 
     for lo in range(0, n_major, chunk_rows):
@@ -700,7 +713,15 @@ def sparsify(
         ))
 
     indptr = np.concatenate(([0], np.cumsum(counts, dtype=np.int64)))
-    create_dataset(group, "indptr", data=indptr.astype(pointer_dtype, copy=False))
+    kw = {}
+    if compression is not None:
+        kw = with_compression(
+            kw, compression, shape=indptr.shape, dtype=pointer_dtype,
+            backend=backend, zarr_format=zarr_format_of(dst_parent),
+        )
+    create_dataset(
+        group, "indptr", data=indptr.astype(pointer_dtype, copy=False), **kw
+    )
 
 
     nnz = int(indptr[-1])

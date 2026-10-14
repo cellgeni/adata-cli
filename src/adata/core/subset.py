@@ -40,6 +40,8 @@ from adata.storage import (
     is_zarr_group,
     is_zarr_array,
     open_store,
+    with_compression,
+    zarr_format_of,
 )
 
 
@@ -529,7 +531,13 @@ def _growable(group: Any, name: str, dtype: Any) -> Any:
 
 
 def _sparse_dataset(
-    group: Any, name: str, dtype: np.dtype, n: int, template: Any
+    group: Any,
+    name: str,
+    dtype: np.dtype,
+    n: int,
+    template: Any,
+    *,
+    compression: Optional[str] = None,
 ) -> Any:
     """A 1-D dataset of `n` elements laid out like `template`.
 
@@ -542,12 +550,24 @@ def _sparse_dataset(
     backend = _target_backend(group)
     kw = dataset_create_kwargs(template, target_backend=backend, dst_parent=group)
     kw = fit_chunks(kw, (n,), backend=backend)
+    if compression is not None:
+        kw = with_compression(
+            kw, compression, shape=(n,), dtype=dtype, backend=backend,
+            zarr_format=zarr_format_of(group),
+        )
     if "chunks" not in kw and n:
         kw["chunks"] = (min(n, 1 << 16),)
     return create_dataset(group, name, shape=(n,), dtype=dtype, **kw)
 
 
-def _growable_like(group: Any, name: str, dtype: np.dtype, template: Any) -> Any:
+def _growable_like(
+    group: Any,
+    name: str,
+    dtype: np.dtype,
+    template: Any,
+    *,
+    compression: Optional[str] = None,
+) -> Any:
     """Like `_sparse_dataset`, but extensible for a size not yet known.
 
     The sparse writers of subset and concat once used a bare growable
@@ -556,6 +576,11 @@ def _growable_like(group: Any, name: str, dtype: np.dtype, template: Any) -> Any
     """
     backend = _target_backend(group)
     kw = dataset_create_kwargs(template, target_backend=backend, dst_parent=group)
+    if compression is not None:
+        kw = with_compression(
+            kw, compression, shape=(0,), dtype=dtype, backend=backend,
+            zarr_format=zarr_format_of(group),
+        )
     kw.pop("shards", None)
     chunks = kw.pop("chunks", None)
     step = int(chunks[0]) if chunks else 1 << 16
