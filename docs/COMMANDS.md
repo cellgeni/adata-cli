@@ -19,6 +19,7 @@ Run `adata <command> --help` for the authoritative flag list.
 - [split](#split)
 - [concat](#concat)
 - [convert](#convert)
+- [recast](#recast)
 - [create](#create)
 - [export](#export)
 - [import](#import)
@@ -84,27 +85,72 @@ holds more genes than the main object.
 
 ## `convert`
 
+Change a store's format. The output's extension picks the format; `--to`
+names it when the extension does not say, and `--from` names the input's
+when it cannot be detected from its content.
+
+```bash
+adata convert data.h5ad -o data.zarr
+adata convert data.zarr -o data.h5ad --compression gzip
+adata convert old.zarr -o new.zarr --zarr-format 3
+adata convert data.h5ad -o data.zarr --overwrite
+```
+
+| Flag | Meaning |
+|---|---|
+| `--output`, `-o` | Output path (required) |
+| `--from` | Input format, if it cannot be detected |
+| `--to` | Output format, if the extension does not say |
+| `--zarr-format` | Zarr version to write; defaults to the source's, else 3 |
+| `--compression` | `none`, `gzip` or `lzf` for h5ad; `none`, `gzip`, `zstd` or `blosc` for Zarr |
+| `--overwrite` | Replace an existing output |
+| `--force` | Convert despite a lossy or inflating result |
+
+| Format | Extension | Read | Write |
+|---|---|---|---|
+| `h5ad` | `.h5ad` | yes | yes |
+| `zarr` | `.zarr` (v2 or v3) | yes | yes |
+
+Between h5ad and Zarr every element is copied as it is, streamed, so the
+store's size is not a limit. Chunking carries over, and so does compression
+where the target can express it: Zarr codecs travel between stores of the same
+Zarr version, a compressed Zarr array becomes gzip in an h5ad, and an h5ad
+written to Zarr gets zarr-python's default codec. `--compression` replaces all
+of that with one choice. Elements are not re-encoded, so a store written by
+anndata 0.7 keeps its legacy layout.
+
+Every check runs before anything is written. The output is written beside
+its destination (`out.adata-tmp.zarr`) and moved into place only once
+complete, so a failed conversion leaves nothing behind. An existing output is
+refused unless `--overwrite` is given, and is replaced only once its
+successor is finished.
+
+To change a matrix's dtype, layout or density instead, use
+[`recast`](#recast).
+
+## `recast`
+
 Change a matrix's dtype, layout or density. Counts held as float64 cost twice
 the disk and twice the read for no information; a tool that wants CSC cannot
 use a CSR store; and `concat` refuses inputs whose encodings disagree.
 
 ```bash
-adata convert data.h5ad X -o out.h5ad --dtype float32
-adata convert data.h5ad X -o out.h5ad --layout csc
-adata convert data.h5ad X --inplace --dtype float32 --indices-dtype int32
-adata convert data.h5ad --all -o out.h5ad --dtype float32
-adata convert data.h5ad layers/counts -o out.h5ad --layout dense --force
+adata recast data.h5ad X -o out.h5ad --dtype float32
+adata recast data.h5ad X -o out.h5ad --layout csc
+adata recast data.h5ad X --inplace --dtype float32 --indices-dtype int32
+adata recast data.h5ad --all -o out.h5ad --dtype float32
+adata recast data.h5ad layers/counts -o out.h5ad --layout dense --force
 ```
 
 | Flag | Meaning |
 |---|---|
 | `--output`, `-o` | Output path. Required unless `--inplace` |
 | `--inplace` | Replace the source (written to a temporary path first) |
-| `--all` | Convert `X`, every layer and `raw/X` |
+| `--all` | Recast `X`, every layer and `raw/X` |
 | `--dtype` | New dtype for the values, e.g. `float32` |
 | `--indices-dtype` | New dtype for sparse indices: `int32` or `int64` |
 | `--layout` | `csr`, `csc`, `dense` or `sparse` |
-| `--force` | Convert despite a lossy cast or a large size increase |
+| `--force` | Recast despite a lossy cast or a large size increase |
 | `--in-memory` | Transpose in memory rather than streaming |
 | `--chunk`, `-C` | Row chunk size for dense matrices |
 | `--zarr-format` | Zarr version to write; defaults to the source's |
@@ -127,6 +173,10 @@ temporary file and swaps it in only once the conversion has finished.
 Transposing streams by default and works on matrices too large to load, at
 the cost of two extra passes over the nonzeros. `--in-memory` is faster when
 the matrix fits.
+
+Until 0.7.0 this command was called `convert`. Until 1.0.0, `convert` given
+any of `--dtype`, `--indices-dtype`, `--layout`, `--all` or `--inplace` still
+runs `recast`, with a warning.
 
 ## `split`
 
@@ -277,13 +327,14 @@ adata subset data.h5ad -o cortex.h5ad --obs barcodes.txt
 ## Zarr format selection
 
 New Zarr stores follow the source store's version, so a v2 input is not
-silently upgraded. `--zarr-format 2|3` on `create`, `subset`, `split` and
-`concat` overrides that. Writing a Zarr store from an `.h5ad` source defaults
-to v3.
+silently upgraded. `--zarr-format 2|3` on `create`, `subset`, `split`,
+`concat`, `convert` and `recast` overrides that. Writing a Zarr store from
+an `.h5ad` source defaults to v3.
 
 ```bash
 adata create out.zarr --n-obs 100 --n-var 50 --zarr-format 2
 adata subset data.zarr -o out.zarr --obs keep.txt --zarr-format 3
 adata split data.zarr --by sample -o parts/ --suffix .zarr --zarr-format 3
 adata concat a.zarr b.zarr -o merged.zarr --zarr-format 3
+adata convert data.zarr -o v3.zarr --zarr-format 3
 ```

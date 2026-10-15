@@ -63,7 +63,8 @@ class Store:
 def _require_zarr() -> None:
     if zarr is None:  # pragma: no cover - optional dependency
         raise ImportError(
-            "zarr is required for .zarr support. Install with: uv sync --extra zarr"
+            "zarr is required for .zarr support, and is a dependency of "
+            "pyadata-cli; reinstall it, or install zarr: pip install 'zarr>=3'"
         )
 
 
@@ -429,6 +430,10 @@ def create_dataset(
             compressors = kwargs.pop("compressors")
             if isinstance(compressors, (list, tuple)) and len(compressors) == 1:
                 kwargs["compressor"] = compressors[0]
+            elif not isinstance(compressors, (list, tuple)):
+                # A single codec, or None for no compression at all. Dropping
+                # None, as a list of several is, would bring back the default.
+                kwargs["compressors"] = compressors
         if data is not None:
             return parent.create_array(name, data=data, **kwargs)
         return parent.create_array(name, shape=shape, dtype=dtype, **kwargs)
@@ -486,6 +491,75 @@ def fit_chunks(kw: dict, shape: Sequence[int], *, backend: str) -> dict:
     kw = dict(kw)
     kw["chunks"] = clamped
     kw.pop("shards", None)
+    return kw
+
+
+#: What `--compression` accepts, per target backend. lzf is HDF5-only (and
+#: unreadable outside h5py); zstd and blosc have no HDF5 filter in h5py.
+COMPRESSIONS = {
+    "hdf5": ("none", "gzip", "lzf"),
+    "zarr": ("none", "gzip", "zstd", "blosc"),
+}
+
+
+def _zarr_compressors(choice: str, zarr_format: Optional[int]) -> Any:
+    """The `compressors` argument that gives a Zarr array `choice`."""
+    if choice == "none":
+        return None
+    if zarr_format == 2:
+        import numcodecs
+
+        return {
+            "gzip": lambda: numcodecs.GZip(level=GZIP_LEVEL),
+            "zstd": lambda: numcodecs.Zstd(level=3),
+            "blosc": lambda: numcodecs.Blosc(cname="lz4", clevel=5),
+        }[choice]()
+    from zarr.codecs import BloscCodec, GzipCodec, ZstdCodec
+
+    return [
+        {
+            "gzip": lambda: GzipCodec(level=GZIP_LEVEL),
+            "zstd": lambda: ZstdCodec(level=3),
+            "blosc": lambda: BloscCodec(cname="lz4", clevel=5, shuffle="shuffle"),
+        }[choice]()
+    ]
+
+
+def with_compression(
+    kw: dict,
+    choice: str,
+    *,
+    shape: Sequence[int],
+    dtype: Any,
+    backend: str,
+    zarr_format: Optional[int] = None,
+) -> dict:
+    """Replace the compression in creation kwargs `kw` with `choice`.
+
+    HDF5 strings and scalars are left uncompressed whatever is asked: a
+    variable-length string compresses only its heap pointers, and a scalar
+    cannot be chunked at all.
+    """
+    if choice not in COMPRESSIONS[backend]:
+        raise ValueError(
+            f"Compression {choice!r} is not available for "
+            f"{'h5ad' if backend == 'hdf5' else 'zarr'}; use one of: "
+            f"{', '.join(COMPRESSIONS[backend])}."
+        )
+    kw = dict(kw)
+    for key in ("compression", "compression_opts", "compressor", "compressors"):
+        kw.pop(key, None)
+    if backend == "zarr":
+        kw["compressors"] = _zarr_compressors(choice, zarr_format)
+        return kw
+
+    from adata.elements.strings import is_string_dtype
+
+    if choice == "none" or tuple(shape) == () or is_string_dtype(dtype):
+        return kw
+    kw["compression"] = choice
+    if choice == "gzip":
+        kw["compression_opts"] = GZIP_LEVEL
     return kw
 
 
@@ -636,12 +710,17 @@ def _chunk_step(
     return min(step, n_rows)
 
 
-def copy_dataset(src: Any, dst_group: Any, name: str) -> Any:
+def copy_dataset(
+    src: Any, dst_group: Any, name: str, *, compression: Optional[str] = None
+) -> Any:
     """Copy a dataset into `dst_group`, streaming it in chunks.
 
     The destination dtype is resolved for the target backend rather than
     reused: an h5py variable-length string dataset reports `object`, which Zarr
     refuses to create, so copying one verbatim fails on every real store.
+
+    `compression` replaces whatever compression the copy would otherwise
+    carry (one of `COMPRESSIONS` for the target backend).
     """
     from adata.elements.strings import target_dtype
 
@@ -660,6 +739,11 @@ def copy_dataset(src: Any, dst_group: Any, name: str) -> Any:
     shape = tuple(src.shape)
     zformat = zarr_format_of(dst_group)
     kw = dataset_create_kwargs(src, target_backend=target_backend, zarr_format=zformat)
+    if compression is not None:
+        kw = with_compression(
+            kw, compression, shape=shape, dtype=src.dtype,
+            backend=target_backend, zarr_format=zformat,
+        )
     ds = create_dataset(
         dst_group,
         name,
@@ -688,16 +772,23 @@ def copy_dataset(src: Any, dst_group: Any, name: str) -> Any:
 
 
 def copy_tree(
-    src_obj: Any, dst_group: Any, name: str, *, exclude: Iterable[str] = ()
+    src_obj: Any,
+    dst_group: Any,
+    name: str,
+    *,
+    exclude: Iterable[str] = (),
+    compression: Optional[str] = None,
 ) -> Any:
     if is_hdf5_group(dst_group) and (
         is_hdf5_group(src_obj) or is_hdf5_dataset(src_obj)
     ):
-        if not exclude:
+        # HDF5's own copy keeps every dataset exactly as it was, which is
+        # what is wanted unless the caller asked for something else.
+        if not exclude and compression is None:
             dst_group.copy(src_obj, dst_group, name)
             return dst_group[name]
     if is_dataset(src_obj):
-        return copy_dataset(src_obj, dst_group, name)
+        return copy_dataset(src_obj, dst_group, name, compression=compression)
     if not is_group(src_obj):
         raise TypeError(f"Unsupported object type for copy: {type(src_obj)}")
 
@@ -708,16 +799,18 @@ def copy_tree(
         if key in exclude:
             continue
         child = src_obj[key]
-        copy_tree(child, grp, key, exclude=exclude)
+        copy_tree(child, grp, key, exclude=exclude, compression=compression)
     return grp
 
 
-def copy_store_contents(src_root: Any, dst_root: Any) -> None:
+def copy_store_contents(
+    src_root: Any, dst_root: Any, *, compression: Optional[str] = None
+) -> None:
     target_backend = "zarr" if is_zarr_group(dst_root) else "hdf5"
     copy_attrs(src_root.attrs, dst_root.attrs, target_backend=target_backend)
     ensure_anndata_root_attrs(dst_root)
     for key in src_root.keys():
-        copy_tree(src_root[key], dst_root, key)
+        copy_tree(src_root[key], dst_root, key, compression=compression)
 
 
 def copy_path(src: Path, dst: Path) -> None:

@@ -232,10 +232,7 @@ CASES: List[Case] = [
         contenders=[
             Contender(
                 "adata-cli",
-                argv=[
-                    "adata", "subset", "{input0}", "-o", "{output}",
-                    "-q", "quality >= 0",
-                ],
+                argv=["adata", "convert", "{input0}", "-o", "{output}"],
             ),
             Contender(
                 "anndata (in memory)",
@@ -485,7 +482,7 @@ CASES: List[Case] = [
             ),
         ],
     ),
-    # -- convert ------------------------------------------------------------
+    # -- recast (named convert until 0.7.0; the case names keep the history) --
     Case(
         name="convert-dtype",
         question="Rewrite X as float32.",
@@ -493,7 +490,7 @@ CASES: List[Case] = [
             Contender(
                 "adata-cli",
                 argv=[
-                    "adata", "convert", "{input0}", "X", "-o", "{output}",
+                    "adata", "recast", "{input0}", "X", "-o", "{output}",
                     "--dtype", "float32", "--force",
                 ],
             ),
@@ -518,14 +515,14 @@ CASES: List[Case] = [
             Contender(
                 "adata-cli (streaming)",
                 argv=[
-                    "adata", "convert", "{input0}", "X", "-o", "{output}",
+                    "adata", "recast", "{input0}", "X", "-o", "{output}",
                     "--layout", "csc",
                 ],
             ),
             Contender(
                 "adata-cli (--in-memory)",
                 argv=[
-                    "adata", "convert", "{input0}", "X", "-o", "{output}",
+                    "adata", "recast", "{input0}", "X", "-o", "{output}",
                     "--layout", "csc", "--in-memory",
                 ],
             ),

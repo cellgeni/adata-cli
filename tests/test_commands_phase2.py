@@ -902,9 +902,9 @@ def test_concat_refuses_mismatched_x_encodings(tmp_path, left, right):
     assert result.exit_code == 1
     text = _out(result)
     assert "Cannot concatenate 'X'" in text
-    # The error has to name the way out, which until `convert` existed it
-    # could not do.
-    assert "adata convert" in text and "--layout" in text
+    # The error has to name the way out, which until `recast` (then called
+    # `convert`) existed it could not do.
+    assert "adata recast" in text and "--layout" in text
     assert not out.exists(), "nothing may be written when the check fails"
 
 
@@ -927,7 +927,7 @@ def test_concat_succeeds_once_the_encodings_are_converted(tmp_path):
 
     converted = tmp_path / "b-csr.h5ad"
     assert runner.invoke(
-        app, ["convert", str(b), "X", "-o", str(converted), "--layout", "csr"]
+        app, ["recast", str(b), "X", "-o", str(converted), "--layout", "csr"]
     ).exit_code == 0
 
     out = tmp_path / "m.h5ad"
