@@ -20,14 +20,8 @@ from adata.conversion import (
     detect_format,
     output_format,
 )
+from adata.util.path import same_path
 from adata.util.staging import staged_outputs
-
-
-def _same_path(left: Path, right: Path) -> bool:
-    try:
-        return left.resolve() == right.resolve()
-    except OSError:
-        return False
 
 
 def convert_store(
@@ -56,7 +50,7 @@ def convert_store(
 
     plan = converter.plan(file, output, src_format, dst_format, options)
     for out in plan.outputs:
-        if _same_path(file, out):
+        if same_path(file, out):
             # Writing a Zarr store over its own source empties it before a
             # single element has been read.
             raise ValueError(f"Output path is the input: {out}")

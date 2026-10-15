@@ -5,7 +5,6 @@ from __future__ import annotations
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
-import shutil
 from typing import Optional, Set, Tuple, List, Dict, Any
 
 import numpy as np
@@ -43,6 +42,8 @@ from adata.storage import (
     with_compression,
     zarr_format_of,
 )
+from adata.util.path import same_path
+from adata.util.staging import staged_outputs
 
 
 def _target_backend(dst_group: Any) -> str:
@@ -952,18 +953,15 @@ def subset_h5ad(
     if not inplace and output is None:
         raise ValueError("Output file is required unless --inplace is specified.")
 
-    if inplace:
-        src_backend = detect_backend(file)
-        if src_backend == "zarr":
-            base_name = file.stem if file.suffix else file.name
-            tmp_path = file.with_name(f"{base_name}.subset-tmp.zarr")
-        else:
-            tmp_path = file.with_name(f"{file.name}.subset-tmp")
-        if tmp_path.exists():
-            raise FileExistsError(f"Temporary path already exists: {tmp_path}")
-        dst_path = tmp_path
-    else:
-        dst_path = output
+    if not inplace and same_path(file, output):
+        # Opening the output "w" would empty a Zarr source before a single
+        # element had been read from it.
+        raise ValueError(
+            f"Output path is the input: {output}. Use --inplace to replace "
+            "it, which writes to a temporary file first."
+        )
+
+    dst_path = file if inplace else Path(output)
 
     if zarr_format is None and detect_backend(file) == "zarr":
         with open_store(file, "r") as probe:
@@ -975,12 +973,17 @@ def subset_h5ad(
     status = console.status("[magenta]Opening files...[/]")
     status.start()
     try:
-        with open_store(file, "r") as src_store, open_store(
-            dst_path, "w", zarr_format=zarr_format
-        ) as dst_store:
+        # The output is written beside its destination and renamed into place
+        # only once complete, so a failure leaves any existing output (or,
+        # with --inplace, the source) as it was. The source is opened inside
+        # the staging block, so it is closed before it is renamed aside.
+        with staged_outputs([dst_path]) as (temp,), open_store(
+            file, "r"
+        ) as src_store:
             src = src_store.root
-            dst = dst_store.root
 
+            # The selection is resolved before the output exists: a query
+            # that fails must not leave an empty store behind.
             obs_idx = (
                 obs_indices
                 if obs_indices is not None
@@ -1000,25 +1003,15 @@ def subset_h5ad(
 
             status.stop()
 
-            _write_targets(
-                src,
-                [Target(dst, obs_idx, var_idx, var_keep)],
-                chunk_rows=chunk_rows,
-                console=console,
-            )
+            with open_store(temp, "w", zarr_format=zarr_format) as dst_store:
+                _write_targets(
+                    src,
+                    [Target(dst_store.root, obs_idx, var_idx, var_keep)],
+                    chunk_rows=chunk_rows,
+                    console=console,
+                )
     finally:
         status.stop()
-
-    if inplace:
-        if file.exists():
-            if file.is_dir():
-                shutil.rmtree(file)
-            else:
-                file.unlink()
-        if dst_path.is_dir():
-            shutil.move(str(dst_path), str(file))
-        else:
-            dst_path.replace(file)
 
 
 def _open_output_limit() -> int:

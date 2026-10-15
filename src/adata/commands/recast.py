@@ -2,13 +2,14 @@
 
 Writes a whole new store rather than editing one in place, for the same
 reason `subset` does: a conversion that fails half way leaves the original
-untouched, and `--inplace` becomes an atomic swap of a finished file rather
-than a partial edit of a live one.
+untouched. The new store is written beside its destination and renamed into
+place only once complete (see `adata.util.staging`), so `--inplace` replaces a
+finished file rather than editing a live one, and the original is deleted only
+after its successor is in place.
 """
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -25,15 +26,16 @@ from adata.core.recast import (
 from adata.elements import spec
 from adata.elements.write import ensure_anndata_skeleton
 from adata.storage import copy_tree, detect_backend, is_group, open_store
-
-#: What `--all` means. The matrices an AnnData object is built from, not
-#: every 2-D array in the file: obsm/varm hold embeddings, whose dtype is
-#: rarely what anyone is trying to shrink. Those still convert by path.
-ALL_PREFIXES = ("X", "layers", "raw/X")
-
+from adata.util.path import same_path
+from adata.util.staging import staged_outputs
 
 def discover_matrices(root: Any) -> List[str]:
-    """Entry paths `--all` resolves to, in a stable order."""
+    """Entry paths `--all` resolves to, in a stable order.
+
+    The matrices an AnnData object is built from, not every 2-D array in the
+    file: obsm/varm hold embeddings, whose dtype is rarely what anyone is
+    trying to shrink. Those still convert by path.
+    """
     found: List[str] = []
     if "X" in root:
         found.append("X")
@@ -42,14 +44,6 @@ def discover_matrices(root: Any) -> List[str]:
     if "raw" in root and is_group(root["raw"]) and "X" in root["raw"]:
         found.append("raw/X")
     return found
-
-
-def _same_path(left: Path, right: Path) -> bool:
-    """Do these name the same store, through symlinks and `..` alike?"""
-    try:
-        return left.resolve() == right.resolve()
-    except OSError:  # pragma: no cover - unresolvable path
-        return left.absolute() == right.absolute()
 
 
 def _resolve(root: Any, path: str) -> Any:
@@ -96,7 +90,7 @@ def recast_store(
         else None
     )
 
-    if output is not None and not inplace and _same_path(file, output):
+    if output is not None and not inplace and same_path(file, output):
         # Opening the destination "w" clears it while the source is still
         # being read from it. HDF5 refuses; Zarr does not, and quietly
         # produced an empty store where the data used to be.
@@ -105,69 +99,54 @@ def recast_store(
             "it, which writes to a temporary file first."
         )
 
-    if inplace:
-        backend = detect_backend(file)
-        if backend == "zarr":
-            base = file.stem if file.suffix else file.name
-            dst_path = file.with_name(f"{base}.recast-tmp.zarr")
-        else:
-            dst_path = file.with_name(f"{file.name}.recast-tmp")
-        if dst_path.exists():
-            raise FileExistsError(f"Temporary path already exists: {dst_path}")
-    else:
-        dst_path = output
+    dst_path = file if inplace else Path(output)
 
     if zarr_format is None and detect_backend(file) == "zarr":
         with open_store(file, "r") as probe:
             zarr_format = probe.zarr_format
 
-    with open_store(file, "r") as src_store:
-        src = src_store.root
-        targets = discover_matrices(src) if convert_all else list(entries or [])
-        if not targets:
-            raise ValueError(
-                "No matrices selected. Name one (e.g. `X`) or pass --all."
-            )
-        # Every check first, before the destination exists. A refusal must
-        # not leave behind a store holding a copy of obs and var and nothing
-        # else -- the caller cannot tell that from a finished conversion.
-        plans = {
-            path: plan_conversion(
-                _resolve(src, path),
-                path,
-                dtype=data_dtype,
-                index_dtype=index_dtype,
-                layout=layout,
-                chunk=chunk,
-                force=force,
-                console=console,
-            )
-            for path in targets
-        }
+    # The source is opened inside the staging block, so it is closed before
+    # `--inplace` renames it aside.
+    with staged_outputs([dst_path]) as (temp,):
+        with open_store(file, "r") as src_store:
+            src = src_store.root
+            targets = discover_matrices(src) if convert_all else list(entries or [])
+            if not targets:
+                raise ValueError(
+                    "No matrices selected. Name one (e.g. `X`) or pass --all."
+                )
+            # Every check first, before the destination exists. A refusal must
+            # not leave behind a store holding a copy of obs and var and nothing
+            # else -- the caller cannot tell that from a finished conversion.
+            plans = {
+                path: plan_conversion(
+                    _resolve(src, path),
+                    path,
+                    dtype=data_dtype,
+                    index_dtype=index_dtype,
+                    layout=layout,
+                    chunk=chunk,
+                    force=force,
+                    console=console,
+                )
+                for path in targets
+            }
 
-        console.print(
-            f"[cyan]Converting {len(targets)} matrix/matrices:[/] "
-            + ", ".join(targets)
-        )
-
-        with open_store(dst_path, "w", zarr_format=zarr_format) as dst_store:
-            dst = dst_store.root
-            _write(
-                src, dst, plans,
-                chunk=chunk, chunk_rows=chunk_rows, in_memory=in_memory,
-                console=console,
+            console.print(
+                f"[cyan]Converting {len(targets)} matrix/matrices:[/] "
+                + ", ".join(targets)
             )
-            ensure_anndata_skeleton(dst)
+
+            with open_store(temp, "w", zarr_format=zarr_format) as dst_store:
+                dst = dst_store.root
+                _write(
+                    src, dst, plans,
+                    chunk=chunk, chunk_rows=chunk_rows, in_memory=in_memory,
+                    console=console,
+                )
+                ensure_anndata_skeleton(dst)
 
     if inplace:
-        if file.is_dir():
-            shutil.rmtree(file)
-        elif file.exists():
-            file.unlink()
-        if dst_path.is_dir():
-            shutil.move(str(dst_path), str(file))
-        else:
-            dst_path.replace(file)
         console.print(f"[green]Converted[/] {file}")
     else:
         console.print(f"[green]Wrote[/] {dst_path}")

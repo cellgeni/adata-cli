@@ -4,6 +4,11 @@ Requested in issue #2, modelled on cellgeni/scraft's `split_h5ad` but
 streaming: the source is never loaded into memory, only the column being split
 on is read, and each output is produced by the same subset machinery used by
 `adata subset`, fanned out so every matrix is read once for all groups.
+
+Every output is written beside its destination and renamed into place only
+once all of them are complete, so a split that fails leaves no partial stores
+(and existing outputs as they were). The manifest is written last, so it
+exists only when everything it lists does.
 """
 
 from __future__ import annotations
@@ -19,6 +24,8 @@ from adata.core.select import group_indices
 from adata.core.subset import split_h5ad
 from adata.storage import detect_backend, open_store
 from adata.util.names import unique_names
+from adata.util.path import same_path
+from adata.util.staging import staged_outputs
 
 
 def split_store(
@@ -78,6 +85,13 @@ def split_store(
     for label, out_path, count in planned:
         console.print(f"  {label!r} -> {out_path} ({count} {axis})")
 
+    for _, out_path, _ in planned:
+        if same_path(file, out_path):
+            raise ValueError(
+                f"Output path is the input: {out_path}. Choose another "
+                "--output-dir."
+            )
+
     if dry_run:
         console.print("[yellow]Dry run: nothing written.[/]")
         return planned
@@ -86,20 +100,21 @@ def split_store(
 
     # One call for every group, so each matrix is read once rather than once
     # per group.
-    split_h5ad(
-        file,
-        [
-            (
-                out_path,
-                np.sort(groups[label]) if axis == "obs" else None,
-                np.sort(groups[label]) if axis == "var" else None,
-            )
-            for label, out_path, _ in planned
-        ],
-        chunk_rows=chunk_rows,
-        console=console,
-        zarr_format=zarr_format,
-    )
+    with staged_outputs([out_path for _, out_path, _ in planned]) as temps:
+        split_h5ad(
+            file,
+            [
+                (
+                    temp,
+                    np.sort(groups[label]) if axis == "obs" else None,
+                    np.sort(groups[label]) if axis == "var" else None,
+                )
+                for (label, _, _), temp in zip(planned, temps)
+            ],
+            chunk_rows=chunk_rows,
+            console=console,
+            zarr_format=zarr_format,
+        )
 
     if manifest:
         _write_manifest(file, output_dir, column, planned, console)
