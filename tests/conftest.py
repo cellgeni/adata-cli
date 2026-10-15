@@ -2,7 +2,7 @@
 
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence
 import tempfile
 import pytest
 import h5py
@@ -389,3 +389,110 @@ def write_10x_v2_h5(path: Path, genomes: dict) -> Path:
             group.create_dataset("genes", data=_fixed(ids))
             group.create_dataset("gene_names", data=_fixed(names))
     return path
+
+
+# ---------------------------------------------------------------------------
+# 10x / STARsolo Matrix Market folders
+#
+# Text written by hand, not by our writer, so a bug shared by the two cannot
+# hide: genes x cells, 1-based, entries in barcode order unless asked
+# otherwise.
+
+
+def write_mtx_file(
+    path: Path,
+    counts: np.ndarray,
+    *,
+    gz: bool = False,
+    order: str = "cell",
+    field: str = "integer",
+    duplicates: int = 0,
+    comments: Sequence[str] = (),
+    seed: int = 0,
+) -> Path:
+    """`counts` is cells x features; written as features x cells."""
+    import gzip
+
+    cells, features = np.nonzero(counts)
+    values = counts[cells, features]
+    entries = list(zip(features + 1, cells + 1, values))
+    if order == "gene":
+        entries.sort(key=lambda e: (e[0], e[1]))
+    elif order == "shuffled":
+        np.random.default_rng(seed).shuffle(entries)
+    if duplicates:
+        # Split values in two: the file sums back to `counts`.
+        split = []
+        for i, (g, c, v) in enumerate(entries):
+            if i < duplicates and v > 1:
+                split += [(g, c, v - 1), (g, c, 1)]
+            else:
+                split.append((g, c, v))
+        entries = split
+    fmt = (lambda v: f"{float(v)!r}") if field == "real" else (lambda v: str(int(v)))
+    lines = [f"%%MatrixMarket matrix coordinate {field} general", *comments]
+    lines.append(f"{counts.shape[1]} {counts.shape[0]} {len(entries)}")
+    lines += [f"{g} {c} {fmt(v)}" for g, c, v in entries]
+    data = ("\n".join(lines) + "\n").encode()
+    path.write_bytes(gzip.compress(data) if gz else data)
+    return path
+
+
+def _write_text(path: Path, lines: Sequence[str], gz: bool) -> Path:
+    import gzip
+
+    data = ("".join(f"{line}\n" for line in lines)).encode()
+    path.write_bytes(gzip.compress(data) if gz else data)
+    return path
+
+
+def write_10x_mtx(
+    folder: Path,
+    counts: np.ndarray,
+    *,
+    barcodes: Sequence[str],
+    ids: Sequence[str],
+    names: Sequence[str],
+    types: Optional[Sequence[str]] = None,
+    layout: str = "cr3",
+    prefix: str = "",
+    **matrix: Any,
+) -> Path:
+    """A matrix folder in one of the layouts Cell Ranger and STARsolo write.
+
+    `cr3`: gzipped, features.tsv with id, name, type. `cr2`: plain,
+    genes.tsv with id and name. `starsolo`: plain, three columns.
+    `starsolo2col`: plain, two columns, as older STARsolo wrote.
+    """
+    gz = layout == "cr3"
+    ext = ".gz" if gz else ""
+    folder.mkdir(parents=True, exist_ok=True)
+    if layout in ("cr3", "starsolo"):
+        kinds = types or ["Gene Expression"] * len(ids)
+        rows = [f"{i}\t{n}\t{t}" for i, n, t in zip(ids, names, kinds)]
+        _write_text(folder / f"{prefix}features.tsv{ext}", rows, gz)
+    else:
+        rows = [f"{i}\t{n}" for i, n in zip(ids, names)]
+        name = "genes.tsv" if layout == "cr2" else "features.tsv"
+        _write_text(folder / f"{prefix}{name}{ext}", rows, gz)
+    _write_text(folder / f"{prefix}barcodes.tsv{ext}", barcodes, gz)
+    write_mtx_file(folder / f"{prefix}matrix.mtx{ext}", counts, gz=gz, **matrix)
+    return folder
+
+
+def write_starsolo_velocyto(
+    folder: Path,
+    layers: Dict[str, np.ndarray],
+    *,
+    barcodes: Sequence[str],
+    ids: Sequence[str],
+    names: Sequence[str],
+) -> Path:
+    """STARsolo's Velocyto/raw: one .mtx per layer over shared barcodes and features."""
+    folder.mkdir(parents=True, exist_ok=True)
+    rows = [f"{i}\t{n}\tGene Expression" for i, n in zip(ids, names)]
+    _write_text(folder / "features.tsv", rows, False)
+    _write_text(folder / "barcodes.tsv", barcodes, False)
+    for name, counts in layers.items():
+        write_mtx_file(folder / f"{name}.mtx", counts)
+    return folder

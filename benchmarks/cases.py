@@ -89,9 +89,10 @@ class Case:
     #: Report the output's size against the input's, as before -> after. For
     #: cases whose point is what they do to the file's size.
     compare_size: bool = False
-    #: An auxiliary input the case needs, e.g. the CSV an import reads.
-    #: Built once from the first input and offered to CLI contenders as
-    #: `{sidecar_csv}` and to scripts as $BENCH_SIDECAR_CSV.
+    #: An auxiliary input the case needs: "csv", the CSV an import reads, or
+    #: "10x-mtx", an MTX folder of the first input's counts. Built once from
+    #: the first input and offered to CLI contenders as `{sidecar}` and to
+    #: scripts as $BENCH_SIDECAR (`{sidecar_csv}` and $BENCH_SIDECAR_CSV too).
     sidecar: Optional[str] = None
     tags: List[str] = field(default_factory=list)
 
@@ -457,6 +458,35 @@ CASES: List[Case] = [
                 ),
             ),
         ],
+    ),
+    Case(
+        name="import-10x-mtx",
+        question=(
+            "Read a gzipped Cell Ranger 3 MTX folder of the same counts into "
+            "an h5ad. adata-cli streams it in two passes and keeps integer "
+            "counts; scanpy loads it and converts them to float32."
+        ),
+        sidecar="10x-mtx",
+        contenders=[
+            Contender(
+                "adata-cli",
+                argv=[
+                    "adata", "convert", "{sidecar}", "-o", "{output}",
+                    "--compression", COMPRESSION,
+                ],
+            ),
+            Contender(
+                "scanpy",
+                env="scanpy",
+                script=_py(
+                    "import os, scanpy as sc\n"
+                    "obj = sc.read_10x_mtx(os.environ['BENCH_SIDECAR'], "
+                    "gex_only=False, make_unique=False)\n"
+                    "obj.write_h5ad(OUT, compression=COMPRESSION)\n"
+                ),
+            ),
+        ],
+        tags=["headline"],
     ),
     # -- concat, outer ------------------------------------------------------
     Case(

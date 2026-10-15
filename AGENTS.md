@@ -92,8 +92,12 @@ Each layer calls only the layers below it:
   - add a scanpy comparison in `tests/test_external_readers.py`.
 
   Content sniffing runs before extensions, because extensions lie (`.h5`).
+  A format with no extension, such as an MTX folder (`10x-mtx`), is chosen as
+  an output only with `--to`.
 - **`formats/`**: the per-file-type halves of `export` and `import`: npy, mtx,
-  csv, json and images.
+  csv, json and images. `mtx.py` is a streaming Matrix Market codec (two
+  passes in, block writes out) shared by `import`/`export sparse` and the
+  `10x-mtx` converter; `textio.py` holds its gzip-aware block I/O.
 - **`util/`**: `staging.py` and `path.py` (below), plus `names.py`.
 
 ## Rules the code depends on

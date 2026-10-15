@@ -526,6 +526,72 @@ def test_10x_export_reads_grow_linearly(tmp_path):
     assert_grows_linearly(measure, what="convert h5ad to 10x h5", axis="n_barcodes")
 
 
+def _mtx_folder(path: Path, n: int, n_features: int = 8, order: str = "cell") -> Path:
+    from tests.conftest import write_10x_mtx
+
+    counts = np.random.default_rng(0).poisson(0.5, (n, n_features))
+    return write_10x_mtx(
+        path, counts,
+        barcodes=[f"BC{i:08d}-1" for i in range(n)],
+        ids=[f"ENSG{i}" for i in range(n_features)],
+        names=[f"G{i}" for i in range(n_features)],
+        types=["Gene Expression"] * (n_features - 2) + ["Antibody Capture"] * 2,
+        order=order,
+    )
+
+
+@pytest.mark.parametrize(
+    "order,extra",
+    [("cell", {}), ("shuffled", {}), ("cell", {"split_feature_types": True})],
+)
+def test_10x_mtx_import_work_grows_linearly(tmp_path, monkeypatch, order, extra):
+    """Sorted, shuffled through buckets, or split among outputs: linear in nnz."""
+    import adata.formats.mtx as mtx_module
+    from adata.commands.convert import convert_store
+    from adata.conversion import Options
+
+    monkeypatch.setattr(mtx_module, "DEFAULT_CHUNK", 64)
+    tag = f"{order}{len(extra)}"
+
+    def measure(n: int) -> int:
+        source = _mtx_folder(tmp_path / f"mx{tag}{n}", n, order=order)
+        with count_io() as io:
+            convert_store(
+                source, tmp_path / f"omx{tag}{n}.h5ad", QUIET, options=Options(**extra)
+            )
+        return io.work
+
+    assert_grows_linearly(
+        measure, what=f"convert 10x mtx ({order}, {extra}) to h5ad", axis="n_barcodes"
+    )
+
+
+def test_10x_mtx_import_writes_in_blocks_not_per_barcode(tmp_path):
+    from adata.commands.convert import convert_store
+
+    def measure(n: int) -> int:
+        source = _mtx_folder(tmp_path / f"mw{n}", n)
+        with count_io() as io:
+            convert_store(source, tmp_path / f"omw{n}.h5ad", QUIET)
+        return io.h5_write_calls
+
+    assert_independent_of(measure, what="convert 10x mtx write calls", axis="n_barcodes")
+
+
+def test_10x_mtx_export_reads_each_block_once(tmp_path):
+    """One read of indices and of data per block of cells, not per cell."""
+    from adata.commands.convert import convert_store
+
+    def measure(n: int) -> int:
+        h5ad = tmp_path / f"me{n}.h5ad"
+        convert_store(_mtx_folder(tmp_path / f"me{n}", n), h5ad, QUIET)
+        with count_io() as io:
+            convert_store(h5ad, tmp_path / f"ome{n}", QUIET, dst_format="10x-mtx")
+        return io.calls
+
+    assert_independent_of(measure, what="convert h5ad to 10x mtx read calls", axis="n_obs")
+
+
 def test_split_reads_grow_linearly_in_group_count(tmp_path, monkeypatch):
     """Splitting into k groups must stay linear in k at fixed store size.
 
