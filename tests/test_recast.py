@@ -483,7 +483,7 @@ def test_inplace_replaces_the_source(tmp_path):
     got = ad.read_h5ad(store)
     assert got.X.dtype == np.dtype("float32")
     assert np.array_equal(got.X.toarray(), matrix.toarray().astype("float32"))
-    assert not list(tmp_path.glob("*recast-tmp*")), "temp file left behind"
+    assert not list(tmp_path.glob("*adata-*")), "temp file left behind"
 
 
 def test_converting_to_zarr_keeps_the_values(tmp_path):

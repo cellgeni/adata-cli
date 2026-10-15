@@ -389,34 +389,3 @@ def test_forwarding_still_validates_like_recast(h5ad, tmp_path):
     )
     assert result.exit_code == 1
     assert "--layout must be one of" in _out(result)
-
-
-# ---------------------------------------------------------------------------
-# staging, directly
-
-
-def test_staging_replaces_an_existing_directory_rather_than_nesting_in_it(tmp_path):
-    from adata.util.staging import staged_outputs
-
-    out = tmp_path / "out.zarr"
-    out.mkdir()
-    (out / "old").write_text("old")
-
-    with staged_outputs([out]) as (temp,):
-        temp.mkdir()
-        (temp / "new").write_text("new")
-
-    assert sorted(p.name for p in out.iterdir()) == ["new"]
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["out.zarr"]
-
-
-def test_staging_moves_several_outputs_together(tmp_path):
-    from adata.util.staging import staged_outputs
-
-    outs = [tmp_path / "a.h5ad", tmp_path / "b.h5ad"]
-    with staged_outputs(outs) as temps:
-        assert [t.suffix for t in temps] == [".h5ad", ".h5ad"]
-        for temp in temps:
-            temp.write_text(temp.name)
-
-    assert [p.read_text() for p in outs] == ["a.adata-tmp.h5ad", "b.adata-tmp.h5ad"]

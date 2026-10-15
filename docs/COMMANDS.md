@@ -83,6 +83,13 @@ adata subset data.h5ad --inplace --obs barcodes.txt
 `raw/` is carried over and matched against its **own** var axis, which usually
 holds more genes than the main object.
 
+The selection is resolved before anything is written, and the output is
+written beside its destination (`out.adata-tmp.h5ad`) and moved into place
+only once complete. A query that fails therefore leaves nothing behind, and an
+existing output (or, with `--inplace`, the source) is replaced only once its
+successor is finished. The output path may not name the input; use
+`--inplace`.
+
 ## `convert`
 
 Change a store's format. The output's extension picks the format; `--to`
@@ -225,8 +232,9 @@ bigger than it started. `indices` and `indptr` keep their own widths, which
 can differ: a narrow matrix with more than 2^31 nonzeros needs int64 offsets
 over int32 coordinates, and both are range-checked before writing.
 
-The output path may not name the input; use `--inplace`, which writes to a
-temporary file and swaps it in only once the conversion has finished.
+The output path may not name the input; use `--inplace`. Either way the new
+store is written beside its destination and moved into place only once the
+conversion has finished, so a failure leaves the original untouched.
 
 Transposing streams by default and works on matrices too large to load, at
 the cost of two extra passes over the nonzeros. `--in-memory` is faster when
@@ -256,6 +264,10 @@ adata split data.h5ad --by cluster -o out/ --min-size 50
 | `--manifest / --no-manifest` | Write a CSV listing the outputs (default on) |
 
 Labels are sanitised for use as filenames; collisions get a numeric suffix.
+Every store is written beside its destination and moved into place only once
+all of them are complete, and the manifest is written last, so a split that
+fails leaves no partial stores. An output that would land on the input is
+refused.
 
 ## `concat`
 
