@@ -3,6 +3,82 @@
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
+## 0.8.0
+
+Adds 10x Genomics and STARsolo Matrix Market folders to `adata convert`, in
+both directions, velocyto's included. They are read in two streaming passes,
+so a folder's size is not a limit. `import sparse` and `export sparse` move
+onto the same reader and writer, which changes what `import sparse` writes
+and fixes a symmetric file being read as half its matrix.
+
+### Added
+
+- **`adata convert` reads 10x and STARsolo MTX folders**
+  ([#24](https://github.com/cellgeni/adata-cli/issues/24)). A folder
+  holding `matrix.mtx`, `barcodes.tsv` and `features.tsv` (or Cell Ranger
+  2's `genes.tsv`), each plain or gzipped, is recognised whatever its name:
+  - Cell Ranger 3 and later;
+  - Cell Ranger 2, with one subfolder per genome, picked with `--genome`;
+  - STARsolo `Gene/`, `GeneFull/` and the like;
+  - STARsolo `Velocyto/raw/`, whose `spliced`, `unspliced` and `ambiguous`
+    matrices become layers of those names, with X a copy of `spliced`;
+  - any of these with every file under one GEO-style prefix
+    (`GSM123_matrix.mtx.gz`).
+
+  The result matches `scanpy.read_10x_mtx(gex_only=False)` column for
+  column, checked against scanpy in CI, except that integer counts stay
+  integers. The 10x HDF5 flags apply (`--genome`, `--var-names`,
+  `--make-unique`, `--feature-type`, `--split-feature-types`), as does
+  `--compression`. The first pass checks the whole folder before any output
+  exists; the second writes X, straight through when entries are in barcode
+  order, as Cell Ranger and STARsolo write them, and through on-disk buckets
+  when they are not. On 50 million entries this took the time scanpy did, at
+  under a fifth of its peak memory, and the peak did not grow with the input.
+
+- **`adata convert --to 10x-mtx` writes a Cell Ranger 3 folder**
+  ([#24](https://github.com/cellgeni/adata-cli/issues/24)): gzipped (or not,
+  with `--compression none`), three feature columns, entries in barcode
+  order, from X or the matrix `--layer` names. Feature ids and types come
+  from var as for the 10x HDF5 export. A folder imported by `convert`
+  exports with Cell Ranger's `%metadata_json` intact.
+
+- **A benchmark case for MTX import** ([#49](https://github.com/cellgeni/adata-cli/pull/49)), against scanpy's
+  `read_10x_mtx`.
+
+### Changed
+
+- **`import sparse` keeps integer values as integers**
+  ([#24](https://github.com/cellgeni/adata-cli/issues/24)). An `integer`
+  Matrix Market file becomes int32, or int64 when a value needs it; a `real`
+  one becomes float64; a `pattern` one becomes int32 ones. All three were
+  float32, which cannot hold counts above 2^24 exactly. `adata recast
+  --dtype float32` narrows on request. Duplicate entries are now summed, as
+  scipy does, and reported. The data is gzipped in an h5ad, and a parent
+  group made on the way (`layers`) is a proper dict.
+
+- **`import sparse` and `export sparse` stream** ([#48](https://github.com/cellgeni/adata-cli/pull/48)), and read or
+  write gzipped files (`.mtx.gz`). Import makes two passes and checks the whole file
+  before the store is touched; it used to build a Python object per entry.
+  Export reads `indices` and `data` once per block, where it read both once
+  per row, and writes floats with the digits to read back exactly and whole
+  numbers as integers.
+
+### Fixed
+
+- **A `symmetric` Matrix Market file was read as half its matrix**
+  ([#48](https://github.com/cellgeni/adata-cli/pull/48)). It
+  stores one triangle and means both, and `import sparse` read it as
+  `general`. `symmetric`, `skew-symmetric`, `hermitian`, `complex` and dense
+  `array` files are now refused by name.
+
+- **`import sparse` overflowed `indptr` past 2^31 entries** ([#48](https://github.com/cellgeni/adata-cli/pull/48)); it
+  widens to int64 when needed.
+
+- **`recast --layout` spent time in proportion to the matrix on every
+  block** of a streaming transpose ([#47](https://github.com/cellgeni/adata-cli/pull/47)): pass 1 counted over every output row per
+  block, and pass 2 compared each block against every bucket. Both now cost
+  what the block costs.
+
 ## 0.7.1
 
 Fixes ways that `subset`, `recast`, `split` and `concat` could lose or
