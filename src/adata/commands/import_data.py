@@ -60,7 +60,9 @@ def import_object(
     console: Console,
 ) -> None:
     target_file = _prepare_target_path(file, output_file, inplace, console)
-    ext = input_file.suffix.lower()
+    suffixes = [x.lower() for x in input_file.suffixes]
+    # A gzipped matrix is still a matrix: `counts.mtx.gz` imports as `.mtx`.
+    ext = suffixes[-2] if len(suffixes) > 1 and suffixes[-1] == ".gz" else input_file.suffix.lower()
 
     if ext not in EXTENSION_FORMAT:
         raise ValueError(

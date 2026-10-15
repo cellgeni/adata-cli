@@ -796,6 +796,24 @@ def test_export_sparse_reads_grow_linearly_in_nonzeros(tmp_path, in_memory):
     )
 
 
+def test_export_sparse_reads_each_block_once_not_each_row(tmp_path):
+    """One read of `indices` and of `data` per block, however many rows.
+
+    The streaming export used to read both once per row: two small reads per
+    cell, each decompressing a chunk. Counting elements cannot see that --
+    the same elements are read either way -- so this counts calls.
+    """
+
+    def measure(n: int) -> int:
+        source = _store(tmp_path / f"ec{n}.h5ad", name="c", n_obs=n, n_var=4)
+        with count_io() as io:
+            export_mtx(source, "X", tmp_path / f"ec{n}.mtx", None, 1_000_000,
+                       False, QUIET)
+        return io.calls
+
+    assert_independent_of(measure, what="export sparse read calls", axis="n_obs")
+
+
 def test_export_dict_reads_grow_linearly_in_key_count(tmp_path):
     def measure(n: int) -> int:
         source = _store_with_uns_keys(tmp_path / f"ej{n}.h5ad", n)
@@ -874,6 +892,21 @@ def test_import_sparse_reads_grow_linearly_in_nonzeros(tmp_path):
         return io.work
 
     assert_grows_linearly(measure, what="import sparse", axis="nnz")
+
+
+def test_import_sparse_writes_in_blocks_not_per_row(tmp_path):
+    """Entries are appended a block at a time, whatever the number of rows."""
+    sparse_io = pytest.importorskip("scipy.io")
+
+    def measure(n: int) -> int:
+        source = _store(tmp_path / f"iw{n}.h5ad", name="m", n_obs=n, n_var=4)
+        mtx = tmp_path / f"iw{n}.mtx"
+        sparse_io.mmwrite(str(mtx), sparse.csr_matrix(np.ones((n, 4), dtype="int32")))
+        with count_io() as io:
+            import_object(source, "layers/imported", mtx, None, True, None, QUIET)
+        return io.h5_write_calls
+
+    assert_independent_of(measure, what="import sparse write calls", axis="n_obs")
 
 
 def test_import_dict_reads_grow_linearly_in_key_count(tmp_path):
