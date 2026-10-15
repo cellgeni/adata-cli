@@ -42,7 +42,8 @@ and fixes a symmetric file being read as half its matrix.
   from var as for the 10x HDF5 export. A folder imported by `convert`
   exports with Cell Ranger's `%metadata_json` intact.
 
-- **A benchmark case for MTX import** against scanpy's `read_10x_mtx`.
+- **A benchmark case for MTX import** ([#49](https://github.com/cellgeni/adata-cli/pull/49)), against scanpy's
+  `read_10x_mtx`.
 
 ### Changed
 
@@ -55,8 +56,8 @@ and fixes a symmetric file being read as half its matrix.
   scipy does, and reported. The data is gzipped in an h5ad, and a parent
   group made on the way (`layers`) is a proper dict.
 
-- **`import sparse` and `export sparse` stream**, and read or write gzipped
-  files (`.mtx.gz`). Import makes two passes and checks the whole file
+- **`import sparse` and `export sparse` stream** ([#48](https://github.com/cellgeni/adata-cli/pull/48)), and read or
+  write gzipped files (`.mtx.gz`). Import makes two passes and checks the whole file
   before the store is touched; it used to build a Python object per entry.
   Export reads `indices` and `data` once per block, where it read both once
   per row, and writes floats with the digits to read back exactly and whole
@@ -64,16 +65,17 @@ and fixes a symmetric file being read as half its matrix.
 
 ### Fixed
 
-- **A `symmetric` Matrix Market file was read as half its matrix.** It
+- **A `symmetric` Matrix Market file was read as half its matrix**
+  ([#48](https://github.com/cellgeni/adata-cli/pull/48)). It
   stores one triangle and means both, and `import sparse` read it as
   `general`. `symmetric`, `skew-symmetric`, `hermitian`, `complex` and dense
   `array` files are now refused by name.
 
-- **`import sparse` overflowed `indptr` past 2^31 entries**; it widens to
-  int64 when needed.
+- **`import sparse` overflowed `indptr` past 2^31 entries** ([#48](https://github.com/cellgeni/adata-cli/pull/48)); it
+  widens to int64 when needed.
 
 - **`recast --layout` spent time in proportion to the matrix on every
-  block** of a streaming transpose: pass 1 counted over every output row per
+  block** of a streaming transpose ([#47](https://github.com/cellgeni/adata-cli/pull/47)): pass 1 counted over every output row per
   block, and pass 2 compared each block against every bucket. Both now cost
   what the block costs.
 
