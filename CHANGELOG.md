@@ -3,7 +3,14 @@
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
-## Unreleased
+## 0.7.0
+
+Adds format conversion. `adata convert` now changes a store's format --
+between h5ad and Zarr v2/v3, and to and from 10x Genomics HDF5 matrices --
+and the matrix command that used to be `convert` is `recast`; its old
+spelling keeps working, with a warning, until 1.0.0. Also fixes four ways a
+store could fail or bloat on its way between backends, one of which left
+`recast --layout` outputs three times the size they should be.
 
 ### Added
 
@@ -72,7 +79,7 @@ Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
   read, and copying one raised `TypeError: float() argument must be a string
   or a real number, not 'Empty'`. Any `None` in `uns` was enough, so
   `subset in.h5ad -o out.zarr` failed on such stores, and so did `split`,
-  `import` and `convert` writing Zarr from them. Nulls are now written in the
+  `import` and `recast` writing Zarr from them. Nulls are now written in the
   target's own spelling: an empty dataspace on HDF5, a 0-d bool on Zarr, as
   anndata does. The 0-d bool that a Zarr store uses for a missing `raw` now
   becomes an empty dataspace in an h5ad too, rather than a stray `False`.
@@ -85,7 +92,7 @@ Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 
 - **An empty array chunked larger than itself could not be written to
   h5ad.** Zarr allows a chunk bigger than its array and h5py does not, so a
-  zero-length array copied from Zarr failed, and so did `convert --dtype` or
+  zero-length array copied from Zarr failed, and so did `recast --dtype` or
   `--layout` on an all-zero sparse matrix from a compressed h5ad. A
   zero-length dataset now lets HDF5 choose its own chunks.
 
