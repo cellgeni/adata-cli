@@ -100,8 +100,8 @@ def _command_path(tokens: List[str]) -> List[str]:
 
 _GROUPS = {"export", "import"}
 _TOP_LEVEL = {
-    "view", "ls", "subset", "split", "concat", "convert", "recast", "create",
-    "export", "import",
+    "view", "info", "ls", "subset", "split", "concat", "convert", "recast",
+    "create", "export", "import",
 }
 _SUBCOMMANDS = {
     "export": {"dataframe", "array", "sparse", "dict", "image"},
@@ -318,3 +318,91 @@ def test_every_command_is_named_in_the_app_help(name):
     assert name in help_text, (
         f"`{name}` is missing from the app help string in cli.py: {help_text!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# docstring examples
+#
+# The checks above cover the Markdown docs, but several `Examples:` blocks in
+# cli.py drifted after the rename to `adata`: `export sparse`, `export dict`
+# and `export image` still showed a `h5ad` prefix that never existed, and two
+# of them took a positional output the commands reject. Nothing in the suite
+# read the docstrings, so nothing caught it. The `--help` text is parsed the
+# same way the docs are: example lines must use the `adata` name, resolve to
+# a real command, and only use options the command accepts. Walking the real
+# Click tree means a command added tomorrow is covered automatically.
+
+
+def _help_examples() -> List[Tuple[str, str]]:
+    """Every example-looking command line inside any command's `--help`."""
+    found: List[Tuple[str, str]] = []
+
+    def walk(command: click.Command, path: List[str]) -> None:
+        for raw in (command.help or "").splitlines():
+            line = raw.strip()
+            # Same cleanup as the docs parser: comments, pipes, redirections.
+            line = re.split(r"\s+#\s", line)[0].strip()
+            line = re.split(r"\s*[|>]\s*", line)[0].strip()
+            if line.startswith(("adata ", "h5ad ")):
+                found.append((line, "cli.py:" + ("/".join(path) or "<app>")))
+        if isinstance(command, click.Group):
+            for name, sub in command.commands.items():
+                if getattr(sub, "hidden", False):
+                    continue
+                walk(sub, path + [name])
+
+    walk(ROOT, [])
+    return found
+
+
+HELP_EXAMPLES = _help_examples()
+
+
+def test_the_help_text_contains_examples_to_check():
+    """A parsing regression here would silently make the test below vacuous."""
+    assert len(HELP_EXAMPLES) > 10, HELP_EXAMPLES
+
+
+def _problems_with_example(line: str) -> List[str]:
+    """What is wrong with one `adata ...` example line from a docstring."""
+    if line.startswith("h5ad "):
+        return [
+            "uses the pre-rename `h5ad` command name; the CLI is `adata` now"
+        ]
+    tokens = line.split()
+    path = _command_path(tokens)
+    if not path:
+        return [f"could not identify a command in {line!r}"]
+    try:
+        command = _lookup(path)
+    except KeyError as exc:
+        return [str(exc)]
+    accepted = _options(command)
+    problems = []
+    for token in tokens[len(path) + 1 :]:
+        if token.startswith("--"):
+            option = token.split("=")[0]
+            if _PLACEHOLDER.search(option):
+                continue
+            if option not in accepted:
+                problems.append(
+                    f"uses {option}, which `adata {' '.join(path)}` "
+                    "does not accept"
+                )
+        elif re.fullmatch(r"-[A-Za-z]", token):
+            if token not in accepted:
+                problems.append(
+                    f"uses {token}, which `adata {' '.join(path)}` "
+                    "does not accept"
+                )
+    return problems
+
+
+@pytest.mark.parametrize(
+    "line,source",
+    HELP_EXAMPLES,
+    ids=[f"{src}:{line[:60]}" for line, src in HELP_EXAMPLES],
+)
+def test_help_examples_name_real_commands_and_options(line, source):
+    problems = _problems_with_example(line)
+    assert not problems, f"{source}: `{line}` -- " + "; ".join(problems)

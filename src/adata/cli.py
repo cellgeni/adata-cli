@@ -1137,9 +1137,9 @@ def export_sparse(
     Export a sparse matrix (CSR/CSC) to Matrix Market (.mtx) format.
 
     Examples:
-        h5ad export sparse data.h5ad X matrix.mtx
-        h5ad export sparse data.h5ad layers/counts counts.mtx
-        h5ad export sparse data.h5ad X --head 100
+        adata export sparse data.h5ad X -o matrix.mtx
+        adata export sparse data.h5ad layers/counts -o counts.mtx
+        adata export sparse data.h5ad X --head 100
     """
 
     try:
@@ -1187,8 +1187,8 @@ def export_dict(
     Export a dict/group or scalar to JSON format.
 
     Examples:
-        h5ad export dict data.h5ad uns metadata.json
-        h5ad export dict data.h5ad uns/colors colors.json
+        adata export dict data.h5ad uns metadata.json
+        adata export dict data.h5ad uns/colors colors.json
     """
 
     try:
@@ -1227,7 +1227,7 @@ def export_image(
     The array should be 2D (H,W) or 3D (H,W,C) with C in {1,3,4}.
 
     Examples:
-        h5ad export image data.h5ad uns/spatial/image tissue.png
+        adata export image data.h5ad uns/spatial/image -o tissue.png
     """
 
     try:
@@ -1371,8 +1371,8 @@ def import_array(
     Dimensions are validated against existing obs/var.
 
     Examples:
-        h5ad import array data.h5ad obsm/X_pca pca.npy -o output.h5ad
-        h5ad import array data.h5ad X matrix.npy --inplace
+        adata import array data.h5ad obsm/X_pca pca.npy -o output.h5ad
+        adata import array data.h5ad X matrix.npy --inplace
     """
     from adata.commands.import_data import _import_npy
 
@@ -1427,8 +1427,8 @@ def import_sparse(
     Dimensions are validated against existing obs/var.
 
     Examples:
-        h5ad import sparse data.h5ad X matrix.mtx -o output.h5ad
-        h5ad import sparse data.h5ad layers/counts counts.mtx --inplace
+        adata import sparse data.h5ad X matrix.mtx -o output.h5ad
+        adata import sparse data.h5ad layers/counts counts.mtx --inplace
     """
     from adata.commands.import_data import _import_mtx
 
@@ -1481,8 +1481,8 @@ def import_dict(
     Import a JSON file into uns or other dict-like groups.
 
     Examples:
-        h5ad import dict data.h5ad uns/metadata config.json -o output.h5ad
-        h5ad import dict data.h5ad uns settings.json --inplace
+        adata import dict data.h5ad uns/metadata config.json -o output.h5ad
+        adata import dict data.h5ad uns settings.json --inplace
     """
     from adata.commands.import_data import _import_json
 
