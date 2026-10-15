@@ -46,6 +46,7 @@ from adata.storage import (
     is_group,
     open_store,
 )
+from adata.util.staging import staged_outputs
 
 MERGE_STRATEGIES = ("same", "unique", "first", "only")
 #: What the CLI accepts. "drop" is the default and maps to no merge at all.
@@ -906,7 +907,11 @@ def concat_on_disk(
         # half-written store behind.
         check_matrix_encodings(roots, console)
 
-        with open_store(output, "w", zarr_format=zarr_format) as dst_store:
+        # Written beside the output and renamed into place once complete, so
+        # a failure part way leaves nothing that reads as a finished store.
+        with staged_outputs([output]) as (temp,), open_store(
+            temp, "w", zarr_format=zarr_format
+        ) as dst_store:
             dst = dst_store.root
             _write_obs(
                 dst, roots, target_obs, obs_counts, join, label, input_keys, console

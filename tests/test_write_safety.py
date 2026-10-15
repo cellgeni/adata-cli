@@ -220,3 +220,21 @@ def test_split_onto_its_own_input_is_refused(tmp_path):
     assert "Output path is the input" in _out(result)
     assert _read(store).shape == (4, 4)
     assert not (tmp_path / "b.h5ad").exists()
+
+
+# ---------------------------------------------------------------------------
+# concat
+
+
+def test_concat_leaves_nothing_behind_if_writing_fails(tmp_path, suffix, monkeypatch):
+    from adata.core import concat as concat_mod
+
+    a = _store(tmp_path / f"a{suffix}")
+    b = _store(tmp_path / f"b{suffix}")
+    out = tmp_path / f"m{suffix}"
+    monkeypatch.setattr(concat_mod, "_write_matrices", _fail)
+
+    result = runner.invoke(app, ["concat", str(a), str(b), "-o", str(out)])
+    assert result.exit_code == 1
+    assert not out.exists()
+    assert _debris(tmp_path) == []
