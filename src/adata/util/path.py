@@ -17,3 +17,15 @@ def same_path(left: Path, right: Path) -> bool:
         return Path(left).resolve() == Path(right).resolve()
     except OSError:  # pragma: no cover - unresolvable path
         return Path(left).absolute() == Path(right).absolute()
+
+
+def is_zarr_path(path: Path) -> bool:
+    """Is this an existing Zarr store (v2 or v3), judged by its metadata files?"""
+    path = Path(path)
+    if not path.exists() or not path.is_dir():
+        return False
+    if (path / "zarr.json").exists():
+        return True
+    if (path / ".zgroup").exists() or (path / ".zattrs").exists():
+        return True
+    return False

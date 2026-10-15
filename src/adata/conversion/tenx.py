@@ -32,23 +32,32 @@ import numpy as np
 from rich.console import Console
 
 from adata.conversion.base import ConversionPlan, Converter, Options
+from adata.conversion.features import (
+    STRING_STEP,
+    ExportFeatures,
+    Target,
+    cellranger_meta,
+    check_import_options,
+    describe_import,
+    plan_matrix_source,
+    plan_targets,
+    resolve,
+    write_obs_index,
+    write_var,
+)
 from adata.core.recast import describe, sparsify, transpose_sparse_streaming
 from adata.core.subset import fan_out_sparse_matrix
 from adata.elements import spec
 from adata.elements.read import (
-    dataframe_columns,
     decode_str_array,
     element_len,
     read_str_all,
     read_str_chunk,
     resolve_index,
 )
-from adata.elements.strings import string_dtype_for
 from adata.elements.write import (
     ensure_anndata_skeleton,
     set_column_order,
-    write_categorical,
-    write_dataframe_header,
     write_dense,
     write_mapping,
     write_scalar,
@@ -57,14 +66,10 @@ from adata.elements.write import (
 from adata.storage import (
     GZIP_LEVEL,
     copy_dataset,
-    create_dataset,
     has_valid_anndata_root_attrs,
     is_dataset,
-    is_group,
-    is_zarr_group,
     open_store,
 )
-from adata.util.names import count_duplicates, make_index_unique, unique_names
 
 #: What a group must hold to be a matrix, in each layout.
 _V3_KEYS = frozenset({"barcodes", "data", "indices", "indptr", "shape", "features"})
@@ -87,10 +92,6 @@ _RUN_ATTRS = (
     "version",
 )
 
-#: Rows of a string column handled per read when streaming one.
-_STRING_STEP = 1 << 18
-
-VAR_NAMES = ("gene_symbols", "gene_ids")
 
 
 # ---------------------------------------------------------------------------
@@ -260,23 +261,6 @@ class _AsCsr:
 # import
 
 
-@dataclass
-class _Output:
-    """One AnnData to write: which features it keeps, and their annotation."""
-
-    label: Optional[str]
-    keep: Optional[np.ndarray]
-    var_names: List[str]
-    columns: Dict[str, np.ndarray]
-
-
-def _type_counts(types: np.ndarray) -> List[Tuple[str, int]]:
-    """Feature types in order of first appearance, with how many of each."""
-    labels, first, counts = np.unique(types, return_index=True, return_counts=True)
-    order = np.argsort(first)
-    return [(str(labels[i]), int(counts[i])) for i in order]
-
-
 class TenxImport(Converter):
     options = frozenset(
         {"--genome", "--var-names", "--make-unique", "--feature-type",
@@ -291,13 +275,7 @@ class TenxImport(Converter):
         dst_format: str,
         options: Options,
     ) -> ConversionPlan:
-        if options.var_names not in VAR_NAMES:
-            raise ValueError(f"--var-names must be one of: {', '.join(VAR_NAMES)}.")
-        if options.feature_type is not None and options.split_feature_types:
-            raise ValueError(
-                "--feature-type keeps one type and --split-feature-types writes "
-                "every type separately; pass one or the other."
-            )
+        check_import_options(options)
 
         with h5py.File(source, "r") as handle:
             matrix = _read_matrix(handle, options.genome)
@@ -324,49 +302,12 @@ class TenxImport(Converter):
             keep &= genomes == options.genome
 
         types = matrix.feature_types
-        groups: List[Tuple[Optional[str], np.ndarray]] = []
-        if options.feature_type is not None:
-            available = [t for t, _ in _type_counts(types)]
-            if options.feature_type not in available:
-                raise ValueError(
-                    f"No features of type {options.feature_type!r}; this file "
-                    f"has: {', '.join(available)}."
-                )
-            groups.append((options.feature_type, keep & (types == options.feature_type)))
-        elif options.split_feature_types:
-            for label, _ in _type_counts(types[keep]):
-                groups.append((label, keep & (types == label)))
-        else:
-            groups.append((None, keep))
-
-        stems = unique_names([label for label, _ in groups if label is not None])
-        outputs: List[Path] = []
-        targets: List[_Output] = []
-        warnings: List[str] = []
-        for label, mask in groups:
-            path = output
-            if options.split_feature_types:
-                path = output.with_name(f"{output.stem}.{stems[label]}{output.suffix}")
-            selection = None if mask.all() else np.flatnonzero(mask)
-            target = self._annotate(matrix, selection, options, label)
-            duplicated = count_duplicates(target.var_names)
-            if duplicated:
-                where = f" in {path.name}" if options.split_feature_types else ""
-                warnings.append(
-                    f"{duplicated:,} var names{where} repeat an earlier one. "
-                    "Pass --make-unique to suffix them as anndata's "
-                    "var_names_make_unique does."
-                )
-            outputs.append(path)
-            targets.append(target)
-
-        described = f"{matrix.n_barcodes:,} barcodes x {matrix.n_features:,} features"
-        if types is not None:
-            described += " (" + ", ".join(f"{t} {n:,}" for t, n in _type_counts(types)) + ")"
-        if len(outputs) > 1:
-            described += f", into {len(outputs)} outputs by feature type"
-        elif targets[0].keep is not None:
-            described += f", keeping {len(targets[0].keep):,} features"
+        outputs, targets, warnings = plan_targets(
+            output, matrix.names, matrix.columns, types, keep, options, noun="file"
+        )
+        described = describe_import(
+            matrix.n_barcodes, matrix.n_features, types, targets
+        )
 
         return ConversionPlan(
             source=source,
@@ -383,39 +324,12 @@ class TenxImport(Converter):
             },
         )
 
-    @staticmethod
-    def _annotate(
-        matrix: _Matrix,
-        keep: Optional[np.ndarray],
-        options: Options,
-        label: Optional[str],
-    ) -> _Output:
-        def pick(values: np.ndarray) -> np.ndarray:
-            return values if keep is None else values[keep]
-
-        columns = {key: pick(values) for key, values in matrix.columns.items()}
-        if options.var_names == "gene_ids":
-            # As scanpy's read_10x_mtx does it: ids become the names, and the
-            # symbols move into a column where the ids were.
-            index = list(columns["gene_ids"])
-            columns = {
-                ("gene_symbols" if key == "gene_ids" else key): (
-                    pick(matrix.names) if key == "gene_ids" else values
-                )
-                for key, values in columns.items()
-            }
-        else:
-            index = list(pick(matrix.names))
-        if options.make_unique:
-            index = make_index_unique(index)
-        return _Output(label=label, keep=keep, var_names=index, columns=columns)
-
     def write(
         self, plan: ConversionPlan, staged: Sequence[Path], console: Console
     ) -> None:
         detail = plan.detail
         matrix: _Matrix = detail["matrix"]
-        targets: List[_Output] = detail["targets"]
+        targets: List[Target] = detail["targets"]
 
         with h5py.File(plan.source, "r") as handle, ExitStack() as stack:
             group = handle[matrix.group]
@@ -428,7 +342,7 @@ class TenxImport(Converter):
             for root, target in zip(roots, targets):
                 with console.status("[cyan]Writing obs and var...[/]"):
                     _write_obs(group, root, detail["filtered_barcodes"])
-                    _write_var(root, target)
+                    write_var(root, target)
                 ensure_anndata_skeleton(root)
                 _write_uns(root, matrix)
 
@@ -443,18 +357,16 @@ class TenxImport(Converter):
 
 def _write_obs(group: h5py.Group, root: Any, filtered_barcodes: bool) -> None:
     """obs: the barcodes, streamed, and Space Ranger's `filtered_barcodes`."""
-    obs = root.create_group("obs")
-    spec.set_encoding(obs, spec.DATAFRAME)
-    obs.attrs["_index"] = "_index"
-
     barcodes = group["barcodes"]
     n = barcodes.shape[0]
-    backend = "zarr" if is_zarr_group(root) else "hdf5"
-    index = create_dataset(obs, "_index", shape=(n,), dtype=string_dtype_for(backend))
-    for lo in range(0, n, _STRING_STEP):
-        hi = min(lo + _STRING_STEP, n)
-        index[lo:hi] = np.asarray(_strings_slice(barcodes, lo, hi), dtype=object)
-    spec.set_encoding(index, spec.STRING_ARRAY)
+    obs = write_obs_index(
+        root,
+        n,
+        (
+            _strings_slice(barcodes, lo, min(lo + STRING_STEP, n))
+            for lo in range(0, n, STRING_STEP)
+        ),
+    )
 
     columns = []
     if filtered_barcodes:
@@ -465,27 +377,6 @@ def _write_obs(group: h5py.Group, root: Any, filtered_barcodes: bool) -> None:
 
 def _strings_slice(dataset: Any, lo: int, hi: int) -> List[str]:
     return [str(v) for v in decode_str_array(np.asarray(dataset[lo:hi]))]
-
-
-def _write_var(root: Any, target: _Output) -> None:
-    """var, with string columns encoded as anndata's writer would encode them.
-
-    anndata turns any string column with a repeated value into a categorical
-    when it writes (`strings_to_categoricals`), so an h5ad scanpy wrote from
-    the same file holds `feature_types` and `genome` as categoricals. Doing
-    the same keeps the two interchangeable, and those columns a few bytes
-    instead of a string per feature.
-    """
-    var = write_dataframe_header(root, "var", target.var_names, list(target.columns))
-    for key, values in target.columns.items():
-        if values.dtype.kind == "b":
-            write_dense(var, key, values)
-            continue
-        categories, codes = np.unique(values, return_inverse=True)
-        if len(categories) < len(values):
-            write_categorical(var, key, codes, list(categories))
-        else:
-            write_string_array(var, key, values)
 
 
 def _write_uns(root: Any, matrix: _Matrix) -> None:
@@ -521,22 +412,6 @@ def _write_value(parent: Any, key: str, value: Any) -> None:
 # export
 
 
-def _matrix_path(layer: Optional[str]) -> str:
-    """`--layer` as a path: X, raw/X, a layer's name, or layers/NAME."""
-    if layer is None or layer in ("X", "raw/X") or layer.startswith("layers/"):
-        return layer or "X"
-    return f"layers/{layer}"
-
-
-def _resolve(root: Any, path: str) -> Any:
-    node = root
-    for part in path.split("/"):
-        if not is_group(node) or part not in node:
-            raise KeyError(f"{path!r} not found in the store.")
-        node = node[part]
-    return node
-
-
 def _read_value(obj: Any) -> Any:
     """An AnnData element read back as the attribute value it came from."""
     enc = spec.encoding_type(obj)
@@ -552,15 +427,6 @@ def _read_value(obj: Any) -> Any:
     return value
 
 
-@dataclass
-class _Features:
-    ids: List[str]
-    names: List[str]
-    types: List[str]
-    genomes: List[str]
-    tags: Dict[str, List[str]]
-
-
 class TenxExport(Converter):
     options = frozenset(
         {"--layer", "--gene-ids-column", "--gene-names-column", "--feature-types-column"}
@@ -574,31 +440,11 @@ class TenxExport(Converter):
         dst_format: str,
         options: Options,
     ) -> ConversionPlan:
-        path = _matrix_path(options.layer)
         warnings: List[str] = []
+        matrix = plan_matrix_source(source, options, warnings)
         with open_store(source, "r", require_anndata=False) as store:
-            root = store.root
-            matrix = describe(_resolve(root, path))
-            var_path = "raw/var" if path.startswith("raw/") else "var"
-            var, obs = _resolve(root, var_path), _resolve(root, "obs")
-            obs_index, _ = resolve_index(obs, "obs")
-            var_index, index_name = resolve_index(var, "var")
-            n_obs, n_var = element_len(obs_index), element_len(var_index)
-            if matrix.shape != (n_obs, n_var):
-                raise ValueError(
-                    f"{path} is {matrix.shape[0]} x {matrix.shape[1]}, but obs has "
-                    f"{n_obs} and {var_path} has {n_var} entries."
-                )
-
-            features = _features(root, var, var_index, options, warnings)
-            attrs = _run_attrs(root)
-
-        if matrix.dtype.kind == "f":
-            warnings.append(
-                f"{path} holds {matrix.dtype} values. Cell Ranger writes integer "
-                "counts, and tools that read its output may expect them: export "
-                "a counts layer with --layer, or recast to int32 first."
-            )
+            attrs = _run_attrs(store.root)
+        path, n_obs, n_var = matrix.path, matrix.n_obs, matrix.n_var
 
         return ConversionPlan(
             source=source,
@@ -610,19 +456,19 @@ class TenxExport(Converter):
                 f"from {path}"
             ),
             warnings=warnings,
-            detail={"path": path, "features": features, "attrs": attrs},
+            detail={"path": path, "features": matrix.features, "attrs": attrs},
         )
 
     def write(
         self, plan: ConversionPlan, staged: Sequence[Path], console: Console
     ) -> None:
         detail = plan.detail
-        features: _Features = detail["features"]
+        features: ExportFeatures = detail["features"]
         with open_store(plan.source, "r", require_anndata=False) as store, h5py.File(
             staged[0], "w"
         ) as out:
             root = store.root
-            matrix = describe(_resolve(root, detail["path"]))
+            matrix = describe(resolve(root, detail["path"]))
             with console.status(f"[cyan]Copying {detail['path']}...[/]"):
                 group = _write_matrix(matrix, out)
             n_obs, n_var = matrix.shape
@@ -647,90 +493,10 @@ class TenxExport(Converter):
                 out.attrs[key] = value
 
 
-def _features(
-    root: Any,
-    var: Any,
-    var_index: Any,
-    options: Options,
-    warnings: List[str],
-) -> _Features:
-    """Work out each feature's id, name, type and genome from var."""
-    columns = dataframe_columns(var)
-    n = element_len(var_index)
-
-    def column(name: str) -> List[str]:
-        return read_str_all(var[name], parent_group=var)
-
-    def requested(flag: str, name: Optional[str]) -> Optional[str]:
-        if name is not None and name not in columns:
-            raise ValueError(
-                f"{flag} {name}: no such var column. It has: "
-                f"{', '.join(columns) or 'none'}."
-            )
-        return name
-
-    ids_col = requested("--gene-ids-column", options.gene_ids_column)
-    names_col = requested("--gene-names-column", options.gene_names_column)
-    types_col = requested("--feature-types-column", options.feature_types_column)
-    index = read_str_all(var_index)
-
-    missing = []
-    if ids_col is None and names_col is None and "gene_ids" not in columns and "gene_symbols" in columns:
-        # var_names are ids already, as `--var-names gene_ids` leaves them.
-        ids, names = index, column("gene_symbols")
-    else:
-        names = column(names_col) if names_col else index
-        if ids_col is None and "gene_ids" in columns:
-            ids_col = "gene_ids"
-        if ids_col is not None:
-            ids = column(ids_col)
-        else:
-            missing.append("gene ids (a gene_ids column, or --gene-ids-column)")
-            ids = names
-    if types_col is None and "feature_types" in columns:
-        types_col = "feature_types"
-    if types_col is not None:
-        types = column(types_col)
-    else:
-        missing.append("feature types (a feature_types column, or --feature-types-column)")
-        types = ["Gene Expression"] * n
-
-    if missing:
-        if not options.force:
-            raise ValueError(
-                f"var has no {' and no '.join(missing)}, which a 10x matrix "
-                "records for every feature. Pass --force to write placeholders: "
-                "the names as ids, and 'Gene Expression' as the type."
-            )
-        warnings.append(f"Writing placeholders for {' and '.join(missing)}.")
-
-    genomes = column("genome") if "genome" in columns else [""] * n
-    tags: Dict[str, List[str]] = {}
-    for key in _recorded_tag_keys(root):
-        if key != "genome" and key in columns:
-            tags[key] = column(key)
-    return _Features(ids=ids, names=names, types=types, genomes=genomes, tags=tags)
-
-
-def _cellranger_meta(root: Any) -> Optional[Any]:
-    """`uns/cellranger`, as an import recorded it, if there is one."""
-    if "uns" not in root or "cellranger" not in root["uns"]:
-        return None
-    meta = root["uns"]["cellranger"]
-    return meta if is_group(meta) else None
-
-
-def _recorded_tag_keys(root: Any) -> List[str]:
-    meta = _cellranger_meta(root)
-    if meta is None or "feature_tag_keys" not in meta:
-        return []
-    return read_str_all(meta["feature_tag_keys"])
-
-
 def _run_attrs(root: Any) -> Dict[str, Any]:
     """Root attributes: the recorded run's, with Cell Ranger's format markers."""
     attrs: Dict[str, Any] = {}
-    meta = _cellranger_meta(root)
+    meta = cellranger_meta(root)
     if meta is not None and "attrs" in meta:
         for key in _RUN_ATTRS:
             if key in meta["attrs"] and is_dataset(meta["attrs"][key]):
@@ -802,11 +568,11 @@ def _write_fixed_strings_streamed(
     n = element_len(column)
     cache: Dict[str, np.ndarray] = {}
     width = 1
-    for lo in range(0, n, _STRING_STEP):
-        block = read_str_chunk(column, lo, min(lo + _STRING_STEP, n), cache, frame)
+    for lo in range(0, n, STRING_STEP):
+        block = read_str_chunk(column, lo, min(lo + STRING_STEP, n), cache, frame)
         width = max(width, _fixed_width(block))
     dataset = _create_fixed(parent, name, n, width)
-    for lo in range(0, n, _STRING_STEP):
-        hi = min(lo + _STRING_STEP, n)
+    for lo in range(0, n, STRING_STEP):
+        hi = min(lo + STRING_STEP, n)
         block = read_str_chunk(column, lo, hi, cache, frame)
         dataset[lo:hi] = np.array([v.encode("utf-8") for v in block], dtype=f"S{width}")

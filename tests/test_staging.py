@@ -111,3 +111,18 @@ def test_a_zarr_store_named_without_the_suffix_stays_zarr(tmp_path):
 
     assert (out / "zarr.json").read_text() == '{"new": true}'
     assert _names(tmp_path) == ["store"]
+
+
+def test_a_directory_that_is_not_zarr_keeps_its_name(tmp_path):
+    """An MTX output folder is a directory too, and must not be staged as Zarr."""
+    out = tmp_path / "filtered_feature_bc_matrix"
+    out.mkdir()
+    (out / "matrix.mtx.gz").write_bytes(b"old")
+
+    with staged_outputs([out]) as (temp,):
+        assert temp.name == "filtered_feature_bc_matrix.adata-tmp"
+        temp.mkdir()
+        (temp / "matrix.mtx.gz").write_bytes(b"new")
+
+    assert (out / "matrix.mtx.gz").read_bytes() == b"new"
+    assert _names(tmp_path) == ["filtered_feature_bc_matrix"]
