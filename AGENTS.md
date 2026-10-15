@@ -61,6 +61,9 @@ Each layer calls only the layers below it:
   - `concat.py` concatenates on disk;
   - `recast.py` handles dtype, layout and density changes, including an
     out-of-core transpose;
+  - `csr_build.py` builds a CSR matrix from entries in any order, through
+    row-range buckets on disk. The transpose uses it, and so does anything
+    that reads entries out of order;
   - `query.py` and `select.py` hold the expression language behind
     `--obs-query`.
 - **`elements/`**: the AnnData on-disk spec.
@@ -82,7 +85,9 @@ Each layer calls only the layers below it:
   other formats. To add a format:
   - add one `Format` entry in `conversion/__init__.py::FORMATS` with a content
     sniffer;
-  - write a converter module (`tenx.py` is the model);
+  - write a converter module (`tenx.py` is the model). The feature table that
+    every 10x-style format shares (var names, feature-type splits, var to
+    id/name/type on export) is in `features.py`; reuse it;
   - add Cell Ranger-style h5py fixtures in `tests/conftest.py`;
   - add a scanpy comparison in `tests/test_external_readers.py`.
 

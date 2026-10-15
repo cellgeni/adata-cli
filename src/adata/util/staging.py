@@ -19,6 +19,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, List, Sequence, Tuple
 
+from adata.util.path import is_zarr_path
+
 
 def _sibling(path: Path, tag: str) -> Path:
     """`out.zarr` -> `out.<tag>.zarr`, keeping the suffix that picks the backend."""
@@ -27,9 +29,10 @@ def _sibling(path: Path, tag: str) -> Path:
 
 def _temp_for(path: Path) -> Path:
     temp = _sibling(path, "adata-tmp")
-    if path.is_dir() and path.suffix != ".zarr":
+    if path.suffix != ".zarr" and is_zarr_path(path):
         # A Zarr store named without the suffix. A temporary named the same
-        # way would not exist yet, and so be opened as HDF5.
+        # way would not exist yet, and so be opened as HDF5. Only a Zarr
+        # store: any other directory, such as an MTX folder, keeps its name.
         temp = temp.with_name(f"{temp.name}.zarr")
     return temp
 

@@ -23,19 +23,20 @@ store is worse than a refusal:
 
 from __future__ import annotations
 
-import os
-import tempfile
-from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-import h5py
 import numpy as np
 from rich.console import Console
 
 from adata.elements import spec
 from adata.elements.write import set_shape_attr
+from adata.core.csr_build import (
+    BucketSorter,
+    bucket_bounds,
+    count_keys,
+    scratch_group,
+)
 from adata.core.subset import _growable_like, _sparse_dataset
 from adata.storage import (
     copy_attrs,
@@ -44,7 +45,6 @@ from adata.storage import (
     fit_chunks,
     is_dataset,
     is_group,
-    is_hdf5_group,
     is_zarr_group,
     with_compression,
     zarr_format_of,
@@ -74,9 +74,6 @@ MAX_GROWTH_FACTOR = 4.0
 #: Values per read while streaming `data`/`indices`.
 DEFAULT_CHUNK = 1 << 20
 
-#: Smallest bucket worth making during a streaming transpose. Below this
-#: the per-bucket overhead dominates and the extra passes buy nothing.
-MIN_BUCKET_ENTRIES = 1 << 12
 
 
 def parse_dtype(text: str, *, allowed: Tuple[str, ...] = DTYPES) -> np.dtype:
@@ -414,37 +411,8 @@ def transpose_sparse_in_memory(
     )
 
 
-@contextmanager
-def _scratch_group(dst_parent: Any, name: str) -> Iterator[Any]:
-    """A group for the transpose's intermediate buckets, gone afterwards.
-
-    HDF5 never returns the space of a deleted dataset to the file, so scratch
-    written into an HDF5 output stayed in it as dead space: a streamed
-    transpose came out three times the size of an in-memory one. On HDF5 the
-    scratch is a separate file beside the output instead. Deleting from a
-    Zarr store frees the space, so there it stays in place.
-    """
-    if not is_hdf5_group(dst_parent):
-        group = dst_parent.create_group(name)
-        try:
-            yield group
-        finally:
-            del dst_parent[name]
-        return
-
-    # Beside the output rather than in the system temp directory, which on
-    # a cluster node is often far too small for a matrix's worth of entries.
-    where = Path(str(dst_parent.file.filename)).parent
-    fd, path = tempfile.mkstemp(
-        prefix=".adata-", suffix=".transpose-scratch.h5",
-        dir=str(where) if where.is_dir() else None,
-    )
-    os.close(fd)
-    try:
-        with h5py.File(path, "w") as handle:
-            yield handle.create_group(name)
-    finally:
-        os.unlink(path)
+#: Kept under its old name: the scratch group moved to `core.csr_build`.
+_scratch_group = scratch_group
 
 
 def transpose_sparse_streaming(
@@ -476,8 +444,6 @@ def transpose_sparse_streaming(
     Costs about two extra passes over nnz, which is the price of not holding
     the matrix. `--in-memory` is there for when you would rather pay in RAM.
     """
-    from adata.core.subset import _append, _growable
-
     target = (
         spec.CSC_MATRIX if src.kind == spec.CSR_MATRIX else spec.CSR_MATRIX
     )
@@ -492,39 +458,10 @@ def transpose_sparse_streaming(
     counts = np.zeros(n_major_out, dtype=np.int64)
     for start in range(0, nnz, chunk):
         block = np.asarray(source_indices[start : min(start + chunk, nnz)], dtype=np.int64)
-        counts += np.bincount(block, minlength=n_major_out)
+        count_keys(counts, block)
     out_indptr = np.concatenate(([0], np.cumsum(counts)))
 
-    # One bucket per slice of the output major axis, holding about as many
-    # nonzeros as one read. Tying this to `chunk` rather than a constant is
-    # what makes the peak follow the setting the caller chose: with a fixed
-    # bucket size, anything below it went into a single bucket and the
-    # "streaming" path quietly held the whole matrix.
-    # An explicit request is honoured as given; the floor applies only to
-    # the value derived from `chunk`, where it stops a tiny chunk producing
-    # thousands of buckets whose overhead outweighs the saving.
-    per_bucket = (
-        max(1, int(bucket_entries))
-        if bucket_entries
-        else max(MIN_BUCKET_ENTRIES, int(chunk))
-    )
-    n_buckets = max(1, int(np.ceil(nnz / per_bucket))) if nnz else 1
-    n_buckets = min(n_buckets, n_major_out) or 1
-
-    # Split by nonzero count, not by coordinate. Equal-width bounds put
-    # nearly everything in one bucket whenever the matrix is skewed -- and
-    # single-cell matrices are: a handful of genes carry most of the
-    # counts. Measured on one such matrix, the largest of three equal-width
-    # buckets held 88% of the entries, so the bucket, not the chunk, set
-    # the peak. `counts` is already to hand from pass 1.
-    cumulative = out_indptr
-    targets = np.linspace(0, nnz, n_buckets + 1)[1:-1]
-    bounds = np.concatenate((
-        [0],
-        np.searchsorted(cumulative, targets, side="left").astype(np.int64),
-        [n_major_out],
-    ))
-    bounds = np.unique(bounds)
+    bounds = bucket_bounds(out_indptr, chunk=chunk, bucket_entries=bucket_entries)
     n_buckets = len(bounds) - 1
     if console is not None and n_buckets > 1:
         console.print(
@@ -542,15 +479,8 @@ def transpose_sparse_streaming(
     )
     written = 0
 
-    with _scratch_group(dst_parent, f"__{name}_transpose_scratch__") as scratch:
-        buckets = [
-            (
-                _growable(scratch, f"major{b}", np.int64),
-                _growable(scratch, f"minor{b}", np.int64),
-                _growable(scratch, f"value{b}", src.dtype),
-            )
-            for b in range(n_buckets)
-        ]
+    with scratch_group(dst_parent, f"__{name}_transpose_scratch__") as scratch:
+        sorter = BucketSorter(scratch, bounds, src.dtype)
 
         # Pass 2: scatter the input into buckets, one input block at a time.
         # Step over the major axis in blocks holding about `chunk` nonzeros,
@@ -568,29 +498,16 @@ def transpose_sparse_streaming(
             major = np.repeat(
                 np.arange(lo, hi, dtype=np.int64), np.diff(indptr[lo : hi + 1])
             )
-            which = np.clip(np.searchsorted(bounds, minor, side="right") - 1, 0, n_buckets - 1)
-            for b in range(n_buckets):
-                pick = which == b
-                if not pick.any():
-                    continue
-                _append(buckets[b][0], minor[pick])
-                _append(buckets[b][1], major[pick])
-                _append(buckets[b][2], values[pick])
+            # The input's minor axis is the output's major one.
+            sorter.add(minor, major, values)
 
         # Pass 3: each bucket in turn, sorted into output order.
-        for b in range(n_buckets):
-            new_major, new_minor, value = buckets[b]
-            if new_major.shape[0] == 0:
-                continue
-            majors = np.asarray(new_major[...], dtype=np.int64)
-            minors = np.asarray(new_minor[...], dtype=np.int64)
-            values = np.asarray(value[...])
-            order = np.lexsort((minors, majors))
-            count = order.size
-            out_indices[written : written + count] = minors[order].astype(
+        for _, new_minor, values in sorter.runs():
+            count = new_minor.size
+            out_indices[written : written + count] = new_minor.astype(
                 index_dtype, copy=False
             )
-            out_data[written : written + count] = values[order].astype(
+            out_data[written : written + count] = values.astype(
                 data_dtype, copy=False
             )
             written += count

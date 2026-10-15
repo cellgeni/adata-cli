@@ -15,6 +15,8 @@ except Exception:  # pragma: no cover - optional dependency
 
 import numpy as np
 
+from adata.util.path import is_zarr_path  # noqa: F401 - re-exported
+
 
 ROOT_ENCODING_TYPE = "anndata"
 ROOT_ENCODING_VERSION = "0.1.0"
@@ -90,16 +92,6 @@ def is_group(obj: Any) -> bool:
 
 def is_dataset(obj: Any) -> bool:
     return is_hdf5_dataset(obj) or is_zarr_array(obj)
-
-
-def is_zarr_path(path: Path) -> bool:
-    if not path.exists() or not path.is_dir():
-        return False
-    if (path / "zarr.json").exists():
-        return True
-    if (path / ".zgroup").exists() or (path / ".zattrs").exists():
-        return True
-    return False
 
 
 def detect_backend(path: Path) -> str:
