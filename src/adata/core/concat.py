@@ -43,6 +43,7 @@ from adata.storage import (
     copy_tree,
     create_dataset,
     is_dataset,
+    Store,
     is_group,
     open_store,
 )
@@ -828,6 +829,17 @@ def _hashable(value: Any) -> Any:
     return value
 
 
+def _inputs_zarr_format(stores: Sequence[Store]) -> Optional[int]:
+    """The Zarr version the inputs agree on, or None to take the default.
+
+    A Zarr output follows its inputs, as every other command's follows its
+    source, so v2 inputs are not silently upgraded. h5ad inputs have no
+    version and do not count; Zarr inputs of both versions get the default.
+    """
+    versions = {s.zarr_format for s in stores} - {None}
+    return versions.pop() if len(versions) == 1 else None
+
+
 def concat_on_disk(
     files: Sequence[Path],
     output: Path,
@@ -906,6 +918,9 @@ def concat_on_disk(
         # Validated before the output exists, so a mismatch cannot leave a
         # half-written store behind.
         check_matrix_encodings(roots, console)
+
+        if zarr_format is None:
+            zarr_format = _inputs_zarr_format(stores)
 
         # Written beside the output and renamed into place once complete, so
         # a failure part way leaves nothing that reads as a finished store.
