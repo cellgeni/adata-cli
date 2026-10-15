@@ -3,6 +3,62 @@
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
+## 0.7.1
+
+Fixes ways that `subset`, `recast`, `split` and `concat` could lose or
+corrupt data while reporting success. The worst was that `subset` emptied a
+Zarr store given as both its input and its output. All four commands now
+write beside their output and rename it into place only once it is complete,
+as `convert` already did. Also: `concat` no longer upgrades Zarr v2 inputs to
+v3, and two help examples that did not run now do.
+
+### Fixed
+
+- **`subset x.zarr -o x.zarr` emptied the store**
+  ([#35](https://github.com/cellgeni/adata-cli/issues/35)). The output was
+  opened for writing, which clears a Zarr store, before the selection was
+  read from the source. An output that names the input is now refused; use
+  `--inplace`. The selection is now resolved before the output exists, so a
+  query that fails no longer leaves an empty store behind, or truncates an
+  existing one.
+
+- **`--inplace` deleted the source before moving the new store in**
+  ([#35](https://github.com/cellgeni/adata-cli/issues/35)). This affected
+  `subset` and `recast`: an interrupt between the two steps lost the data.
+  The source is now renamed aside and deleted only once its replacement is
+  in place.
+
+- **A failure part way through could leave a partial store that read as a
+  finished one** ([#35](https://github.com/cellgeni/adata-cli/issues/35)).
+  This affected `subset`, `recast`, `split` and `concat`. Each now writes to
+  a temporary path beside its output (`out.adata-tmp.zarr`) and moves it into
+  place only on success. A failure leaves an existing output as it was.
+  `split` moves all its outputs together, writes its manifest last, and
+  refuses an output that would land on its input.
+
+  The helper that does this, shared with `convert`, has three fixes of its
+  own:
+  - It no longer deletes a leftover `*.adata-old.*` backup, which after an
+    interrupted run may be the only copy of the data; it now refuses to start.
+  - It puts back the outputs already replaced if a rename fails part way.
+  - It keeps a Zarr store named without the `.zarr` suffix as Zarr.
+
+- **`concat` wrote Zarr v3 whatever its inputs' version**
+  ([#36](https://github.com/cellgeni/adata-cli/issues/36)), contrary to the
+  documentation. It now follows the version its Zarr inputs share, and writes
+  v3 when they differ. h5ad inputs do not count. `--zarr-format` still
+  overrides it.
+
+- **`subset` and `concat` now check `--zarr-format` themselves**
+  ([#37](https://github.com/cellgeni/adata-cli/issues/37)), as every other
+  command does, and say that it must be 2 or 3. Contributed by
+  @iamcipherdev.
+
+- **Six `--help` examples still said `h5ad`, and two of them did not run**
+  ([#38](https://github.com/cellgeni/adata-cli/issues/38)). A new test checks
+  every help example against the real commands and options. Contributed by
+  @iamcipherdev.
+
 ## 0.7.0
 
 Adds format conversion. `adata convert` now changes a store's format --
