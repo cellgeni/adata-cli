@@ -287,6 +287,8 @@ adata concat a.h5ad b.h5ad -o m.h5ad --keys a,b --index-unique - --uns-merge sam
 | `--index-unique` | Delimiter for suffixing obs names with their key |
 | `--merge` / `--uns-merge` | `drop` (default), `same`, `unique`, `first`, `only` |
 | `--fill-value` | Value for dense cells introduced by an outer join |
+| `--chunk`, `-C` | Row chunk size while streaming |
+| `--zarr-format` | Zarr version to write; defaults to the inputs' when they agree, otherwise v3 |
 
 obs columns keep their dtypes: categoricals union their category sets, nullable
 columns keep their masks, and a column missing from one input is padded rather
@@ -399,7 +401,8 @@ adata subset data.h5ad -o cortex.h5ad --obs barcodes.txt
 New Zarr stores follow the source store's version, so a v2 input is not
 silently upgraded. `--zarr-format 2|3` on `create`, `subset`, `split`,
 `concat`, `convert` and `recast` overrides that. Writing a Zarr store from
-an `.h5ad` source defaults to v3.
+an `.h5ad` source defaults to v3. `concat` follows its Zarr inputs when they
+share one version (h5ad inputs do not count) and writes v3 when they differ.
 
 ```bash
 adata create out.zarr --n-obs 100 --n-var 50 --zarr-format 2

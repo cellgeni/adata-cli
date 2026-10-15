@@ -433,7 +433,9 @@ def concat(
         1024, "--chunk", "-C", help="Row chunk size while streaming"
     ),
     zarr_format: Optional[int] = typer.Option(
-        None, "--zarr-format", help="Zarr spec version to write (2 or 3)"
+        None,
+        "--zarr-format",
+        help="Zarr spec version to write (defaults to the inputs' when they agree)",
     ),
 ) -> None:
     """

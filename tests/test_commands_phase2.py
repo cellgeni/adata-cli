@@ -413,6 +413,58 @@ def test_concat_drops_uns_by_default(tmp_path):
     assert dict(ad.read_h5ad(out).uns) == {}
 
 
+def _as_zarr(h5ad: Path, version: int) -> Path:
+    """The same store as Zarr of the given version."""
+    path = h5ad.with_suffix(".zarr")
+    previous = ad.settings.zarr_write_format
+    ad.settings.zarr_write_format = version
+    try:
+        ad.read_h5ad(h5ad).write_zarr(path)
+    finally:
+        ad.settings.zarr_write_format = previous
+    return path
+
+
+def _zarr_version(path: Path) -> int:
+    import zarr
+
+    return zarr.open_group(str(path), mode="r").metadata.zarr_format
+
+
+@pytest.mark.parametrize(
+    "inputs,expected",
+    [
+        ((2, 2), 2),  # issue #36: v2 inputs came out v3
+        ((3, 3), 3),
+        ((2, 3), 3),  # no agreement: the default
+        ((None, 2), 2),  # an h5ad input has no version and does not count
+    ],
+)
+def test_concat_follows_the_inputs_zarr_version(tmp_path, inputs, expected):
+    paths = []
+    for i, version in enumerate(inputs):
+        h5ad = _make(tmp_path / f"in{i}.h5ad", [f"c{i}"], ["g1"], batch=str(i))
+        paths.append(h5ad if version is None else _as_zarr(h5ad, version))
+    out = tmp_path / "m.zarr"
+
+    result = runner.invoke(app, ["concat", *map(str, paths), "-o", str(out)])
+    assert result.exit_code == 0, _out(result)
+    assert _zarr_version(out) == expected
+    assert ad.read_zarr(out).shape == (2, 1)
+
+
+def test_concat_zarr_format_overrides_the_inputs(tmp_path):
+    a = _as_zarr(_make(tmp_path / "a.h5ad", ["c1"], ["g1"], batch="A"), 2)
+    b = _as_zarr(_make(tmp_path / "b.h5ad", ["c2"], ["g1"], batch="B"), 2)
+    out = tmp_path / "m.zarr"
+
+    result = runner.invoke(
+        app, ["concat", str(a), str(b), "-o", str(out), "--zarr-format", "3"]
+    )
+    assert result.exit_code == 0, _out(result)
+    assert _zarr_version(out) == 3
+
+
 def test_concat_warns_about_duplicate_obs_names(tmp_path):
     a = _make(tmp_path / "a.h5ad", ["c1"], ["g1"], batch="A")
     b = _make(tmp_path / "b.h5ad", ["c1"], ["g1"], batch="B")
