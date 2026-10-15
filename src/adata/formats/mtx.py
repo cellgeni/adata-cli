@@ -29,14 +29,10 @@ from typing import Any, BinaryIO, Iterator, List, Optional, Sequence, Tuple
 import numpy as np
 
 from adata.core.csr_build import (
-    BucketSorter,
     CsrAppender,
-    DuplicateSummer,
-    bucket_bounds,
     count_keys,
-    grouped_runs,
-    scratch_group,
     sum_keys,
+    write_runs,
 )
 from adata.core.recast import DEFAULT_CHUNK, Matrix
 from adata.elements import spec
@@ -331,7 +327,7 @@ def read_into(
     destinations: Sequence[Sequence[CsrAppender]],
     scratch_parent: Any,
     *,
-    chunk: int = DEFAULT_CHUNK,
+    chunk: Optional[int] = None,
     block_bytes: int = TEXT_BLOCK_BYTES,
 ) -> int:
     """Pass 2: append the file's entries to each output, in CSR order.
@@ -340,36 +336,18 @@ def read_into(
     every entry of that output. Returns how many duplicate entries were
     summed away.
     """
-    blocks = (
-        emap.apply(*entry)
-        for entry in iter_entries(header, block_bytes=block_bytes)
+    return write_runs(
+        (emap.apply(*entry) for entry in iter_entries(header, block_bytes=block_bytes)),
+        n_rows=emap.n_rows,
+        n_targets=emap.n_targets,
+        destinations=destinations,
+        scratch_parent=scratch_parent,
+        grouped=scanned.grouped,
+        canonical=scanned.canonical,
+        counts=scanned.counts,
+        value_dtype=np.float64 if header.field == "real" else np.int64,
+        chunk=chunk or DEFAULT_CHUNK,
     )
-    summer = DuplicateSummer()
-
-    def consume(runs: Iterator[Tuple[np.ndarray, np.ndarray, np.ndarray]]) -> None:
-        for keys, minors, values in summer(runs):
-            targets = keys // emap.n_rows
-            for t in np.unique(targets) if emap.n_targets > 1 else (0,):
-                if emap.n_targets > 1:
-                    pick = targets == t
-                    rows, cols, vals = keys[pick] - t * emap.n_rows, minors[pick], values[pick]
-                else:
-                    rows, cols, vals = keys, minors, values
-                for appender in destinations[int(t)]:
-                    appender.append(rows, cols, vals)
-
-    if scanned.grouped:
-        consume(grouped_runs(blocks, sort=not scanned.canonical))
-    else:
-        indptr = np.concatenate(([0], np.cumsum(scanned.counts)))
-        bounds = bucket_bounds(indptr, chunk=chunk)
-        value_type = np.float64 if header.field == "real" else np.int64
-        with scratch_group(scratch_parent, "__mtx_scratch__") as scratch:
-            sorter = BucketSorter(scratch, bounds, value_type)
-            for keys, minors, values in blocks:
-                sorter.add(keys, minors, values)
-            consume(sorter.runs())
-    return summer.summed
 
 
 # ---------------------------------------------------------------------------

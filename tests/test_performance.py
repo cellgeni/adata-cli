@@ -592,6 +592,68 @@ def test_10x_mtx_export_reads_each_block_once(tmp_path):
     assert_independent_of(measure, what="convert h5ad to 10x mtx read calls", axis="n_obs")
 
 
+def _cellbender_pair(path: Path, n: int, filtered: bool):
+    from tests.conftest import write_10x_h5, write_cellbender_h5
+
+    counts = np.random.default_rng(0).poisson(0.5, (n, 8))
+    kwargs = dict(
+        barcodes=[f"BC{i:08d}-1" for i in range(n)],
+        ids=[f"ENSG{i}" for i in range(8)],
+        names=[f"G{i}" for i in range(8)],
+    )
+    truth = write_cellbender_h5(path / "cb.h5", counts, filtered=filtered, **kwargs)
+    raw = write_10x_h5(path / "raw.h5", counts, **kwargs)
+    return truth.path, raw
+
+
+@pytest.mark.parametrize(
+    "filtered,extra",
+    [
+        (False, {}),
+        (False, {"min_cell_probability": 0.5}),
+        (False, {"raw": True}),
+        (True, {"raw": True}),
+    ],
+)
+def test_cellbender_import_work_grows_linearly(tmp_path, filtered, extra):
+    """Latents, obs and the embedding stream with X; --raw reads the raw
+    matrix once, through the buckets when the rows come in another order."""
+    from adata.commands.convert import convert_store
+    from adata.conversion import Options
+
+    tag = f"{filtered}{sorted(extra)}".replace(" ", "")
+
+    def measure(n: int) -> int:
+        where = tmp_path / f"cb{tag}{n}"
+        where.mkdir()
+        source, raw = _cellbender_pair(where, n, filtered)
+        options = dict(extra)
+        if options.pop("raw", False):
+            options["raw"] = raw
+        with count_io() as io:
+            convert_store(source, where / "out.h5ad", QUIET, options=Options(**options))
+        return io.work
+
+    assert_grows_linearly(
+        measure, what=f"convert CellBender ({'filtered' if filtered else 'full'}, {extra})",
+        axis="n_barcodes",
+    )
+
+
+def test_cellbender_embedding_is_written_in_blocks(tmp_path):
+    from adata.commands.convert import convert_store
+
+    def measure(n: int) -> int:
+        where = tmp_path / f"ce{n}"
+        where.mkdir()
+        source, _ = _cellbender_pair(where, n, False)
+        with count_io() as io:
+            convert_store(source, where / "out.h5ad", QUIET)
+        return io.h5_write_calls
+
+    assert_independent_of(measure, what="convert CellBender write calls", axis="n_barcodes")
+
+
 def test_split_reads_grow_linearly_in_group_count(tmp_path, monkeypatch):
     """Splitting into k groups must stay linear in k at fixed store size.
 

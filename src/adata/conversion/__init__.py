@@ -17,7 +17,7 @@ from typing import Dict, FrozenSet, List, Optional
 
 import h5py
 
-from adata.conversion import mtx, tenx
+from adata.conversion import cellbender, mtx, tenx
 from adata.conversion.anndata_copy import AnnDataCopy
 from adata.conversion.base import ConversionPlan, Converter, Format, Options
 from adata.storage import has_valid_anndata_root_attrs, is_zarr_path
@@ -65,6 +65,15 @@ FORMATS: Dict[str, Format] = {
         extensions=(".zarr",),
         anndata=True,
         sniff=is_zarr_path,
+    ),
+    # Before 10x-h5: a CellBender file is a 10x matrix too, and the first
+    # sniffer to match wins. `--from 10x-h5` still reads one as plain 10x.
+    "cellbender": Format(
+        name="cellbender",
+        description="CellBender remove-background output (0.2 and later)",
+        extensions=(".h5",),
+        sniff=cellbender.sniff,
+        importer=cellbender.CellbenderImport(),
     ),
     "10x-h5": Format(
         name="10x-h5",
@@ -136,10 +145,21 @@ def output_format(path: Path, requested: Optional[str] = None) -> str:
     path = Path(path)
     if requested is not None and requested not in FORMATS:
         raise ValueError(f"Unknown format {requested!r}; use one of: {_names()}.")
+    if requested is not None and not (
+        FORMATS[requested].anndata or FORMATS[requested].exporter is not None
+    ):
+        raise ValueError(f"{requested} can be read but not written.")
 
     suffix = path.suffix.lower()
+    # Only formats that can be written: `.h5` names CellBender output too,
+    # but an `.h5` output is a 10x matrix.
     by_extension = next(
-        (fmt.name for fmt in FORMATS.values() if suffix in fmt.extensions), None
+        (
+            fmt.name
+            for fmt in FORMATS.values()
+            if suffix in fmt.extensions and (fmt.anndata or fmt.exporter is not None)
+        ),
+        None,
     )
     if requested is None:
         if by_extension is None:

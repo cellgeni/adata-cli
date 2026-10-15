@@ -8,7 +8,7 @@ A command-line tool for exploring huge AnnData stores (`.h5ad` and `.zarr`) with
 - Auto-detects `.h5ad` files vs `.zarr` directories
 - Chunked processing for dense and sparse matrices (CSR/CSC)
 - Reads every AnnData on-disk layout, from 0.7.x through the current spec, and always writes the current one
-- Converts between HDF5 and Zarr (v2 and v3) in either direction with `adata convert`, and to and from 10x Genomics HDF5 matrices and 10x / STARsolo MTX folders
+- Converts between HDF5 and Zarr (v2 and v3) in either direction with `adata convert`, and to and from 10x Genomics HDF5 matrices and 10x / STARsolo MTX folders, and from CellBender output
 - Rich terminal output with progress indicators, kept on stderr so results pipe cleanly
 
 **Documentation: [cellgeni.github.io/adata-cli](https://cellgeni.github.io/adata-cli/)**
@@ -56,7 +56,7 @@ Run help at any level (e.g. `adata --help`, `adata export --help`).
 - `subset` – stream and write a filtered copy, selected by obs/var name lists (`--obs`/`--var`) or by expression (`--obs-query`/`--var-query`).
 - `split` – write one store per distinct value of an annotation column, with a CSV manifest.
 - `concat` – concatenate stores along the obs axis, with `--join inner|outer` and merge strategies for var and uns.
-- `convert` – change a store's format: h5ad ↔ Zarr v2/v3, 10x Genomics HDF5 (Cell Ranger's `*_feature_bc_matrix.h5`) and 10x / STARsolo MTX folders in and out, streaming, with the output written beside its destination and moved into place only once complete.
+- `convert` – change a store's format: h5ad ↔ Zarr v2/v3, 10x Genomics HDF5 (Cell Ranger's `*_feature_bc_matrix.h5`) and 10x / STARsolo MTX folders in and out, CellBender output in, streaming, with the output written beside its destination and moved into place only once complete.
 - `recast` – change a matrix's dtype, layout (CSR/CSC/dense) or density, streaming; refuses a lossy cast or a large size increase unless forced. Called `convert` until 0.7.0.
 - `export` – extract data from a store; subcommands: `dataframe` (any dataframe group to CSV), `array` (dense to `.npy`), `sparse` (CSR/CSC to `.mtx`), `dict` (JSON), `image` (PNG). Results go to stdout when no `--output` is given.
 - `import` – write new data into a store at any path; subcommands: `dataframe` (CSV), `array` (`.npy`), `sparse` (`.mtx`), `dict` (JSON), `image` (PNG/JPEG/TIFF).
