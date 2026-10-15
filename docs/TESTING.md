@@ -5,11 +5,12 @@ uv sync --extra dev
 uv run pytest                      # everything
 uv run pytest -m "not integration" # fast: no environment building, ~40s
 uv run pytest -m perf              # just the tracing complexity guards
-uv run pytest -m integration       # compatibility across anndata releases
+uv run pytest -m integration       # anndata releases, scanpy and PyTables
 ```
 
 CI runs the unit suite on Python 3.12 and 3.13 with a **90% coverage floor**,
-and the compatibility suite as a separate job.
+and the anndata compatibility suite and the 10x external-reader suite as
+separate jobs.
 
 ## How the suite is organised
 
@@ -25,6 +26,8 @@ and the compatibility suite as a separate job.
 | `test_commands_phase2.py`, `test_commands_coverage.py`, `test_cli.py` | Command surfaces and error paths |
 | `test_convert.py` | `convert` between every backend pair, read back by anndata; its refusals, staging, and the forwarding of recast's old flags |
 | `test_recast.py` | `recast` against scipy: casts, transposes, density changes and every refusal |
+| `test_tenx.py` | 10x HDF5 import and export against Cell Ranger-shaped fixtures (v2, v3, multimodal, probe-based): mapping, filters, round trips, refusals |
+| `test_external_readers.py` | 10x conversions checked by scanpy and PyTables in their own uv environments (`integration`) |
 | `test_performance.py` | Complexity guards -- what an operation costs, not how long it takes (see below) |
 | `test_benchmark_harness.py` | That the benchmark's measurement is trustworthy |
 | `test_subset.py`, `test_export.py`, `test_import.py`, `test_info_read.py`, `test_zarr.py`, `test_query.py` | Per-feature unit tests |
@@ -235,6 +238,7 @@ should scale with, scale only that, and hold everything else fixed.
 | `export array`, `sparse` (both paths), `dict`, `image` | elements, nnz, keys, pixels | linear |
 | `import dataframe`, `array`, `sparse`, `dict`, `image` | rows, elements, nnz, keys, pixels | linear in writes |
 | h5ad to zarr (`subset`), `convert` both directions | n_obs | linear |
+| `convert` 10x import (whole, `--split-feature-types`), export | n_barcodes | linear |
 | `recast --dtype`, `--layout csc`, `--layout dense` | nnz, n_obs | linear; the streaming transpose's **peak memory** is bounded |
 
 The `slow` marker is on the three guards that build a 65,536-row store; they still gate

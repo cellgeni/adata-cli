@@ -298,3 +298,94 @@ def new_store(temp_dir, backend):
         return path, _open
 
     return _make
+
+
+# ---------------------------------------------------------------------------
+# 10x Genomics matrices
+#
+# Built the way Cell Ranger writes them: fixed-width byte strings, gzip,
+# int32 counts with int64 indices, and the run's attributes at the root.
+
+
+def _fixed(values: Sequence[str]) -> np.ndarray:
+    width = max([1, *(len(v.encode()) for v in values)])
+    return np.array([v.encode() for v in values], dtype=f"S{width}")
+
+
+def _write_10x_arrays(group: Any, counts: np.ndarray, barcodes: Sequence[str]) -> None:
+    """`counts` is cells x features; stored as features x cells CSC."""
+    rows, cols = np.nonzero(counts)
+    gz = {"compression": "gzip", "compression_opts": 4}
+    group.create_dataset("data", data=counts[rows, cols].astype(np.int32), **gz)
+    group.create_dataset("indices", data=cols.astype(np.int64), **gz)
+    indptr = np.concatenate(([0], np.cumsum(np.count_nonzero(counts, axis=1))))
+    group.create_dataset("indptr", data=indptr.astype(np.int64), **gz)
+    group.create_dataset(
+        "shape", data=np.array([counts.shape[1], counts.shape[0]], dtype=np.int32)
+    )
+    group.create_dataset("barcodes", data=_fixed(barcodes), **gz)
+
+
+def write_10x_h5(
+    path: Path,
+    counts: np.ndarray,
+    *,
+    barcodes: Sequence[str],
+    ids: Sequence[str],
+    names: Sequence[str],
+    types: Optional[Sequence[str]] = None,
+    genomes: Optional[Sequence[str]] = None,
+    extra: Optional[dict] = None,
+    probe_gene_ids: Optional[Sequence[str]] = None,
+    filtered_barcodes: Optional[Sequence[bool]] = None,
+) -> Path:
+    """A Cell Ranger 3+ `*_feature_bc_matrix.h5`."""
+    n = counts.shape[1]
+    with h5py.File(path, "w") as f:
+        # As Cell Ranger writes them: a single string variable-length, an
+        # array of them fixed-width.
+        f.attrs["chemistry_description"] = "Single Cell 3' v3"
+        f.attrs["filetype"] = "matrix"
+        f.attrs["library_ids"] = np.array([b"lib1"])
+        f.attrs["original_gem_groups"] = np.array([1], dtype=np.int64)
+        f.attrs["software_version"] = "cellranger-8.0.1"
+        f.attrs["version"] = np.int64(2)
+        group = f.create_group("matrix")
+        _write_10x_arrays(group, counts, barcodes)
+        features = group.create_group("features")
+        features.create_dataset("id", data=_fixed(ids))
+        features.create_dataset("name", data=_fixed(names))
+        features.create_dataset(
+            "feature_type", data=_fixed(types or ["Gene Expression"] * n)
+        )
+        features.create_dataset("genome", data=_fixed(genomes or ["GRCh38"] * n))
+        tag_keys = ["genome"]
+        for key, values in (extra or {}).items():
+            values = list(values)
+            if isinstance(values[0], (bool, np.bool_)):
+                features.create_dataset(key, data=np.array(values, dtype=bool))
+            else:
+                features.create_dataset(key, data=_fixed(values))
+            tag_keys.append(key)
+        if probe_gene_ids is not None:
+            features.create_dataset("gene_id", data=_fixed(probe_gene_ids))
+        features.create_dataset("_all_tag_keys", data=_fixed(tag_keys))
+        if filtered_barcodes is not None:
+            group.create_dataset(
+                "filtered_barcodes", data=np.array(filtered_barcodes, dtype=bool)
+            )
+    return path
+
+
+def write_10x_v2_h5(path: Path, genomes: dict) -> Path:
+    """A Cell Ranger 2 file: `{genome: (counts, barcodes, ids, names)}`."""
+    with h5py.File(path, "w") as f:
+        # PyTables bookkeeping, which a v3 export must not carry over.
+        f.attrs["PYTABLES_FORMAT_VERSION"] = np.bytes_(b"2.1")
+        f.attrs["TITLE"] = np.bytes_(b"")
+        for genome, (counts, barcodes, ids, names) in genomes.items():
+            group = f.create_group(genome)
+            _write_10x_arrays(group, counts, barcodes)
+            group.create_dataset("genes", data=_fixed(ids))
+            group.create_dataset("gene_names", data=_fixed(names))
+    return path

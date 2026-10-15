@@ -23,9 +23,14 @@ store is worse than a refusal:
 
 from __future__ import annotations
 
+import os
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
+import h5py
 import numpy as np
 from rich.console import Console
 
@@ -39,7 +44,10 @@ from adata.storage import (
     fit_chunks,
     is_dataset,
     is_group,
+    is_hdf5_group,
     is_zarr_group,
+    with_compression,
+    zarr_format_of,
 )
 
 #: Layouts the user can ask for. "sparse" means "whichever sparse encoding
@@ -406,6 +414,39 @@ def transpose_sparse_in_memory(
     )
 
 
+@contextmanager
+def _scratch_group(dst_parent: Any, name: str) -> Iterator[Any]:
+    """A group for the transpose's intermediate buckets, gone afterwards.
+
+    HDF5 never returns the space of a deleted dataset to the file, so scratch
+    written into an HDF5 output stayed in it as dead space: a streamed
+    transpose came out three times the size of an in-memory one. On HDF5 the
+    scratch is a separate file beside the output instead. Deleting from a
+    Zarr store frees the space, so there it stays in place.
+    """
+    if not is_hdf5_group(dst_parent):
+        group = dst_parent.create_group(name)
+        try:
+            yield group
+        finally:
+            del dst_parent[name]
+        return
+
+    # Beside the output rather than in the system temp directory, which on
+    # a cluster node is often far too small for a matrix's worth of entries.
+    where = Path(str(dst_parent.file.filename)).parent
+    fd, path = tempfile.mkstemp(
+        prefix=".adata-", suffix=".transpose-scratch.h5",
+        dir=str(where) if where.is_dir() else None,
+    )
+    os.close(fd)
+    try:
+        with h5py.File(path, "w") as handle:
+            yield handle.create_group(name)
+    finally:
+        os.unlink(path)
+
+
 def transpose_sparse_streaming(
     src: Matrix,
     dst_parent: Any,
@@ -417,6 +458,7 @@ def transpose_sparse_streaming(
     chunk: int = DEFAULT_CHUNK,
     bucket_entries: Optional[int] = None,
     console: Optional[Console] = None,
+    compression: Optional[str] = None,
 ) -> None:
     """Swap CSR<->CSC without loading the matrix.
 
@@ -492,13 +534,15 @@ def transpose_sparse_streaming(
     # nnz is invariant under a transpose, so the output can be sized now and
     # written by slice rather than grown block by block.
     group = _new_sparse_group(src, dst_parent, name, target, src.shape)
-    out_data = _sparse_dataset(group, "data", data_dtype, nnz, source_data)
-    out_indices = _sparse_dataset(group, "indices", index_dtype, nnz, source_indices)
+    out_data = _sparse_dataset(
+        group, "data", data_dtype, nnz, source_data, compression=compression
+    )
+    out_indices = _sparse_dataset(
+        group, "indices", index_dtype, nnz, source_indices, compression=compression
+    )
     written = 0
 
-    scratch_name = f"__{name}_transpose_scratch__"
-    scratch = dst_parent.create_group(scratch_name)
-    try:
+    with _scratch_group(dst_parent, f"__{name}_transpose_scratch__") as scratch:
         buckets = [
             (
                 _growable(scratch, f"major{b}", np.int64),
@@ -550,12 +594,11 @@ def transpose_sparse_streaming(
                 data_dtype, copy=False
             )
             written += count
-    finally:
-        del dst_parent[scratch_name]
 
     cast_indptr = out_indptr.astype(pointer_dtype, copy=False)
     dataset = _sparse_dataset(
-        group, "indptr", pointer_dtype, cast_indptr.size, src.obj["indptr"]
+        group, "indptr", pointer_dtype, cast_indptr.size, src.obj["indptr"],
+        compression=compression,
     )
     dataset[:] = cast_indptr
 
@@ -629,6 +672,7 @@ def sparsify(
     pointer_dtype: np.dtype = np.dtype("int64"),
     chunk_rows: int = 1024,
     console: Optional[Console] = None,
+    compression: Optional[str] = None,
 ) -> Tuple[int, float]:
     """Write a dense array out as CSR or CSC, a block at a time.
 
@@ -648,8 +692,12 @@ def sparsify(
     spec.set_encoding(group, enc)
     set_shape_attr(group, src.shape)
 
-    out_data = _growable_like(group, "data", data_dtype, src.obj)
-    out_indices = _growable_like(group, "indices", index_dtype, src.obj)
+    out_data = _growable_like(
+        group, "data", data_dtype, src.obj, compression=compression
+    )
+    out_indices = _growable_like(
+        group, "indices", index_dtype, src.obj, compression=compression
+    )
     counts: List[int] = []
 
     for lo in range(0, n_major, chunk_rows):
@@ -665,7 +713,15 @@ def sparsify(
         ))
 
     indptr = np.concatenate(([0], np.cumsum(counts, dtype=np.int64)))
-    create_dataset(group, "indptr", data=indptr.astype(pointer_dtype, copy=False))
+    kw = {}
+    if compression is not None:
+        kw = with_compression(
+            kw, compression, shape=indptr.shape, dtype=pointer_dtype,
+            backend=backend, zarr_format=zarr_format_of(dst_parent),
+        )
+    create_dataset(
+        group, "indptr", data=indptr.astype(pointer_dtype, copy=False), **kw
+    )
 
 
     nnz = int(indptr[-1])

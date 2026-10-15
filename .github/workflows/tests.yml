@@ -127,3 +127,44 @@ jobs:
           if ran < 150:
               sys.exit(f"expected at least 150 cases to run, got {ran}")
           EOF
+
+  # scanpy and PyTables read the 10x files `convert` writes, and scanpy is
+  # the reference for what it reads. Each runs in its own uv environment.
+  external-readers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    name: 10x h5 against scanpy and PyTables
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (frozen)
+        run: uv sync --extra dev --frozen
+
+      - name: Run external reader tests
+        env:
+          # An environment that will not build must fail the job, not skip.
+          ADATA_REQUIRE_VERSION_FIXTURES: "1"
+        run: |
+          uv run pytest -v -W default tests/test_external_readers.py \
+            -m integration --junitxml=external-results.xml
+
+      - name: Confirm the cases actually ran
+        if: always()
+        run: |
+          python - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse("external-results.xml").getroot()
+          suite = root.find("testsuite") if root.tag == "testsuites" else root
+          ran = int(suite.get("tests", 0)) - int(suite.get("skipped", 0))
+          print(f"{ran} external reader cases ran")
+          if ran < 8:
+              sys.exit(f"expected at least 8 cases to run, got {ran}")
+          PY

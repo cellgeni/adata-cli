@@ -94,6 +94,8 @@ adata convert data.h5ad -o data.zarr
 adata convert data.zarr -o data.h5ad --compression gzip
 adata convert old.zarr -o new.zarr --zarr-format 3
 adata convert data.h5ad -o data.zarr --overwrite
+adata convert filtered_feature_bc_matrix.h5 -o counts.h5ad
+adata convert counts.h5ad -o for_cellbender.h5 --layer counts
 ```
 
 | Flag | Meaning |
@@ -104,12 +106,16 @@ adata convert data.h5ad -o data.zarr --overwrite
 | `--zarr-format` | Zarr version to write; defaults to the source's, else 3 |
 | `--compression` | `none`, `gzip` or `lzf` for h5ad; `none`, `gzip`, `zstd` or `blosc` for Zarr |
 | `--overwrite` | Replace an existing output |
-| `--force` | Convert despite a lossy or inflating result |
+| `--force` | Convert despite a lossy, inflating or placeholder result |
 
 | Format | Extension | Read | Write |
 |---|---|---|---|
 | `h5ad` | `.h5ad` | yes | yes |
 | `zarr` | `.zarr` (v2 or v3) | yes | yes |
+| `10x-h5` | `.h5` | Cell Ranger 2 and 3+, Space Ranger, Xenium | Cell Ranger 3+ layout |
+
+Formats other than h5ad and Zarr convert to and from AnnData only: to turn a
+10x file into another format, convert it to `.h5ad` first.
 
 Between h5ad and Zarr every element is copied as it is, streamed, so the
 store's size is not a limit. Chunking carries over, and so does compression
@@ -127,6 +133,58 @@ successor is finished.
 
 To change a matrix's dtype, layout or density instead, use
 [`recast`](#recast).
+
+### 10x Genomics HDF5
+
+Cell Ranger's `filtered_feature_bc_matrix.h5` and `raw_feature_bc_matrix.h5`,
+and the same layout from Space Ranger, Xenium and CellBender. The file is
+recognised by its content, whatever its name.
+
+```bash
+adata convert filtered_feature_bc_matrix.h5 -o counts.h5ad
+adata convert raw_feature_bc_matrix.h5 -o rna.h5ad --feature-type "Gene Expression"
+adata convert multiome.h5 -o sample.h5ad --split-feature-types
+adata convert cellranger2.h5 -o mouse.h5ad --genome mm10
+adata convert counts.h5ad -o out.h5 --layer counts
+```
+
+| Flag | Meaning |
+|---|---|
+| `--genome` | Keep this genome's features; picks the group in a Cell Ranger 2 file holding several |
+| `--var-names` | `gene_symbols` (default) or `gene_ids` |
+| `--make-unique` | Suffix repeated var names as `var_names_make_unique` does |
+| `--feature-type` | Keep one feature type, e.g. `"Gene Expression"` |
+| `--split-feature-types` | Write one output per type, `OUT.<type>.h5ad` |
+| `--layer` | Export: the matrix to write, `X` (default), `raw/X` or a layer |
+| `--gene-ids-column` | Export: var column with gene ids (default `gene_ids`) |
+| `--gene-names-column` | Export: var column with gene names (default the var names) |
+| `--feature-types-column` | Export: var column with feature types (default `feature_types`) |
+
+Reading gives what `scanpy.read_10x_h5(gex_only=False)` gives, column for
+column: `gene_ids`, `feature_types`, every other per-feature field Cell Ranger
+recorded (`genome`, and `pattern`, `read` and so on for antibody and CRISPR
+features), `probe_ids` for a probe-based (Flex) matrix, and
+`filtered_barcodes` in obs where present. Unlike scanpy, every feature type
+is kept unless `--feature-type` says otherwise, and `X` keeps Cell Ranger's
+integer counts, where scanpy converts them to float32; run `adata recast
+out.h5ad X --inplace --dtype float32` if a tool needs floats. Repeated var
+names are kept and reported, as scanpy does. The run's metadata, which scanpy
+drops, goes in `uns["cellranger"]`.
+
+The matrix is stored genes x cells in CSC, which is byte for byte cells x
+genes in CSR, so `data`, `indices` and `indptr` stream straight across;
+`--split-feature-types` reads them once for every output.
+
+Writing produces the Cell Ranger 3+ layout for CellBender, SoupX,
+DropletUtils, Seurat and anything else that reads Cell Ranger output: gzip
+compression and fixed-width strings, as Cell Ranger writes them, since
+PyTables (which CellBender reads with) cannot read the variable-length kind.
+A CSC or dense matrix is transposed or sparsified on the way, streaming.
+Each feature needs an id and a type: if var has no `gene_ids` and no
+`feature_types` column (or the columns named by the flags above), the export
+is refused, and `--force` writes the names as ids and `Gene Expression` as
+the type. A matrix of floats is written as it is, with a warning. A file
+imported by `convert` exports with its run metadata and tag fields intact.
 
 ## `recast`
 

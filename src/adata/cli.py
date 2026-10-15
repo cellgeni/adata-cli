@@ -503,6 +503,27 @@ _CONVERT_FLAGS = {
     "compression": "--compression",
     "force": "--force",
     "overwrite": "--overwrite",
+    "genome": "--genome",
+    "var_names": "--var-names",
+    "make_unique": "--make-unique",
+    "feature_type": "--feature-type",
+    "split_feature_types": "--split-feature-types",
+    "layer": "--layer",
+    "gene_ids_column": "--gene-ids-column",
+    "gene_names_column": "--gene-names-column",
+    "feature_types_column": "--feature-types-column",
+}
+
+#: Flags that only make sense for format conversion; with recast's flags,
+#: they mean two commands' worth of request at once.
+_FORMAT_ONLY_FLAGS = {
+    "from_format": "--from",
+    "to_format": "--to",
+    **{
+        name: flag
+        for name, flag in _CONVERT_FLAGS.items()
+        if flag not in ("--force", "--zarr-format")
+    },
 }
 
 
@@ -532,7 +553,7 @@ def convert(
         None,
         "--output",
         "-o",
-        help="Output path; its extension picks the format (.h5ad, .zarr)",
+        help="Output path; its extension picks the format (.h5ad, .zarr, .h5)",
         dir_okay=True,
         file_okay=True,
     ),
@@ -567,6 +588,51 @@ def convert(
         "--overwrite",
         help="Replace an existing output",
     ),
+    genome: Optional[str] = typer.Option(
+        None,
+        "--genome",
+        help="10x input: the genome to keep (picks the group in a Cell Ranger 2 file)",
+    ),
+    var_names: str = typer.Option(
+        "gene_symbols",
+        "--var-names",
+        help="10x input: name features by gene_symbols or gene_ids",
+    ),
+    make_unique: bool = typer.Option(
+        False,
+        "--make-unique",
+        help="10x input: suffix repeated var names, as var_names_make_unique does",
+    ),
+    feature_type: Optional[str] = typer.Option(
+        None,
+        "--feature-type",
+        help="10x input: keep only this feature type, e.g. 'Gene Expression'",
+    ),
+    split_feature_types: bool = typer.Option(
+        False,
+        "--split-feature-types",
+        help="10x input: write one output per feature type, OUT.<type>.h5ad",
+    ),
+    layer: Optional[str] = typer.Option(
+        None,
+        "--layer",
+        help="10x output: the matrix to write: X (default), raw/X, or a layer",
+    ),
+    gene_ids_column: Optional[str] = typer.Option(
+        None,
+        "--gene-ids-column",
+        help="10x output: var column holding gene ids (default gene_ids)",
+    ),
+    gene_names_column: Optional[str] = typer.Option(
+        None,
+        "--gene-names-column",
+        help="10x output: var column holding gene names (default: var_names)",
+    ),
+    feature_types_column: Optional[str] = typer.Option(
+        None,
+        "--feature-types-column",
+        help="10x output: var column holding feature types (default feature_types)",
+    ),
     # Deprecated: recast's flags, so `convert` keeps working as it did until
     # 1.0.0. Hidden from --help; the old matrix paths arrive in ctx.args.
     inplace: bool = typer.Option(False, "--inplace", hidden=True),
@@ -580,9 +646,12 @@ def convert(
     """
     Convert a store to another format.
 
-    The output's extension picks the format: .h5ad or .zarr. Converting
-    between them copies every element, streamed, keeping the source's
-    chunking and compression where the target can express them.
+    The output's extension picks the format: .h5ad, .zarr, or .h5 for a 10x
+    Genomics matrix (Cell Ranger's *_feature_bc_matrix.h5). Between h5ad and
+    zarr every element is copied, streamed, keeping the source's chunking and
+    compression where the target can express them. A 10x matrix is read as
+    scanpy.read_10x_h5(gex_only=False) reads it, keeping integer counts, and
+    written as Cell Ranger writes it.
 
     Nothing is written until every check has passed, and the output is moved
     into place only once complete: a failed conversion leaves nothing
@@ -595,21 +664,16 @@ def convert(
         adata convert data.h5ad -o data.zarr
         adata convert data.zarr -o data.h5ad --compression gzip
         adata convert data.zarr -o v3.zarr --zarr-format 3
+        adata convert filtered_feature_bc_matrix.h5 -o counts.h5ad
+        adata convert raw_feature_bc_matrix.h5 -o rna.h5ad --feature-type "Gene Expression"
+        adata convert counts.h5ad -o for_cellbender.h5 --layer counts
     """
     entries = list(ctx.args)
     recast_flags = _given(ctx, _RECAST_FLAGS)
 
     try:
         if recast_flags:
-            mixed = _given(
-                ctx,
-                {
-                    "from_format": "--from",
-                    "to_format": "--to",
-                    "compression": "--compression",
-                    "overwrite": "--overwrite",
-                },
-            )
+            mixed = _given(ctx, _FORMAT_ONLY_FLAGS)
             if mixed:
                 raise ValueError(
                     f"{', '.join(mixed)} cannot be combined with "
@@ -677,6 +741,15 @@ def convert(
                 compression=compression,
                 force=force,
                 overwrite=overwrite,
+                genome=genome,
+                var_names=var_names,
+                make_unique=make_unique,
+                feature_type=feature_type,
+                split_feature_types=split_feature_types,
+                layer=layer,
+                gene_ids_column=gene_ids_column,
+                gene_names_column=gene_names_column,
+                feature_types_column=feature_types_column,
             ),
         )
     except Exception as e:

@@ -138,6 +138,27 @@ def test_the_two_transpose_paths_agree_on_an_awkward_matrix(tmp_path):
 # dtype -- what issue #13 asked for
 
 
+def test_a_streamed_transpose_is_no_larger_than_an_in_memory_one(tmp_path):
+    """HDF5 never gives back the space of a deleted dataset.
+
+    The streaming transpose kept its scratch buckets in the output and
+    deleted them at the end, which left them in the file as dead space: this
+    matrix, big enough to need two buckets, came out 2.9 times the size.
+    """
+    store = _store(tmp_path / "in.h5ad", _matrix(n_obs=6000, n_var=1000, density=0.2))
+    sizes = {}
+    for label, extra in (("streamed", []), ("in-memory", ["--in-memory"])):
+        out = tmp_path / f"{label}.h5ad"
+        result = runner.invoke(
+            app, ["recast", str(store), "X", "-o", str(out), "--layout", "csc", *extra]
+        )
+        assert result.exit_code == 0, _out(result)
+        sizes[label] = out.stat().st_size
+
+    assert sizes["streamed"] <= sizes["in-memory"] * 1.05, sizes
+    assert not list(tmp_path.glob("*scratch*")), "the scratch file is removed"
+
+
 def test_counts_stored_as_float64_convert_to_float32_and_shrink(tmp_path):
     """The reported case, end to end, including that the file gets smaller.
 

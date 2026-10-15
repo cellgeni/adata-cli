@@ -481,6 +481,51 @@ def test_convert_reads_grow_linearly(tmp_path, src, dst):
     assert_grows_linearly(measure, what=f"convert {src} to {dst}", axis="n_obs")
 
 
+def _tenx(path: Path, n: int, n_features: int = 8) -> Path:
+    from tests.conftest import write_10x_h5
+
+    counts = np.random.default_rng(0).poisson(0.5, (n, n_features))
+    return write_10x_h5(
+        path, counts,
+        barcodes=[f"BC{i:08d}-1" for i in range(n)],
+        ids=[f"ENSG{i}" for i in range(n_features)],
+        names=[f"G{i}" for i in range(n_features)],
+        types=["Gene Expression"] * (n_features - 2) + ["Antibody Capture"] * 2,
+    )
+
+
+@pytest.mark.parametrize("extra", [{}, {"split_feature_types": True}])
+def test_10x_import_reads_grow_linearly(tmp_path, extra):
+    """Barcodes are streamed, and a split reads the matrix once for all types."""
+    from adata.commands.convert import convert_store
+    from adata.conversion import Options
+
+    def measure(n: int) -> int:
+        source = _tenx(tmp_path / f"tx{n}{len(extra)}.h5", n)
+        with count_io() as io:
+            convert_store(
+                source, tmp_path / f"otx{n}{len(extra)}.h5ad", QUIET,
+                options=Options(**extra),
+            )
+        return io.reads
+
+    assert_grows_linearly(measure, what="convert 10x h5 to h5ad", axis="n_barcodes")
+
+
+def test_10x_export_reads_grow_linearly(tmp_path):
+    """Two passes over the barcodes -- width, then data -- and one over X."""
+    from adata.commands.convert import convert_store
+
+    def measure(n: int) -> int:
+        h5ad = tmp_path / f"ex{n}.h5ad"
+        convert_store(_tenx(tmp_path / f"ex{n}.h5", n), h5ad, QUIET)
+        with count_io() as io:
+            convert_store(h5ad, tmp_path / f"oex{n}.h5", QUIET)
+        return io.reads
+
+    assert_grows_linearly(measure, what="convert h5ad to 10x h5", axis="n_barcodes")
+
+
 def test_split_reads_grow_linearly_in_group_count(tmp_path, monkeypatch):
     """Splitting into k groups must stay linear in k at fixed store size.
 

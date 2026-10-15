@@ -52,6 +52,7 @@ adata split  data.h5ad --by sample -o per_sample/
 adata concat per_sample/*.h5ad -o merged.h5ad --join outer --label sample
 
 adata convert data.h5ad -o data.zarr
+adata convert filtered_feature_bc_matrix.h5 -o counts.h5ad
 adata recast  data.h5ad X -o small.h5ad --dtype float32
 
 adata create new.h5ad --n-obs 5000 --n-var 2000
@@ -66,6 +67,8 @@ CI against stores written by anndata 0.8, 0.9, 0.10, 0.11, 0.12 and 0.13, in
 both formats. Both backends are supported in both directions: `adata convert
 in.h5ad -o out.zarr` converts a whole store, and `subset`, `split` and
 `concat` convert as they write when the output's backend differs.
+`convert` also reads and writes 10x Genomics HDF5 matrices (Cell Ranger's
+`*_feature_bc_matrix.h5`), matching what `scanpy.read_10x_h5` reads.
 
 | Element | Read | Write |
 |---|---|---|
