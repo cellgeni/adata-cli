@@ -474,3 +474,25 @@ def test_a_folder_output_needs_to(cr3, tmp_path):
     result = _convert(store, "-o", tmp_path / "out")
     assert result.exit_code == 1
     assert "--to 10x-mtx" in _out(result)
+
+
+def test_export_writes_the_whole_uint64_range_exactly(tmp_path):
+    """Found in review: values above INT64_MAX wrapped negative, and the
+    int64 minimum hung the formatter."""
+    values = np.array([np.iinfo(np.uint64).max, 2**63, 1], dtype=np.uint64)
+    store = tmp_path / "s.h5ad"
+    ad.AnnData(
+        X=sparse.csr_matrix((values, [0, 1, 0], [0, 2, 3]), shape=(2, 2)),
+        obs={"_": np.zeros(2)},
+        var={"gene_ids": ["a", "b"], "feature_types": ["Gene Expression"] * 2},
+    ).write_h5ad(store)
+    folder = tmp_path / "out"
+    _ok(store, "-o", folder, "--to", "10x-mtx")
+
+    lines = _text(folder / "matrix.mtx.gz").splitlines()
+    assert lines[0].endswith("integer general")
+    assert lines[-3:] == [
+        f"1 1 {np.iinfo(np.uint64).max}",
+        f"2 1 {2**63}",
+        "1 2 1",
+    ]
