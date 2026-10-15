@@ -24,7 +24,12 @@ import pytest
 from typer.testing import CliRunner
 
 from adata.cli import app
-from tests.conftest import write_10x_h5, write_10x_v2_h5
+from tests.conftest import (
+    write_10x_h5,
+    write_10x_mtx,
+    write_10x_v2_h5,
+    write_starsolo_velocyto,
+)
 from tests.reference_stores import must_build, offline, uv_available
 
 pytestmark = [pytest.mark.integration, pytest.mark.timeout(1800)]
@@ -163,6 +168,149 @@ def test_a_cell_ranger_2_file_imports_as_scanpy_reads_it(tmp_path):
         },
     )
     _import_matches_scanpy(h5, tmp_path, "--genome", "mm10", genome="mm10")
+
+
+# ---------------------------------------------------------------------------
+# MTX folders: scanpy's read_10x_mtx is the reference
+
+
+_COMPARE_MTX = r"""
+import json, sys, warnings
+warnings.filterwarnings("ignore")
+import numpy as np, scanpy as sc, anndata as ad
+
+folder, h5ad, prefix, compressed, make_unique = sys.argv[1:6]
+ref = sc.read_10x_mtx(
+    folder, var_names="gene_symbols", make_unique=make_unique == "1",
+    gex_only=False, prefix=prefix or None, compressed=compressed == "1",
+)
+got = ad.read_h5ad(h5ad)
+problems = []
+if ref.shape != got.shape:
+    problems.append(f"shape {ref.shape} != {got.shape}")
+else:
+    if not np.array_equal(ref.X.toarray(), got.X.toarray()):
+        problems.append("X differs")
+    for axis in ("obs", "var"):
+        a, b = getattr(ref, axis), getattr(got, axis)
+        if list(a.index) != list(b.index):
+            problems.append(f"{axis}_names differ")
+        if list(a.columns) != list(b.columns):
+            problems.append(f"{axis} columns {list(a.columns)} != {list(b.columns)}")
+        for column in a.columns:
+            if column in b.columns and list(a[column].astype(str)) != list(b[column].astype(str)):
+                problems.append(f"{axis}[{column!r}] differs")
+print("RESULT " + json.dumps(problems))
+"""
+
+
+@pytest.mark.parametrize(
+    "layout,make_unique",
+    [("cr3", False), ("cr3", True), ("cr2", False), ("starsolo", False)],
+)
+def test_an_mtx_folder_imports_as_scanpy_reads_it(tmp_path, layout, make_unique):
+    ids = [f"ENSG{i:05d}" for i in range(6)] + ["CD3", "CD4"]
+    folder = write_10x_mtx(
+        tmp_path / "folder",
+        _counts(40, 8),
+        barcodes=_barcodes(40),
+        ids=ids,
+        names=["A", "B", "B", "C", "D", "E", "CD3_TotalSeqB", "CD4_TotalSeqB"],
+        types=["Gene Expression"] * 6 + ["Antibody Capture"] * 2,
+        layout=layout,
+        prefix="GSM1_" if layout == "cr3" else "",
+    )
+    out = tmp_path / "out.h5ad"
+    _convert(str(folder), "-o", str(out), *(["--make-unique"] if make_unique else []))
+    problems = _run(
+        ["scanpy"], _COMPARE_MTX, str(folder), str(out),
+        "GSM1_" if layout == "cr3" else "", "1" if layout == "cr3" else "0",
+        "1" if make_unique else "0",
+    )
+    assert problems == [], problems
+
+
+_COMPARE_VELOCYTO = r"""
+import json, sys, warnings
+warnings.filterwarnings("ignore")
+import numpy as np, scanpy as sc, anndata as ad
+
+folder, h5ad = sys.argv[1:3]
+got = ad.read_h5ad(h5ad)
+problems = []
+for name in ("spliced", "unspliced", "ambiguous"):
+    ref = sc.read_mtx(f"{folder}/{name}.mtx").T
+    if not np.array_equal(ref.X.toarray(), got.layers[name].toarray()):
+        problems.append(f"layers[{name!r}] differs")
+if not np.array_equal(sc.read_mtx(f"{folder}/spliced.mtx").T.X.toarray(), got.X.toarray()):
+    problems.append("X is not spliced")
+print("RESULT " + json.dumps(problems))
+"""
+
+
+def test_velocyto_layers_match_scanpys_read_mtx(tmp_path):
+    folder = write_starsolo_velocyto(
+        tmp_path / "raw",
+        {name: _counts(30, 5, seed=i) for i, name in enumerate(("spliced", "unspliced", "ambiguous"))},
+        barcodes=_barcodes(30),
+        ids=[f"G{i}" for i in range(5)],
+        names=[f"g{i}" for i in range(5)],
+    )
+    out = tmp_path / "velo.h5ad"
+    _convert(str(folder), "-o", str(out))
+    problems = _run(["scanpy"], _COMPARE_VELOCYTO, str(folder), str(out))
+    assert problems == [], problems
+
+
+_READ_MTX_EXPORT_WITH_SCANPY = r"""
+import json, sys, warnings
+warnings.filterwarnings("ignore")
+import numpy as np, scanpy as sc, anndata as ad
+
+ref, got = ad.read_h5ad(sys.argv[1]), sc.read_10x_mtx(sys.argv[2], gex_only=False, make_unique=False)
+problems = []
+if ref.shape != got.shape:
+    problems.append(f"shape {ref.shape} != {got.shape}")
+else:
+    X = ref.X.toarray() if hasattr(ref.X, "toarray") else np.asarray(ref.X)
+    if not np.array_equal(X, got.X.toarray()):
+        problems.append("X differs")
+    if list(ref.obs_names) != list(got.obs_names):
+        problems.append("obs_names differ")
+    if list(ref.var_names) != list(got.var_names):
+        problems.append("var_names differ")
+    for column in ("gene_ids", "feature_types"):
+        if list(ref.var[column].astype(str)) != list(got.var[column].astype(str)):
+            problems.append(f"var[{column!r}] differs")
+print("RESULT " + json.dumps(problems))
+"""
+
+
+@pytest.mark.parametrize("layout", ["csr", "csc", "dense"])
+def test_scanpy_reads_the_mtx_folder_we_export(tmp_path, layout):
+    ad = pytest.importorskip("anndata")
+    pd = pytest.importorskip("pandas")
+    sparse = pytest.importorskip("scipy.sparse")
+
+    counts = _counts(30, 7).astype(np.int32)
+    X = {"csr": sparse.csr_matrix, "csc": sparse.csc_matrix, "dense": np.asarray}[layout](counts)
+    source = tmp_path / "source.h5ad"
+    ad.AnnData(
+        X=X,
+        obs=pd.DataFrame(index=_barcodes(30)),
+        var=pd.DataFrame(
+            {
+                "gene_ids": [f"ENSG{i}" for i in range(7)],
+                "feature_types": ["Gene Expression"] * 7,
+            },
+            index=[f"G{i}" for i in range(7)],
+        ),
+    ).write_h5ad(source)
+
+    out = tmp_path / "exported"
+    _convert(str(source), "-o", str(out), "--to", "10x-mtx")
+    problems = _run(["scanpy"], _READ_MTX_EXPORT_WITH_SCANPY, str(source), str(out))
+    assert problems == [], problems
 
 
 _READ_EXPORT_WITH_SCANPY = r"""

@@ -12,9 +12,9 @@ for time, and a table that hid the cost would not be worth publishing.
 
 ## What is measured
 
-Eighteen cases on a GitHub-hosted runner: concat (inner, outer, `--merge same`),
+Nineteen cases on a GitHub-hosted runner: concat (inner, outer, `--merge same`),
 subset by query, h5ad→zarr (`convert`), `view`, `ls`, `create`, `export` dataframe /
-array / sparse, `import dataframe`, `split`, `recast` narrowing and layout, and a
+array / sparse, `import dataframe`, MTX folder import (`convert`), `split`, `recast` narrowing and layout, and a
 peak-RSS-against-input-size sweep. Inputs
 are 50,000 × 20,000 at 5% density, plus the 2,000 × 36,601 shape that hung in 0.5.1.
 `recast` narrowing starts from a copy of the main input stored as float64 values

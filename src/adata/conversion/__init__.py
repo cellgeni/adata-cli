@@ -17,7 +17,7 @@ from typing import Dict, FrozenSet, List, Optional
 
 import h5py
 
-from adata.conversion import tenx
+from adata.conversion import mtx, tenx
 from adata.conversion.anndata_copy import AnnDataCopy
 from adata.conversion.base import ConversionPlan, Converter, Format, Options
 from adata.storage import has_valid_anndata_root_attrs, is_zarr_path
@@ -74,6 +74,15 @@ FORMATS: Dict[str, Format] = {
         importer=tenx.TenxImport(),
         exporter=tenx.TenxExport(),
     ),
+    # A folder, so no extension: chosen as output with `--to 10x-mtx`.
+    "10x-mtx": Format(
+        name="10x-mtx",
+        description="10x Genomics / STARsolo Matrix Market folder",
+        extensions=(),
+        sniff=mtx.sniff,
+        importer=mtx.MtxImport(),
+        exporter=mtx.MtxExport(),
+    ),
 }
 
 _ANNDATA_COPY = AnnDataCopy()
@@ -106,6 +115,12 @@ def detect_format(path: Path) -> str:
     for fmt in FORMATS.values():
         if (fmt.anndata or fmt.sniff is None) and suffix in fmt.extensions:
             return fmt.name
+    if suffix in (".mtx", ".gz") and path.name.lower().endswith((".mtx", ".mtx.gz")):
+        raise ValueError(
+            f"'{path.name}' is a single Matrix Market file, which `convert` "
+            "does not read on its own: give the folder holding it with its "
+            "barcodes and features, or use `adata import sparse`."
+        )
     raise ValueError(
         f"Cannot tell what format '{path}' is. Pass --from, one of: {_names()}."
     )
@@ -130,15 +145,21 @@ def output_format(path: Path, requested: Optional[str] = None) -> str:
         if by_extension is None:
             raise ValueError(
                 f"Cannot tell the output format from '{path.name}'. "
-                f"Use a known extension or pass --to, one of: {_names()}."
+                f"Use a known extension or pass --to, one of: {_names()} "
+                "(--to 10x-mtx for a folder)."
             )
         return by_extension
 
     if by_extension is not None and by_extension != requested:
+        extensions = FORMATS[requested].extensions
         raise ValueError(
             f"--to {requested} contradicts the output's extension, which means "
-            f"{by_extension}. Name the output with one of: "
-            f"{', '.join(FORMATS[requested].extensions)}."
+            f"{by_extension}. Name the output "
+            + (
+                f"with one of: {', '.join(extensions)}."
+                if extensions
+                else "as a folder, without an extension."
+            )
         )
     if (requested == "zarr") != (suffix == ".zarr"):
         raise ValueError(

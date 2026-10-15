@@ -553,7 +553,7 @@ def convert(
     ctx: typer.Context,
     file: Path = typer.Argument(
         ...,
-        help="Input file or store",
+        help="Input file, store, or 10x/STARsolo matrix folder",
         exists=True,
         readable=True,
         dir_okay=True,
@@ -563,7 +563,8 @@ def convert(
         None,
         "--output",
         "-o",
-        help="Output path; its extension picks the format (.h5ad, .zarr, .h5)",
+        help="Output path; its extension picks the format (.h5ad, .zarr, .h5), "
+        "or a folder with --to 10x-mtx",
         dir_okay=True,
         file_okay=True,
     ),
@@ -586,7 +587,7 @@ def convert(
         None,
         "--compression",
         help="none, gzip or lzf for h5ad; none, gzip, zstd or blosc for zarr "
-        "(defaults to the source's)",
+        "(defaults to the source's); gzip or none for a 10x-mtx folder",
     ),
     force: bool = typer.Option(
         False,
@@ -601,7 +602,8 @@ def convert(
     genome: Optional[str] = typer.Option(
         None,
         "--genome",
-        help="10x input: the genome to keep (picks the group in a Cell Ranger 2 file)",
+        help="10x input: the genome to keep (picks the group or subfolder of a "
+        "Cell Ranger 2 matrix)",
     ),
     var_names: str = typer.Option(
         "gene_symbols",
@@ -657,11 +659,13 @@ def convert(
     Convert a store to another format.
 
     The output's extension picks the format: .h5ad, .zarr, or .h5 for a 10x
-    Genomics matrix (Cell Ranger's *_feature_bc_matrix.h5). Between h5ad and
-    zarr every element is copied, streamed, keeping the source's chunking and
-    compression where the target can express them. A 10x matrix is read as
-    scanpy.read_10x_h5(gex_only=False) reads it, keeping integer counts, and
-    written as Cell Ranger writes it.
+    Genomics matrix (Cell Ranger's *_feature_bc_matrix.h5); --to 10x-mtx
+    writes a Matrix Market folder. Between h5ad and zarr every element is
+    copied, streamed, keeping the source's chunking and compression where the
+    target can express them. A 10x matrix is read as scanpy's read_10x_h5 or
+    read_10x_mtx (gex_only=False) reads it, keeping integer counts, and
+    written as Cell Ranger writes it. MTX folders from Cell Ranger and
+    STARsolo, velocyto's included, are read in two streaming passes.
 
     Nothing is written until every check has passed, and the output is moved
     into place only once complete: a failed conversion leaves nothing
@@ -677,6 +681,9 @@ def convert(
         adata convert filtered_feature_bc_matrix.h5 -o counts.h5ad
         adata convert raw_feature_bc_matrix.h5 -o rna.h5ad --feature-type "Gene Expression"
         adata convert counts.h5ad -o for_cellbender.h5 --layer counts
+        adata convert Solo.out/Gene/filtered -o counts.h5ad
+        adata convert Solo.out/Velocyto/raw -o velocyto.h5ad
+        adata convert counts.h5ad -o counts_mtx --to 10x-mtx --layer counts
     """
     entries = list(ctx.args)
     recast_flags = _given(ctx, _RECAST_FLAGS)

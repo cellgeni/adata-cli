@@ -145,6 +145,7 @@ def _run_contender(
     substitutions = {
         "output": str(output),
         "outdir": str(outdir),
+        "sidecar": str(sidecar) if sidecar else "",
         "sidecar_csv": str(sidecar) if sidecar else "",
         "n_obs": str(shape[0]),
         "n_var": str(shape[1]),
@@ -152,6 +153,7 @@ def _run_contender(
     }
     env = {"BENCH_N_OBS": str(shape[0]), "BENCH_N_VAR": str(shape[1])}
     if sidecar:
+        env["BENCH_SIDECAR"] = str(sidecar)
         env["BENCH_SIDECAR_CSV"] = str(sidecar)
 
     if contender.argv is not None:
@@ -181,9 +183,13 @@ def _build_sidecar(case: Case, inputs: List[Path], workdir: Path) -> Optional[Pa
     Derived from the real store rather than invented, so an import writes
     back something the file could plausibly have held.
     """
+    if case.sidecar == "10x-mtx":
+        return _build_mtx_sidecar(case, inputs, workdir)
     if case.sidecar != "csv":
         return None
-    path = workdir / f"{case.name}-sidecar.csv"
+    # Named for its input too: a work directory reused across tiers must not
+    # hand one tier's sidecar to another.
+    path = workdir / f"{case.name}-{inputs[0].stem}-sidecar.csv"
     if path.exists():
         return path
     import h5py
@@ -191,6 +197,33 @@ def _build_sidecar(case: Case, inputs: List[Path], workdir: Path) -> Optional[Pa
 
     with h5py.File(inputs[0], "r") as handle:
         read_elem(handle["obs"]).to_csv(path)
+    return path
+
+
+def _build_mtx_sidecar(case: Case, inputs: List[Path], workdir: Path) -> Path:
+    """A Cell Ranger 3 MTX folder holding the first input's counts.
+
+    Written by adata-cli itself, which is the one tool here that can: integer
+    counts first, as Cell Ranger writes them, then the gzipped folder. The
+    fixture's var names are ids and its symbols are a column, so the symbols
+    become the names, and placeholders the ids.
+    """
+    path = workdir / f"{case.name}-{inputs[0].stem}-sidecar"
+    if path.exists():
+        return path
+    counts = workdir / f"{case.name}-{inputs[0].stem}-counts.h5ad"
+    if counts.exists():
+        counts.unlink()
+    for command in (
+        ["adata", "recast", str(inputs[0]), "X", "-o", str(counts), "--dtype", "int32"],
+        ["adata", "convert", str(counts), "-o", str(path), "--to", "10x-mtx",
+         "--gene-names-column", "gene_symbol", "--feature-types-column",
+         "feature_type", "--force"],
+    ):
+        done = subprocess.run(command, capture_output=True, text=True)
+        if done.returncode != 0:
+            raise RuntimeError(f"could not build the MTX sidecar:\n{done.stderr or done.stdout}")
+    counts.unlink()
     return path
 
 
