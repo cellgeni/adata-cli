@@ -32,6 +32,7 @@ from benchmarks import datasets
 from benchmarks._measure import (
     DEFAULT_MEMORY_LIMIT,
     Measurement,
+    _tree_size,
     drop_page_cache,
     measure,
 )
@@ -219,13 +220,23 @@ def run(
           flush=True)
     main_inputs = datasets.build(fixtures, tier, count=2)
     var_heavy_inputs = datasets.build(fixtures, datasets.VAR_HEAVY, count=2)
+    wide_inputs = {
+        variant: datasets.build_wide(fixtures, tier, variant)
+        for variant in sorted({case.wide for case in selected if case.wide})
+    }
 
     cache_dropped = drop_page_cache() if drop_cache else False
 
     results: List[Dict] = []
     for case in selected:
-        pool = var_heavy_inputs if case.var_heavy else main_inputs
+        if case.wide:
+            pool = wide_inputs[case.wide]
+        elif case.var_heavy:
+            pool = var_heavy_inputs
+        else:
+            pool = main_inputs
         inputs = pool[: case.inputs]
+        input_bytes = sum(_tree_size(path)[0] for path in inputs)
         print(f"[case] {case.name}", flush=True)
         for contender in case.contenders:
             if contender.unsupported:
@@ -270,6 +281,7 @@ def run(
                 # The fastest run, because a slower one differs only by what
                 # else the machine was doing.
                 **best.as_dict(),
+                "input_bytes": input_bytes,
                 "runs": len(runs),
                 "wall_s_all": [m.wall_s for m in runs],
             }

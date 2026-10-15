@@ -180,3 +180,51 @@ def test_publishing_keeps_the_page_prose():
     assert page.count("\n# ") + page.startswith("# ") == 1, (
         "the published page must have exactly one H1"
     )
+
+
+def test_the_wide_fixture_holds_the_same_matrix_in_wider_dtypes(tmp_path):
+    """`recast-narrow` measures nothing unless its input is actually wide.
+
+    Until 0.7.0 the dtype case narrowed the main fixture, which is already
+    float32 with int32 indices: a rewrite that changed nothing.
+    """
+    ad = pytest.importorskip("anndata")
+    h5py = pytest.importorskip("h5py")
+    from benchmarks import datasets
+
+    tiny = datasets.Tier("tiny", 50, 40, 0.1, "test")
+    narrow = ad.read_h5ad(datasets.build(tmp_path, tiny, count=1)[0])
+
+    for variant, compression in datasets.WIDE_COMPRESSION.items():
+        (path,) = datasets.build_wide(tmp_path, tiny, variant)
+        with h5py.File(path, "r") as handle:
+            assert handle["X/data"].dtype == "float64"
+            assert handle["X/indices"].dtype == "int64"
+            assert handle["X/indptr"].dtype == "int64"
+            assert handle["X/data"].compression == compression
+
+        wide = ad.read_h5ad(path)
+        assert (wide.X != narrow.X).nnz == 0
+        assert list(wide.obs_names) == list(narrow.obs_names)
+        assert list(wide.var.columns) == list(narrow.var.columns)
+
+
+def test_a_size_case_reports_input_to_output():
+    from benchmarks.report import render
+
+    record = {
+        "case": "recast-narrow", "contender": "adata-cli", "status": "ok",
+        "wall_s": 1.0, "maxrss_bytes": 100_000_000,
+        "input_bytes": 600_000_000, "output_bytes": 300_000_000,
+        "output_files": 1,
+    }
+    payload = {
+        "ref": "test", "tier": "smoke", "tier_shape": [1, 1, 0.05],
+        "var_heavy_shape": [1, 1], "page_cache_dropped": True,
+        "memory_limit_bytes": 1, "repeats": 1, "platform": "x",
+        "python": "3", "versions": {}, "generated": "now",
+        "results": [record],
+    }
+    text = render(payload)
+    assert "Input → output" in text
+    assert "600.0 MB → 300.0 MB (-50%)" in text

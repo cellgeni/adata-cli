@@ -34,7 +34,15 @@ def _bytes(n: int) -> str:
     return f"{n} B"
 
 
-def _cell(record: Dict) -> tuple:
+def _size_change(record: Dict) -> str:
+    """`583.2 MB -> 291.1 MB (-50%)`: what the case did to the file's size."""
+    before, after = record.get("input_bytes"), record.get("output_bytes")
+    if not before or not after:
+        return _bytes(after)
+    return f"{_bytes(before)} → {_bytes(after)} ({(after - before) / before:+.0%})"
+
+
+def _cell(record: Dict, *, compare_size: bool = False) -> tuple:
     """(wall, rss, output) as they should read in the table."""
     status = record.get("status")
     if status == "n/a":
@@ -53,7 +61,9 @@ def _cell(record: Dict) -> tuple:
     if status == "failed":
         return "**failed**", _bytes(record["maxrss_bytes"]), "-"
 
-    output = _bytes(record["output_bytes"])
+    output = (
+        _size_change(record) if compare_size else _bytes(record["output_bytes"])
+    )
     if record.get("output_files", 0) > 1:
         # Zarr: a directory of small chunks looks far larger under `du` than
         # the bytes it holds, so the file count goes alongside.
@@ -111,10 +121,14 @@ def render(payload: Dict, previous: Optional[Dict] = None) -> str:
         if case:
             lines.append(f"{case.question}")
             lines.append("")
-        lines.append("| Contender | Wall time | Peak RSS | Output | vs previous |")
+        compare_size = bool(case and case.compare_size)
+        output_header = "Input → output" if compare_size else "Output"
+        lines.append(
+            f"| Contender | Wall time | Peak RSS | {output_header} | vs previous |"
+        )
         lines.append("|---|---|---|---|---|")
         for record in records:
-            wall, rss, output = _cell(record)
+            wall, rss, output = _cell(record, compare_size=compare_size)
             lines.append(
                 f"| {record['contender']} | {wall} | {rss} | {output} | "
                 f"{_delta(record, before.get((name, record['contender'])))} |"
@@ -141,7 +155,9 @@ def render(payload: Dict, previous: Optional[Dict] = None) -> str:
         "several times the stored bytes and the column says more about the "
         "writer's allocation strategy than about the data; at `ci` and above "
         "it is noise. Zarr stores report a file count alongside, because a "
-        "directory of small chunks measures much larger than it holds."
+        "directory of small chunks measures much larger than it holds. "
+        "Where a case exists to change a file's size, the column reads "
+        "input → output, with the change."
     )
     return "\n".join(lines) + "\n"
 

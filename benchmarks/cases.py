@@ -83,6 +83,12 @@ class Case:
     output_suffix: str = ".h5ad"
     #: Use the var-heavy shape rather than the tier's main shape.
     var_heavy: bool = False
+    #: Use a wide variant of the main input -- float64 values, int64 indices
+    #: -- named for how it stores X: "uncompressed" or "lzf".
+    wide: Optional[str] = None
+    #: Report the output's size against the input's, as before -> after. For
+    #: cases whose point is what they do to the file's size.
+    compare_size: bool = False
     #: An auxiliary input the case needs, e.g. the CSV an import reads.
     #: Built once from the first input and offered to CLI contenders as
     #: `{sidecar_csv}` and to scripts as $BENCH_SIDECAR_CSV.
@@ -483,23 +489,41 @@ CASES: List[Case] = [
         ],
     ),
     # -- recast (named convert until 0.7.0; the case names keep the history) --
+    #
+    # `convert-dtype` ran until 0.7.0 on the main fixture, which is already
+    # float32 with int32 indices: it measured a rewrite that changed nothing,
+    # and its output was the size of its input. `recast-narrow` replaces it,
+    # on an input worth narrowing, and reports the size it saves.
     Case(
-        name="convert-dtype",
-        question="Rewrite X as float32.",
+        name="recast-narrow",
+        question=(
+            "Narrow X from float64 values with int64 indices to float32 and "
+            "int32, as issue #13 asked. X is uncompressed, as `write_h5ad` "
+            "leaves it by default, so the output keeps that and the baseline "
+            "writes it the same way."
+        ),
+        wide="uncompressed",
+        compare_size=True,
         contenders=[
             Contender(
                 "adata-cli",
                 argv=[
                     "adata", "recast", "{input0}", "X", "-o", "{output}",
-                    "--dtype", "float32", "--force",
+                    "--dtype", "float32", "--indices-dtype", "int32",
                 ],
             ),
             Contender(
                 "anndata (in memory)",
+                # compression=None, not COMPRESSION: the input's X is
+                # uncompressed and adata-cli keeps it that way, so lzf here
+                # would credit anndata with a saving the cast did not make.
                 script=_py(
                     "obj = ad.read_h5ad(IN[0])\n"
-                    "obj.X = obj.X.astype('float32')\n"
-                    "obj.write_h5ad(OUT, compression=COMPRESSION)\n"
+                    "X = obj.X.astype('float32')\n"
+                    "X.indices = X.indices.astype('int32')\n"
+                    "X.indptr = X.indptr.astype('int32')\n"
+                    "obj.X = X\n"
+                    "obj.write_h5ad(OUT, compression=None)\n"
                 ),
             ),
             Contender(
@@ -507,10 +531,47 @@ CASES: List[Case] = [
                 unsupported="no dtype rewrite; scanpy defers to anndata",
             ),
         ],
+        tags=["headline"],
+    ),
+    Case(
+        name="recast-narrow-lzf",
+        question=(
+            "The same narrowing on an lzf-compressed X. Integer counts in "
+            "float64 are mostly zero bytes, which lzf already removes, so "
+            "expect a small saving on disk; the halving is in memory, once "
+            "the matrix is loaded."
+        ),
+        wide="lzf",
+        compare_size=True,
+        contenders=[
+            Contender(
+                "adata-cli",
+                argv=[
+                    "adata", "recast", "{input0}", "X", "-o", "{output}",
+                    "--dtype", "float32", "--indices-dtype", "int32",
+                ],
+            ),
+            Contender(
+                "anndata (in memory)",
+                script=_py(
+                    "obj = ad.read_h5ad(IN[0])\n"
+                    "X = obj.X.astype('float32')\n"
+                    "X.indices = X.indices.astype('int32')\n"
+                    "X.indptr = X.indptr.astype('int32')\n"
+                    "obj.X = X\n"
+                    "obj.write_h5ad(OUT, compression=COMPRESSION)\n"
+                ),
+            ),
+        ],
     ),
     Case(
         name="convert-layout",
-        question="Transpose X from CSR to CSC.",
+        question=(
+            "Transpose X from CSR to CSC. The output should be the size of "
+            "the input: 0.7.0 fixed a `--layout` that wrote it three times "
+            "larger."
+        ),
+        compare_size=True,
         contenders=[
             Contender(
                 "adata-cli (streaming)",
