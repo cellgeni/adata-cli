@@ -347,6 +347,10 @@ def subset(
         adata subset data.h5ad -o out.h5ad -q "n_counts > 1000 and cluster in A,B"
         adata subset data.h5ad -o out.h5ad --var-query "highly_variable == True"
     """
+    if zarr_format is not None and zarr_format not in (2, 3):
+        console.print("[bold red]Error:[/] --zarr-format must be 2 or 3.")
+        raise typer.Exit(code=1)
+
     if obs is None and var is None and obs_query is None and var_query is None:
         console.print(
             "[bold red]Error:[/] Provide at least one of --obs, --var, "
@@ -447,6 +451,10 @@ def concat(
         adata concat *.h5ad -o merged.h5ad --join outer --label sample
         adata concat a.h5ad b.h5ad -o m.h5ad --keys a,b --index-unique - --uns-merge same
     """
+    if zarr_format is not None and zarr_format not in (2, 3):
+        console.print("[bold red]Error:[/] --zarr-format must be 2 or 3.")
+        raise typer.Exit(code=1)
+
     for name, value in (("--merge", merge), ("--uns-merge", uns_merge)):
         if value is not None and value not in MERGE_CHOICES:
             console.print(

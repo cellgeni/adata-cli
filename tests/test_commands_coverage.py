@@ -297,6 +297,28 @@ def test_create_rejects_a_bad_zarr_format(temp_dir):
     assert "must be 2 or 3" in _out(result)
 
 
+def test_subset_rejects_a_bad_zarr_format(store, temp_dir):
+    path, _ = store
+    result = runner.invoke(
+        app,
+        ["subset", str(path), "-o", str(temp_dir / "o.h5ad"),
+         "-q", "obs_names", "--zarr-format", "4"],
+    )
+    assert result.exit_code == 1
+    assert "must be 2 or 3" in _out(result)
+
+
+def test_concat_rejects_a_bad_zarr_format(store, temp_dir):
+    path, _ = store
+    result = runner.invoke(
+        app,
+        ["concat", str(path), str(path), "-o", str(temp_dir / "o.h5ad"),
+         "--zarr-format", "4"],
+    )
+    assert result.exit_code == 1
+    assert "must be 2 or 3" in _out(result)
+
+
 def test_create_requires_a_size_or_a_name_file(temp_dir):
     result = runner.invoke(app, ["create", str(temp_dir / "x.h5ad"), "--n-var", "2"])
     assert result.exit_code == 1
