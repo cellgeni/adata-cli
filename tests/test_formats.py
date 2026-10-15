@@ -19,7 +19,8 @@ from adata.elements import write as ew
 from adata.formats.array import export_npy, import_npy
 from adata.formats.image import export_image, import_image
 from adata.formats.json_data import export_json, import_json
-from adata.formats.sparse import _read_mtx, export_mtx, import_mtx
+from adata.formats.mtx import read_header
+from adata.formats.sparse import export_mtx, import_mtx
 from adata.storage import open_store
 
 console = Console(stderr=True)
@@ -248,6 +249,16 @@ def test_npy_import_creates_intermediate_groups(store, temp_dir):
 # sparse matrices
 
 
+def _read_mtx(path):
+    """(0-based entries, shape, nnz) of an MTX file, read by scipy as the oracle."""
+    mmread = pytest.importorskip("scipy.io").mmread
+    coo = mmread(str(path)).tocoo()
+    entries = [
+        (int(r), int(c), v.item()) for r, c, v in zip(coo.row, coo.col, coo.data)
+    ]
+    return entries, coo.shape, read_header(path).nnz
+
+
 def _write_mtx(path, header, dims, entries):
     lines = [header, "% a comment"]
     lines.append(" ".join(str(d) for d in dims))
@@ -276,22 +287,27 @@ def test_mtx_round_trips(store, temp_dir):
     assert sorted(entries) == [(0, 0, 1.5), (1, 1, 2.5), (2, 0, 3.5)]
 
 
-def test_mtx_pattern_field_defaults_values_to_one(temp_dir):
+def test_mtx_pattern_field_imports_as_ones(store, temp_dir):
+    path, opener = store
     source = _write_mtx(
         temp_dir / "p.mtx",
         "%%MatrixMarket matrix coordinate pattern general",
         (2, 2, 2),
         [(1, 1), (2, 2)],
     )
-    entries, _, _ = _read_mtx(source)
-    assert [e[2] for e in entries] == [1.0, 1.0]
+    with opener("a") as root:
+        import_mtx(root, "uns/p", source, console)
+    with opener("r") as root:
+        data = np.asarray(root["uns"]["p"]["data"][...])
+    assert data.tolist() == [1, 1]
+    assert data.dtype == np.int32
 
 
 def test_mtx_rejects_a_missing_header(temp_dir):
     bad = temp_dir / "bad.mtx"
     bad.write_text("1 1 1\n1 1 1.0\n")
-    with pytest.raises(ValueError, match="MatrixMarket header"):
-        _read_mtx(bad)
+    with pytest.raises(ValueError, match="not a Matrix Market file"):
+        read_header(bad)
 
 
 def test_mtx_export_in_memory_matches_streaming(store, temp_dir):

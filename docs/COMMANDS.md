@@ -326,7 +326,7 @@ or a file of names. `--force` overwrites an existing store.
 |---|---|---|
 | `dataframe` | CSV | any dataframe path (`obs`, `var`, `raw/var`, …) |
 | `array` | `.npy` | any dense array |
-| `sparse` | `.mtx` | CSR/CSC groups |
+| `sparse` | `.mtx`, or `.mtx.gz` | CSR/CSC groups |
 | `dict` | JSON | any group or scalar |
 | `image` | PNG/JPEG/TIFF | 2D or 3D arrays |
 
@@ -341,6 +341,10 @@ adata export dict data.h5ad uns -o metadata.json
 Omit `--output` to write to stdout. Writing to a file streams in chunks;
 stdout is not seekable, so `export array` holds the array in memory on that
 path.
+
+`export sparse` gzips its output when the name ends in `.gz`. Whole-number
+values are written as integers, and other floats with enough digits to read
+back exactly.
 
 ## `import`
 
@@ -357,6 +361,16 @@ adata import image     data.h5ad uns/spatial/hires tissue.png --inplace
 
 Dimensions are validated against the existing obs/var where the path implies
 an axis.
+
+For `sparse`: the file is read in two streaming passes, so its size is not a
+limit, and it may be gzipped (`counts.mtx.gz`). The first pass checks the
+whole file before the store is touched. `integer` values stay integers
+(int32, or int64 when a value needs it), `real` ones become float64, and
+`pattern` entries become ones. Duplicate entries are summed, as scipy does.
+Only `coordinate general` files are read: `symmetric`, `skew-symmetric`,
+`hermitian` and `complex` files, and dense `array` ones, are refused. An
+input whose entries are not in row order is sorted through scratch space
+beside the store.
 
 For `dataframe`: columns that parse as integers or floats become numeric
 arrays; string columns with few distinct values become categoricals. Use

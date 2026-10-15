@@ -11,6 +11,10 @@ set by the bucket size rather than by nnz:
    `BucketSorter.add`), kept on disk in a scratch group (`scratch_group`);
 3. read one bucket at a time, sort it, and append it to the output
    (`BucketSorter.runs`).
+
+Input that already arrives in row order -- as Cell Ranger and STARsolo write
+their MTX files -- skips the buckets (`grouped_runs`). Either way the runs
+go through `DuplicateSummer` and into a `CsrAppender`.
 """
 
 from __future__ import annotations
@@ -49,6 +53,23 @@ def count_keys(counts: np.ndarray, keys: np.ndarray) -> None:
     else:
         unique, seen = np.unique(keys, return_counts=True)
         counts[unique] += seen
+
+
+def sum_keys(sums: np.ndarray, keys: np.ndarray, weights: np.ndarray) -> None:
+    """Add `weights[i]` to `sums[keys[i]]`, over the span the block covers.
+
+    As `count_keys`, and for the same reason: cost set by the block, not by
+    the length of `sums`.
+    """
+    if keys.size == 0:
+        return
+    lo, hi = int(keys.min()), int(keys.max())
+    span = hi - lo + 1
+    if span <= 4 * keys.size:
+        sums[lo : hi + 1] += np.bincount(keys - lo, weights=weights, minlength=span)
+    else:
+        unique, inverse = np.unique(keys, return_inverse=True)
+        sums[unique] += np.bincount(inverse, weights=weights, minlength=unique.size)
 
 
 def bucket_bounds(
@@ -176,3 +197,132 @@ class BucketSorter:
             values = np.asarray(vals[...])
             order = np.lexsort((minor, major))
             yield major[order], minor[order], values[order]
+
+
+Triple = Tuple[np.ndarray, np.ndarray, np.ndarray]
+
+#: The largest nnz an int32 `indptr` can address.
+INT32_MAX = int(np.iinfo(np.int32).max)
+
+
+def grouped_runs(blocks: Iterator[Triple], *, sort: bool) -> Iterator[Triple]:
+    """Runs in CSR order, from blocks already grouped by row.
+
+    The fast path, for input whose rows arrive in order -- as Cell Ranger and
+    STARsolo write them. A row may straddle two blocks, so the last row of
+    each block is held back and joined to the next. With `sort`, entries are
+    put in column order within each row; without, they are taken to be in it
+    already.
+    """
+    carry: Optional[Triple] = None
+    for rows, cols, values in blocks:
+        if carry is not None:
+            rows = np.concatenate((carry[0], rows))
+            cols = np.concatenate((carry[1], cols))
+            values = np.concatenate((carry[2], values))
+            carry = None
+        if rows.size == 0:
+            continue
+        cut = int(np.searchsorted(rows, rows[-1], side="left"))
+        carry = (rows[cut:], cols[cut:], values[cut:])
+        if cut:
+            yield _ordered(rows[:cut], cols[:cut], values[:cut], sort)
+    if carry is not None and carry[0].size:
+        yield _ordered(*carry, sort)
+
+
+def _ordered(rows: np.ndarray, cols: np.ndarray, values: np.ndarray, sort: bool) -> Triple:
+    if not sort:
+        return rows, cols, values
+    order = np.lexsort((cols, rows))
+    return rows[order], cols[order], values[order]
+
+
+class DuplicateSummer:
+    """Merge repeated (row, column) entries by adding their values.
+
+    As scipy does when it builds CSR from coordinates, and so as scanpy's
+    readers give them. Each run must hold whole rows, sorted, which both
+    `grouped_runs` and `BucketSorter.runs` guarantee.
+    """
+
+    def __init__(self) -> None:
+        self.summed = 0
+
+    def __call__(self, runs: Iterator[Triple]) -> Iterator[Triple]:
+        for rows, cols, values in runs:
+            same = (rows[1:] == rows[:-1]) & (cols[1:] == cols[:-1])
+            if same.any():
+                starts = np.flatnonzero(np.concatenate(([True], ~same)))
+                self.summed += int(rows.size - starts.size)
+                values = np.add.reduceat(values, starts)
+                rows, cols = rows[starts], cols[starts]
+            yield rows, cols, values
+
+
+class CsrAppender:
+    """A CSR matrix written row by row: entries must arrive in row order.
+
+    `data` and `indices` grow as entries are appended; `indptr` is written
+    by `finish` from the rows seen, as int32 when nnz allows, as anndata and
+    scipy would write it.
+    """
+
+    def __init__(
+        self,
+        parent: Any,
+        name: str,
+        *,
+        shape: Tuple[int, int],
+        data_dtype: Any,
+        index_dtype: Any = np.int32,
+        compression: Optional[str] = None,
+    ) -> None:
+        from adata.core.subset import _growable_like
+        from adata.elements import spec
+        from adata.elements.write import set_shape_attr
+
+        self.group = parent.create_group(name)
+        spec.set_encoding(self.group, spec.CSR_MATRIX)
+        set_shape_attr(self.group, shape)
+        self.shape = shape
+        self.data_dtype = np.dtype(data_dtype)
+        self.index_dtype = np.dtype(index_dtype)
+        self.compression = compression
+        self.data = _growable_like(
+            self.group, "data", self.data_dtype, None, compression=compression
+        )
+        self.indices = _growable_like(
+            self.group, "indices", self.index_dtype, None, compression=compression
+        )
+        self.counts = np.zeros(shape[0], dtype=np.int64)
+        self.nnz = 0
+
+    def append(self, rows: np.ndarray, cols: np.ndarray, values: np.ndarray) -> None:
+        from adata.core import subset
+
+        if rows.size == 0:
+            return
+        if self.data_dtype.kind in "iu":
+            info = np.iinfo(self.data_dtype)
+            if values.min() < info.min or values.max() > info.max:
+                raise ValueError(
+                    f"A value does not fit {self.data_dtype}: summing duplicate "
+                    f"entries reached {int(values.max()):,}."
+                )
+        count_keys(self.counts, rows)
+        subset._append(self.data, values.astype(self.data_dtype, copy=False))
+        subset._append(self.indices, cols.astype(self.index_dtype, copy=False))
+        self.nnz += int(rows.size)
+
+    def finish(self) -> int:
+        from adata.core.subset import _sparse_dataset
+
+        dtype = np.int32 if self.nnz <= INT32_MAX else np.int64
+        indptr = np.concatenate(([0], np.cumsum(self.counts))).astype(dtype)
+        dataset = _sparse_dataset(
+            self.group, "indptr", np.dtype(dtype), indptr.size, None,
+            compression=self.compression,
+        )
+        dataset[:] = indptr
+        return self.nnz

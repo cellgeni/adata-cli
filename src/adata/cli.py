@@ -1117,7 +1117,7 @@ def export_sparse(
         "--output",
         "-o",
         writable=True,
-        help="Output .mtx file path (defaults to stdout)",
+        help="Output .mtx file path; .mtx.gz gzips it (defaults to stdout)",
     ),
     head: Optional[int] = typer.Option(
         None, "--head", "-n", help="Output only the first n entries of mtx file"
@@ -1407,7 +1407,7 @@ def import_sparse(
         ..., help="Object path to create/replace (e.g., 'X', 'layers/counts')"
     ),
     input_file: Path = typer.Argument(
-        ..., help="Input .mtx file", exists=True, readable=True
+        ..., help="Input .mtx or .mtx.gz file", exists=True, readable=True
     ),
     output: Optional[Path] = typer.Option(
         None,
