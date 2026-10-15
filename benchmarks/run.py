@@ -187,7 +187,9 @@ def _build_sidecar(case: Case, inputs: List[Path], workdir: Path) -> Optional[Pa
         return _build_mtx_sidecar(case, inputs, workdir)
     if case.sidecar != "csv":
         return None
-    path = workdir / f"{case.name}-sidecar.csv"
+    # Named for its input too: a work directory reused across tiers must not
+    # hand one tier's sidecar to another.
+    path = workdir / f"{case.name}-{inputs[0].stem}-sidecar.csv"
     if path.exists():
         return path
     import h5py
@@ -206,10 +208,10 @@ def _build_mtx_sidecar(case: Case, inputs: List[Path], workdir: Path) -> Path:
     fixture's var names are ids and its symbols are a column, so the symbols
     become the names, and placeholders the ids.
     """
-    path = workdir / f"{case.name}-sidecar"
+    path = workdir / f"{case.name}-{inputs[0].stem}-sidecar"
     if path.exists():
         return path
-    counts = workdir / f"{case.name}-counts.h5ad"
+    counts = workdir / f"{case.name}-{inputs[0].stem}-counts.h5ad"
     if counts.exists():
         counts.unlink()
     for command in (
