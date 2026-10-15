@@ -412,3 +412,56 @@ def test_the_file_is_read_twice_and_no_more(tmp_path, monkeypatch, order):
     monkeypatch.setattr(mtx_module, "iter_line_blocks", counting)
     _import(tmp_path, source, chunk=64, block_bytes=1000)
     assert read["bytes"] == 2 * body_bytes
+
+
+# ---------------------------------------------------------------------------
+# found in review: integer limits
+
+
+def test_duplicates_that_sum_past_int32_choose_int64_before_anything_is_written(tmp_path):
+    """Each value fits int32 but their sum does not.
+
+    The dtype is chosen in pass 1, before the store is touched; choosing int32
+    here would only be found out in pass 2, after `import sparse --inplace`
+    had already removed the matrix being replaced.
+    """
+    entries = [(1, 1, 2_000_000_000), (2, 2, 1), (1, 1, 2_000_000_000)]
+    source = _mtx(tmp_path / "big.mtx", entries, (2, 2))
+    store = _store(tmp_path / "s.h5ad", 2, 2)
+
+    result = runner.invoke(app, ["import", "sparse", str(store), "X", str(source), "--inplace"])
+    assert result.exit_code == 0, _out(result)
+    got = ad.read_h5ad(store).X
+    assert got.dtype == np.int64
+    assert got[0, 0] == 4_000_000_000
+
+
+def test_a_file_without_duplicates_keeps_int32_however_large_its_rows(tmp_path):
+    # Sorted, no repeated coordinates: nothing will be summed.
+    entries = [(1, c, 2_000_000_000) for c in (1, 2, 3)]
+    source = _mtx(tmp_path / "rows.mtx", entries, (1, 3))
+    _, dtypes, _, scanned = _import(tmp_path, source)
+    assert scanned.canonical
+    assert dtypes["data"] == np.int32
+
+
+def test_the_int64_limits_are_values_not_overflow(tmp_path):
+    big, small = np.iinfo(np.int64).max, np.iinfo(np.int64).min
+    source = _mtx(tmp_path / "limits.mtx", [(1, 1, big), (2, 1, small)], (2, 1))
+    matrix, dtypes, _, _ = _import(tmp_path, source)
+    assert dtypes["data"] == np.int64
+    assert matrix.toarray().ravel().tolist() == [big, small]
+
+    beyond = _mtx(tmp_path / "beyond.mtx", [(1, 1, big + 1)], (1, 1))
+    with pytest.raises(ValueError, match="does not fit int64"):
+        scan(read_header(beyond), EntryMap(n_rows=1, n_cols=1))
+
+
+def test_the_formatter_covers_every_int64_and_uint64():
+    """`abs(INT64_MIN)` is negative in int64, and a uint64 above INT64_MAX
+    wraps when cast to it; either used to hang or corrupt the export."""
+    i64, u64 = np.iinfo(np.int64), np.iinfo(np.uint64)
+    signed = np.array([i64.min, i64.max, -1, 0])
+    unsigned = np.array([u64.max, 2**63, 0, 7], dtype=np.uint64)
+    expected = "".join(f"{a} {b}\n" for a, b in zip(signed.tolist(), unsigned.tolist()))
+    assert format_int_rows([signed, unsigned]) == expected.encode()

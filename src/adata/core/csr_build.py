@@ -55,6 +55,23 @@ def count_keys(counts: np.ndarray, keys: np.ndarray) -> None:
         counts[unique] += seen
 
 
+def sum_keys(sums: np.ndarray, keys: np.ndarray, weights: np.ndarray) -> None:
+    """Add `weights[i]` to `sums[keys[i]]`, over the span the block covers.
+
+    As `count_keys`, and for the same reason: cost set by the block, not by
+    the length of `sums`.
+    """
+    if keys.size == 0:
+        return
+    lo, hi = int(keys.min()), int(keys.max())
+    span = hi - lo + 1
+    if span <= 4 * keys.size:
+        sums[lo : hi + 1] += np.bincount(keys - lo, weights=weights, minlength=span)
+    else:
+        unique, inverse = np.unique(keys, return_inverse=True)
+        sums[unique] += np.bincount(inverse, weights=weights, minlength=unique.size)
+
+
 def bucket_bounds(
     indptr: np.ndarray, *, chunk: int, bucket_entries: Optional[int] = None
 ) -> np.ndarray:

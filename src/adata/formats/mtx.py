@@ -36,6 +36,7 @@ from adata.core.csr_build import (
     count_keys,
     grouped_runs,
     scratch_group,
+    sum_keys,
 )
 from adata.core.recast import DEFAULT_CHUNK, Matrix
 from adata.elements import spec
@@ -147,8 +148,16 @@ def _parse(block: bytes, header: MtxHeader, first_line: int) -> np.ndarray:
             f"hold {header.columns} fields (or a blank line sits among the "
             "entries)."
         )
-    if dtype is np.int64 and flat.size and flat.max() == np.iinfo(np.int64).max:
-        raise ValueError(f"{header.path.name}: a value from line {first_line:,} on overflows int64.")
+    if dtype is np.int64 and flat.size:
+        info = np.iinfo(np.int64)
+        if flat.max() == info.max or flat.min() == info.min:
+            # fromstring saturates rather than failing, so a value at either
+            # limit may be one beyond it. Rare enough to check the slow way.
+            if any(not info.min <= int(token) <= info.max for token in text.split()):
+                raise ValueError(
+                    f"{header.path.name}: a value from line {first_line:,} on "
+                    "does not fit int64."
+                )
     return flat.reshape(lines, header.columns)
 
 
@@ -247,6 +256,9 @@ class Scan:
     canonical: bool
     vmin: float
     vmax: float
+    #: The largest sum of absolute values in any one output row: a bound on
+    #: what summing duplicate entries can reach.
+    row_bound: float = 0.0
 
 
 def scan(
@@ -254,6 +266,7 @@ def scan(
 ) -> Scan:
     """Pass 1: entries per output row, whether they arrive in order, value range."""
     counts = np.zeros(emap.n_targets * emap.n_rows, dtype=np.int64)
+    magnitude = np.zeros(counts.size, dtype=np.float64)
     grouped = canonical = True
     last_key, last_col = -1, -1
     vmin, vmax = np.inf, -np.inf
@@ -262,6 +275,7 @@ def scan(
         if keys.size == 0:
             continue
         count_keys(counts, keys)
+        sum_keys(magnitude, keys, np.abs(kept).astype(np.float64))
         vmin = min(vmin, float(kept.min()))
         vmax = max(vmax, float(kept.max()))
         if grouped:
@@ -275,7 +289,8 @@ def scan(
                 ).any():
                     canonical = False
         last_key, last_col = int(keys[-1]), int(minors[-1])
-    return Scan(counts, grouped, canonical, vmin, vmax)
+    row_bound = float(magnitude.max()) if magnitude.size else 0.0
+    return Scan(counts, grouped, canonical, vmin, vmax, row_bound)
 
 
 def value_dtype(header: MtxHeader, scanned: Scan) -> np.dtype:
@@ -283,11 +298,28 @@ def value_dtype(header: MtxHeader, scanned: Scan) -> np.dtype:
 
     float64 rather than float32 because the text may hold more precision than
     float32 keeps, and narrowing is `recast`'s job, which checks it first.
+
+    The choice is made before anything is written, so it must hold after
+    duplicate entries are summed. A file with no repeated coordinates
+    (`canonical`) has nothing to sum, and its value range decides. Otherwise
+    no summed entry can exceed its row's total magnitude, so that decides:
+    a sound bound, if sometimes a wider dtype than the sums needed.
     """
     if header.field == "real":
         return np.dtype(np.float64)
+    low, high = scanned.vmin, scanned.vmax
+    if not scanned.canonical:
+        # Every value already fits int64 (the parser checks); only a sum
+        # can leave it. Floats, so compare with 2**63 itself: the int64
+        # maximum rounds up to it.
+        if scanned.row_bound >= 2.0**63:
+            raise ValueError(
+                f"{header.path.name}: summing its duplicate entries could "
+                "exceed int64."
+            )
+        low, high = min(low, -scanned.row_bound), max(high, scanned.row_bound)
     info = np.iinfo(np.int32)
-    if scanned.vmin >= info.min and scanned.vmax <= info.max:
+    if low >= info.min and high <= info.max:
         return np.dtype(np.int32)
     return np.dtype(np.int64)
 

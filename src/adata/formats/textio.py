@@ -16,7 +16,7 @@ from __future__ import annotations
 import gzip
 from contextlib import contextmanager
 from pathlib import Path
-from typing import BinaryIO, Iterator, List, Optional, Sequence
+from typing import BinaryIO, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -141,15 +141,31 @@ def read_tsv(path: Path) -> List[List[str]]:
 # formatting
 
 
-def _digits(values: np.ndarray) -> np.ndarray:
+def _magnitude(values: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Each integer's absolute value as uint64, and whether it is negative.
+
+    In uint64 so that every int64 and every uint64 has one: `abs` of the
+    int64 minimum is itself, and casting a uint64 above the int64 maximum to
+    int64 wraps it negative.
+    """
+    if values.dtype.kind == "u":
+        return values.astype(np.uint64), np.zeros(values.shape, dtype=bool)
+    signed = values.astype(np.int64)
+    negative = signed < 0
+    magnitude = signed.astype(np.uint64)
+    # Two's complement: the magnitude of a negative value is ~v + 1.
+    magnitude[negative] = ~magnitude[negative] + np.uint64(1)
+    return magnitude, negative
+
+
+def _digits(magnitude: np.ndarray, negative: np.ndarray) -> np.ndarray:
     """How many characters each integer takes, its sign included."""
-    magnitude = np.abs(values.astype(np.int64))
-    count = np.ones(values.shape, dtype=np.int64)
-    rest = magnitude // 10
+    count = np.ones(magnitude.shape, dtype=np.int64)
+    rest = magnitude // np.uint64(10)
     while rest.any():
         count += rest > 0
-        rest //= 10
-    return count + (values < 0)
+        rest //= np.uint64(10)
+    return count + negative
 
 
 def format_int_rows(columns: Sequence[np.ndarray], sep: bytes = b" ") -> bytes:
@@ -168,15 +184,14 @@ def format_int_rows(columns: Sequence[np.ndarray], sep: bytes = b" ") -> bytes:
     pieces: List[np.ndarray] = []
     masks: List[np.ndarray] = []
     for i, column in enumerate(columns):
-        values = np.asarray(column).astype(np.int64, copy=False)
-        widths = _digits(values)
+        magnitude, negative = _magnitude(np.asarray(column))
+        widths = _digits(magnitude, negative)
         width = int(widths.max())
         chars = np.empty((n, width), dtype=np.uint8)
-        rest = np.abs(values)
+        rest = magnitude.copy()
         for k in range(width - 1, -1, -1):
-            chars[:, k] = rest % 10 + ord("0")
-            rest //= 10
-        negative = values < 0
+            chars[:, k] = (rest % np.uint64(10)).astype(np.uint8) + ord("0")
+            rest //= np.uint64(10)
         if negative.any():
             chars[negative, width - widths[negative]] = ord("-")
         pieces.append(chars)
@@ -207,7 +222,7 @@ def format_rows(
         return format_int_rows(columns, sep)
     values = np.asarray(last)
     if values.dtype.kind in "iub":
-        return format_int_rows([*columns, values.astype(np.int64)], sep)
+        return format_int_rows([*columns, values], sep)
     if values.dtype.kind == "f":
         whole = np.isfinite(values).all() and (np.abs(values) < 2**53).all()
         if whole and np.array_equal(values, np.trunc(values)):
