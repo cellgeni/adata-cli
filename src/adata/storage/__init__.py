@@ -284,6 +284,19 @@ def dataset_create_kwargs(
             kw["scaleoffset"] = src.scaleoffset
         if src.fillvalue is not None:
             kw["fillvalue"] = src.fillvalue
+    if (
+        target_backend == "hdf5"
+        and is_zarr_array(src)
+        and chunks is not None
+        and tuple(getattr(src, "shape", ())) != ()
+        and not _is_string_src(src)
+        and _zarr_is_compressed(src)
+    ):
+        # Zarr codecs have no HDF5 equivalent, but compression itself does.
+        # Without this a compressed Zarr store came out of every command
+        # uncompressed, several times its size.
+        kw["compression"] = "gzip"
+        kw["compression_opts"] = GZIP_LEVEL
     if target_backend == "zarr" and is_zarr_array(src):
         src_zarr_format = getattr(getattr(src, "metadata", None), "zarr_format", None)
         target_format = _target_zarr_format(kw_target)
@@ -422,6 +435,68 @@ def create_dataset(
     if data is not None:
         return parent.create_dataset(name, data=data, **kwargs)
     return parent.create_dataset(name, shape=shape, dtype=dtype, **kwargs)
+
+
+#: gzip level for an HDF5 copy of a compressed Zarr array: h5py's default,
+#: and what Cell Ranger and most other HDF5 writers use.
+GZIP_LEVEL = 4
+
+
+def _zarr_is_compressed(src: Any) -> bool:
+    """Does this Zarr array carry a compressor? (`compressors` covers v2 too.)"""
+    try:
+        return bool(getattr(src, "compressors", None))
+    except Exception:
+        return False
+
+
+def fit_chunks(kw: dict, shape: Sequence[int], *, backend: str) -> dict:
+    """Make a forwarded chunk shape legal for a dataset of `shape`.
+
+    h5py rejects a chunk larger than the dataset, so a chunked source copied
+    or subset below its own chunk size would otherwise fail outright. A
+    zero-length dimension cannot be fitted at all; HDF5 is then left to pick
+    its own chunking, which it does whenever compression asks for one. Zarr
+    accepts a chunk larger than its array, so there it only has to shrink.
+
+    Zarr additionally requires a shard to be a whole number of chunks, so a
+    clamped chunk invalidates the source's shard geometry. Sharding is a
+    storage-layout choice rather than data, so it is dropped and left to the
+    backend rather than recomputed into something arbitrary.
+    """
+    chunks = kw.get("chunks")
+    if not isinstance(chunks, (tuple, list)) or not chunks:
+        return kw
+
+    original = tuple(int(c) for c in chunks)
+    dims = [int(n) for n in shape]
+    if backend == "hdf5" and any(n == 0 for n in dims[: len(original)]):
+        kw = dict(kw)
+        kw.pop("chunks")
+        kw.pop("shards", None)
+        return kw
+
+    clamped = tuple(
+        min(c, dims[i]) if i < len(dims) and dims[i] > 0 else c
+        for i, c in enumerate(original)
+    )
+    if clamped == original:
+        return kw
+
+    kw = dict(kw)
+    kw["chunks"] = clamped
+    kw.pop("shards", None)
+    return kw
+
+
+def _is_null(src: Any) -> bool:
+    """Is `src` an explicit null -- `h5py.Empty` on HDF5, or tagged `null`?"""
+    if is_hdf5_dataset(src) and src.shape is None:
+        return True
+    value = src.attrs.get("encoding-type", None)
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    return value == "null"
 
 
 def _target_zarr_format(zarr_format: Optional[int]) -> Optional[int]:
@@ -570,17 +645,27 @@ def copy_dataset(src: Any, dst_group: Any, name: str) -> Any:
     """
     from adata.elements.strings import target_dtype
 
-    shape = tuple(src.shape) if getattr(src, "shape", None) is not None else ()
     target_backend = "zarr" if is_zarr_group(dst_group) else "hdf5"
+    if _is_null(src):
+        # anndata writes an absent element, `raw` most often, as a null: an
+        # empty dataspace on HDF5 and a 0-d bool on Zarr. Neither can be read
+        # and written back as a value -- `h5py.Empty` has none -- so it is
+        # written afresh in the target's own spelling.
+        from adata.elements.write import write_null
+
+        ds = write_null(dst_group, name)
+        copy_attrs(src.attrs, ds.attrs, target_backend=target_backend)
+        return ds
+
+    shape = tuple(src.shape)
     zformat = zarr_format_of(dst_group)
+    kw = dataset_create_kwargs(src, target_backend=target_backend, zarr_format=zformat)
     ds = create_dataset(
         dst_group,
         name,
         shape=shape,
         dtype=target_dtype(src.dtype, target_backend, zformat),
-        **dataset_create_kwargs(
-            src, target_backend=target_backend, zarr_format=zformat
-        ),
+        **fit_chunks(kw, shape, backend=target_backend),
     )
     copy_attrs(src.attrs, ds.attrs, target_backend=target_backend)
 

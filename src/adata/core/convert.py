@@ -36,6 +36,7 @@ from adata.storage import (
     copy_attrs,
     create_dataset,
     dataset_create_kwargs,
+    fit_chunks,
     is_dataset,
     is_group,
     is_zarr_group,
@@ -691,14 +692,12 @@ def cast_dense(
     kw = dataset_create_kwargs(
         src.obj, target_backend=backend, dst_parent=dst_parent
     )
-    from adata.core.subset import _clamp_chunks
-
     dst = create_dataset(
         dst_parent,
         name,
         shape=(n_rows, n_cols),
         dtype=data_dtype,
-        **_clamp_chunks(kw, n_rows, n_cols),
+        **fit_chunks(kw, (n_rows, n_cols), backend=backend),
     )
     copy_attrs(src.obj.attrs, dst.attrs, target_backend=backend)
 

@@ -22,6 +22,7 @@ from adata.storage import (
     copy_tree,
     dataset_create_kwargs,
     detect_backend,
+    fit_chunks,
     has_valid_anndata_root_attrs,
     is_dataset,
     is_group,
@@ -192,6 +193,91 @@ def test_store_contents_copy_between_every_backend_pair(
         assert spec.decode_attr(root["obs"]["label"].attrs["ordered"]) is True
         assert spec.encoding_type(root["X"]) == spec.CSR_MATRIX
         assert has_valid_anndata_root_attrs(root)
+
+
+def _is_null_in(element, backend: str) -> bool:
+    """Is `element` a null in the spelling `backend` uses for one?"""
+    if spec.encoding_type(element) != spec.NULL:
+        return False
+    if backend == "h5ad":
+        return element.shape is None
+    return element.shape == () and element.dtype == bool
+
+
+@pytest.mark.parametrize("src_backend", ["h5ad", "zarr2", "zarr3"])
+@pytest.mark.parametrize("dst_backend", ["h5ad", "zarr2", "zarr3"])
+def test_a_null_copies_between_every_backend_pair(temp_dir, src_backend, dst_backend):
+    """anndata 0.13 writes a store without `raw` as `raw: null`.
+
+    On HDF5 that is an empty dataspace, which has no value to read, so copying
+    one to Zarr raised a TypeError -- and with it every conversion and every
+    `subset -o out.zarr` of such a store.
+    """
+    from tests.conftest import backend_path, backend_zarr_format
+
+    src_path = backend_path(temp_dir, src_backend, "src")
+    dst_path = backend_path(temp_dir, dst_backend, "dst")
+    with open_store(src_path, "w", zarr_format=backend_zarr_format(src_backend)) as store:
+        ew.write_null(store.root, "raw")
+
+    with open_store(src_path, "r") as src, open_store(
+        dst_path, "w", zarr_format=backend_zarr_format(dst_backend)
+    ) as dst:
+        copy_store_contents(src.root, dst.root)
+
+    with open_store(dst_path, "r") as dst:
+        assert _is_null_in(dst.root["raw"], dst_backend)
+
+
+@pytest.mark.parametrize("src_backend", ["h5ad", "zarr2", "zarr3"])
+@pytest.mark.parametrize("dst_backend", ["h5ad", "zarr2", "zarr3"])
+def test_an_empty_chunked_array_copies_between_every_backend_pair(
+    temp_dir, src_backend, dst_backend
+):
+    """Zarr keeps a chunk larger than its array; h5py refuses to create one."""
+    from tests.conftest import backend_path, backend_zarr_format
+
+    src_path = backend_path(temp_dir, src_backend, "src")
+    dst_path = backend_path(temp_dir, dst_backend, "dst")
+    with open_store(src_path, "w", zarr_format=backend_zarr_format(src_backend)) as store:
+        if src_backend == "h5ad":
+            store.root.create_dataset(
+                "empty", shape=(0,), maxshape=(None,), chunks=(4,), dtype="i4"
+            )
+        else:
+            store.root.create_array("empty", shape=(0,), chunks=(4,), dtype="i4")
+
+    with open_store(src_path, "r") as src, open_store(
+        dst_path, "w", zarr_format=backend_zarr_format(dst_backend)
+    ) as dst:
+        copy_store_contents(src.root, dst.root)
+
+    with open_store(dst_path, "r") as dst:
+        assert dst.root["empty"].shape == (0,)
+
+
+@pytest.mark.parametrize("version", [2, 3])
+def test_compressed_zarr_stays_compressed_in_hdf5(temp_dir, version):
+    """Zarr codecs cannot cross to HDF5, but leaving the copy uncompressed
+    made it several times the size of its source."""
+    src_path, dst_path = temp_dir / "src.zarr", temp_dir / "dst.h5ad"
+    with open_store(src_path, "w", zarr_format=version) as store:
+        packed = store.root.create_array("packed", shape=(1000,), chunks=(100,), dtype="f4")
+        packed[:] = 1.0
+        store.root.create_array(
+            "plain", shape=(1000,), chunks=(100,), dtype="f4",
+            compressors=None,
+        )
+        ew.write_string_array(store.root, "text", ["a", "b"])
+
+    with open_store(src_path, "r") as src, open_store(dst_path, "w") as dst:
+        copy_store_contents(src.root, dst.root)
+
+    with open_store(dst_path, "r") as dst:
+        assert dst.root["packed"].compression == "gzip"
+        assert dst.root["plain"].compression is None, "an uncompressed source stays so"
+        assert dst.root["text"].compression is None, "strings are not compressed"
+        assert np.all(dst.root["packed"][...] == 1.0)
 
 
 def test_copy_tree_can_exclude_members(new_store):
@@ -377,22 +463,28 @@ def test_subsetting_a_sharded_v3_store(temp_dir, target):
         assert np.array_equal(store.root["X"][...], expected)
 
 
-def test_clamping_a_chunk_drops_an_incompatible_shard():
-    from adata.core.subset import _clamp_chunks
-
-    kept = _clamp_chunks({"chunks": (4, 2), "shards": (8, 4)}, 100, 100)
+def test_fitting_a_chunk_drops_an_incompatible_shard():
+    kept = fit_chunks({"chunks": (4, 2), "shards": (8, 4)}, (100, 100), backend="zarr")
     assert kept["shards"] == (8, 4), "an unclamped chunk keeps its shard"
 
-    dropped = _clamp_chunks({"chunks": (4, 2), "shards": (8, 4)}, 3, 4)
+    dropped = fit_chunks({"chunks": (4, 2), "shards": (8, 4)}, (3, 4), backend="zarr")
     assert dropped["chunks"] == (3, 2)
     assert "shards" not in dropped
 
 
-def test_clamping_handles_one_dimensional_chunks():
-    from adata.core.subset import _clamp_chunks
+def test_fitting_handles_one_dimensional_chunks():
+    assert fit_chunks({"chunks": (100,)}, (5,), backend="hdf5")["chunks"] == (5,)
+    assert fit_chunks({}, (5,), backend="hdf5") == {}
 
-    assert _clamp_chunks({"chunks": (100,)}, 5)["chunks"] == (5,)
-    assert _clamp_chunks({}, 5) == {}
+
+def test_fitting_leaves_a_zero_length_hdf5_dataset_to_choose_its_chunks():
+    """No chunk fits a zero-length dimension, and h5py rejects any it is given.
+
+    Zarr accepts a chunk larger than its array, so it keeps the source's.
+    """
+    kw = {"chunks": (1,), "compression": "gzip"}
+    assert fit_chunks(kw, (0,), backend="hdf5") == {"compression": "gzip"}
+    assert fit_chunks(kw, (0,), backend="zarr") == kw
 
 
 # ---------------------------------------------------------------------------

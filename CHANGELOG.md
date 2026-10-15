@@ -3,6 +3,32 @@
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
+## Unreleased
+
+### Fixed
+
+- **Writing an h5ad with a `None` in it to Zarr failed.** anndata stores
+  `None` as a null, which on HDF5 is an empty dataspace with no value to
+  read, and copying one raised `TypeError: float() argument must be a string
+  or a real number, not 'Empty'`. Any `None` in `uns` was enough, so
+  `subset in.h5ad -o out.zarr` failed on such stores, and so did `split`,
+  `import` and `convert` writing Zarr from them. Nulls are now written in the
+  target's own spelling: an empty dataspace on HDF5, a 0-d bool on Zarr, as
+  anndata does. The 0-d bool that a Zarr store uses for a missing `raw` now
+  becomes an empty dataspace in an h5ad too, rather than a stray `False`.
+
+- **Zarr written to h5ad came out uncompressed.** Zarr codecs have no HDF5
+  equivalent, so they were dropped and nothing replaced them; a compressed
+  Zarr store became an h5ad several times its size. A compressed array now
+  becomes a gzip-compressed dataset (level 4, h5py's default). Strings and
+  arrays that were not compressed are left as they were.
+
+- **An empty array chunked larger than itself could not be written to
+  h5ad.** Zarr allows a chunk bigger than its array and h5py does not, so a
+  zero-length array copied from Zarr failed, and so did `convert --dtype` or
+  `--layout` on an all-zero sparse matrix from a compressed h5ad. A
+  zero-length dataset now lets HDF5 choose its own chunks.
+
 ## 0.6.1
 
 Makes the outputs of `subset`, `split` and `concat` the size anndata writes
