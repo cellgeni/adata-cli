@@ -13,13 +13,23 @@ of every comparison -- see `cases.py` -- because adata-cli forwards the
 source's compression to its output while `write_h5ad` defaults to none, which
 would otherwise make adata-cli's output look smaller for reasons that have
 nothing to do with the tool.
+
+**Wide variants for `recast`.** The main fixture is already float32 with
+int32 indices, so narrowing it is a rewrite that changes nothing. The wide
+variants hold the same matrix as float64 values and int64 indices and indptr,
+which is what issue #13 was about and what a real narrowing starts from. One
+stores X uncompressed, as `write_h5ad` does by default and as most float64
+stores therefore are; the other keeps lzf. The difference matters: integer
+counts in float64 are mostly zero bytes, which a compressor removes anyway,
+so narrowing an lzf X saves a few percent on disk where an uncompressed one
+halves. Both are measured, so neither number stands alone.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -135,3 +145,52 @@ def build(directory: Path, tier: Tier, *, count: int = 2) -> List[Path]:
             _write(path, tier, seed)
         paths.append(path)
     return paths
+
+
+#: The wide variants, by name: how each stores X.
+WIDE_COMPRESSION: Dict[str, Optional[str]] = {"uncompressed": None, "lzf": "lzf"}
+
+
+def _widen(src: Path, dst: Path, compression: Optional[str]) -> Path:
+    """Copy `src` with X stored as float64 values and int64 indices/indptr.
+
+    Streamed a block at a time with h5py, so the large tier does not need
+    the whole matrix in memory twice over. Everything but X is copied as is.
+    """
+    import h5py
+
+    block = 1 << 24
+    with h5py.File(src, "r") as source, h5py.File(dst, "w") as target:
+        for key, value in source.attrs.items():
+            target.attrs[key] = value
+        for key in source:
+            if key != "X":
+                source.copy(source[key], target, name=key)
+        x_in = source["X"]
+        x_out = target.create_group("X")
+        for key, value in x_in.attrs.items():
+            x_out.attrs[key] = value
+        for name, dtype in (
+            ("data", "float64"), ("indices", "int64"), ("indptr", "int64")
+        ):
+            column = x_in[name]
+            out = x_out.create_dataset(
+                name,
+                shape=column.shape,
+                dtype=dtype,
+                chunks=column.chunks or True,
+                compression=compression,
+            )
+            for start in range(0, column.shape[0], block):
+                stop = min(start + block, column.shape[0])
+                out[start:stop] = column[start:stop].astype(dtype)
+    return dst
+
+
+def build_wide(directory: Path, tier: Tier, variant: str) -> List[Path]:
+    """The first input of `tier`, widened. Built once and reused, like `build`."""
+    (source,) = build(directory, tier, count=1)
+    path = directory / f"{tier.name}-0-wide-{variant}.h5ad"
+    if not path.exists():
+        _widen(source, path, WIDE_COMPRESSION[variant])
+    return [path]
