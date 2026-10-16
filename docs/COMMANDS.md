@@ -171,11 +171,14 @@ adata convert counts.h5ad -o out.h5 --layer counts
 | `--gene-names-column` | Export: var column with gene names (default the var names) |
 | `--feature-types-column` | Export: var column with feature types (default `feature_types`) |
 
-Features are named by gene id, which is unique, with the symbols in
-`var["gene_symbols"]`: the layout `scanpy.read_10x_mtx(var_names="gene_ids")`
-gives. Symbols repeat (Cell Ranger's GRCh38-2020-A reference repeats 10), so
-naming by them, as scanpy does by default, needs `--make-unique` to give
-unique names; `--var-names gene_symbols` does that when wanted. With it,
+Features are named by gene id, with the symbols in `var["gene_symbols"]`:
+the layout `scanpy.read_10x_mtx(var_names="gene_ids")` gives. Ids are
+unique where symbols repeat (Cell Ranger's GRCh38-2020-A reference repeats
+10), so naming by them, as scanpy does by default, needs `--make-unique` to
+give unique names; `--var-names gene_symbols` does that when wanted. The
+exception is a probe-level (Flex) matrix, whose several probes per gene
+share a gene id: pass `--make-unique` there, or use `var["probe_ids"]`.
+Either way, repeated names are reported when they occur. With it,
 reading gives what `scanpy.read_10x_h5(gex_only=False)` gives, column for
 column: `gene_ids`, `feature_types`, every other per-feature field Cell Ranger
 recorded (`genome`, and `pattern`, `read` and so on for antibody and CRISPR
