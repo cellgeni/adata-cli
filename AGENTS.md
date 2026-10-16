@@ -158,7 +158,8 @@ These are easy to break without any test noticing straight away:
 - Set the version in `pyproject.toml` and in the `pyadata-cli` entry of `uv.lock`.
 - Add a `## X.Y.Z` section to `CHANGELOG.md`, in its style:
   - a summary paragraph;
-  - `### Added`, `### Changed` and `### Fixed` sections;
+  - whichever of `### Added`, `### Changed` and `### Fixed` apply (0.7.1 has
+    only `Fixed`; an empty section is left out);
   - entries that start with a bold one-line lead and an issue link.
 - Merge the release branch, then push a tag with no `v` prefix. The tag
   triggers:
