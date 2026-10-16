@@ -35,6 +35,10 @@ class Options:
     gene_names_column: Optional[str] = None
     feature_types_column: Optional[str] = None
 
+    # Reading CellBender output.
+    raw: Optional[Path] = None
+    min_cell_probability: Optional[float] = None
+
 
 @dataclass
 class ConversionPlan:

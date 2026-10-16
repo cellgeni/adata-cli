@@ -522,6 +522,8 @@ _CONVERT_FLAGS = {
     "gene_ids_column": "--gene-ids-column",
     "gene_names_column": "--gene-names-column",
     "feature_types_column": "--feature-types-column",
+    "raw": "--raw",
+    "min_cell_probability": "--min-cell-probability",
 }
 
 #: Flags that only make sense for format conversion; with recast's flags,
@@ -645,6 +647,21 @@ def convert(
         "--feature-types-column",
         help="10x output: var column holding feature types (default feature_types)",
     ),
+    raw: Optional[Path] = typer.Option(
+        None,
+        "--raw",
+        help="CellBender input: the raw Cell Ranger .h5 it ran on, added as "
+        "layers['cellranger']",
+        exists=True,
+        dir_okay=False,
+        readable=True,
+    ),
+    min_cell_probability: Optional[float] = typer.Option(
+        None,
+        "--min-cell-probability",
+        help="CellBender input: keep droplets with cell_probability at least "
+        "this (CellBender's own cutoff is 0.5)",
+    ),
     # Deprecated: recast's flags, so `convert` keeps working as it did until
     # 1.0.0. Hidden from --help; the old matrix paths arrive in ctx.args.
     inplace: bool = typer.Option(False, "--inplace", hidden=True),
@@ -662,7 +679,8 @@ def convert(
     Genomics matrix (Cell Ranger's *_feature_bc_matrix.h5); --to 10x-mtx
     writes a Matrix Market folder. Between h5ad and zarr every element is
     copied, streamed, keeping the source's chunking and compression where the
-    target can express them. A 10x matrix is read as scanpy's read_10x_h5 or
+    target can express them. CellBender output keeps its latent variables, as
+    CellBender's own loader names them. A 10x matrix is read as scanpy's read_10x_h5 or
     read_10x_mtx (gex_only=False) reads it, keeping integer counts, and
     written as Cell Ranger writes it. MTX folders from Cell Ranger and
     STARsolo, velocyto's included, are read in two streaming passes.
@@ -684,6 +702,8 @@ def convert(
         adata convert Solo.out/Gene/filtered -o counts.h5ad
         adata convert Solo.out/Velocyto/raw -o velocyto.h5ad
         adata convert counts.h5ad -o counts_mtx --to 10x-mtx --layer counts
+        adata convert cellbender_output.h5 -o cb.h5ad --raw raw_feature_bc_matrix.h5
+        adata convert cellbender_output.h5 -o cells.h5ad --min-cell-probability 0.5
     """
     entries = list(ctx.args)
     recast_flags = _given(ctx, _RECAST_FLAGS)
@@ -767,6 +787,8 @@ def convert(
                 gene_ids_column=gene_ids_column,
                 gene_names_column=gene_names_column,
                 feature_types_column=feature_types_column,
+                raw=raw,
+                min_cell_probability=min_cell_probability,
             ),
         )
     except Exception as e:

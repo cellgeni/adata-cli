@@ -23,7 +23,7 @@ import os
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, List, Optional, Tuple
+from typing import Any, Iterator, List, Optional, Sequence, Tuple
 
 import h5py
 import numpy as np
@@ -326,3 +326,52 @@ class CsrAppender:
         )
         dataset[:] = indptr
         return self.nnz
+
+
+def write_runs(
+    blocks: Iterator[Triple],
+    *,
+    n_rows: int,
+    n_targets: int,
+    destinations: Sequence[Sequence[CsrAppender]],
+    scratch_parent: Any,
+    grouped: bool,
+    canonical: bool,
+    counts: np.ndarray,
+    value_dtype: Any,
+    chunk: int,
+) -> int:
+    """Append entries, given in any order, to each output's CSR matrix.
+
+    `blocks` yield `(key, column, value)` with `key = target * n_rows + row`,
+    so outputs share one sort. `counts` holds entries per key, from a first
+    pass, and `grouped` / `canonical` what that pass learned of the order:
+    grouped entries go straight through, others through on-disk buckets.
+    `destinations[t]` are the appenders for output `t`. Returns how many
+    duplicate entries were summed away.
+    """
+    summer = DuplicateSummer()
+
+    def consume(runs: Iterator[Triple]) -> None:
+        for keys, minors, values in summer(runs):
+            targets = keys // n_rows if n_targets > 1 else None
+            for t in np.unique(targets) if targets is not None else (0,):
+                if targets is not None:
+                    pick = targets == t
+                    rows, cols, vals = keys[pick] - t * n_rows, minors[pick], values[pick]
+                else:
+                    rows, cols, vals = keys, minors, values
+                for appender in destinations[int(t)]:
+                    appender.append(rows, cols, vals)
+
+    if grouped:
+        consume(grouped_runs(blocks, sort=not canonical))
+    else:
+        indptr = np.concatenate(([0], np.cumsum(counts)))
+        bounds = bucket_bounds(indptr, chunk=chunk)
+        with scratch_group(scratch_parent, "__csr_scratch__") as scratch:
+            sorter = BucketSorter(scratch, bounds, value_dtype)
+            for keys, minors, values in blocks:
+                sorter.add(keys, minors, values)
+            consume(sorter.runs())
+    return summer.summed

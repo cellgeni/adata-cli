@@ -28,6 +28,7 @@ separate jobs.
 | `test_recast.py` | `recast` against scipy: casts, transposes, density changes and every refusal |
 | `test_tenx.py` | 10x HDF5 import and export against Cell Ranger-shaped fixtures (v2, v3, multimodal, probe-based): mapping, filters, round trips, refusals |
 | `test_mtx.py` | 10x / STARsolo MTX folders against hand-written fixtures (Cell Ranger 2 and 3, STARsolo, velocyto, GEO prefixes): mapping, entry orders, refusals that leave nothing, round trips |
+| `test_cellbender.py` | CellBender 0.2 and 0.3+ output, full and filtered: each latent at its barcode, `--min-cell-probability`, `--raw` alignment, refusals |
 | `test_mtx_codec.py`, `test_csr_build.py` | The streaming Matrix Market reader and writer against scipy, and the bucket sort they and `recast` share |
 | `test_external_readers.py` | 10x conversions, HDF5 and MTX, checked by scanpy and PyTables in their own uv environments (`integration`) |
 | `test_performance.py` | Complexity guards -- what an operation costs, not how long it takes (see below) |
@@ -245,6 +246,7 @@ should scale with, scale only that, and hold everything else fixed.
 | `convert` 10x import (whole, `--split-feature-types`), export | n_barcodes | linear |
 | `convert` 10x MTX import (in order, shuffled, `--split-feature-types`) | n_barcodes | linear; **flat** write calls |
 | `convert` to 10x MTX | n_obs | **flat** read calls |
+| `convert` CellBender (plain, `--min-cell-probability`, `--raw` full and filtered) | n_barcodes | linear; **flat** write calls |
 | `recast --dtype`, `--layout csc`, `--layout dense` | nnz, n_obs | linear; the streaming transpose's **peak memory** is bounded |
 
 The `slow` marker is on the three guards that build a 65,536-row store; they still gate

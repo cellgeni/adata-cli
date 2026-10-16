@@ -70,7 +70,7 @@ in.h5ad -o out.zarr` converts a whole store, and `subset`, `split` and
 `convert` also reads and writes 10x Genomics HDF5 matrices (Cell Ranger's
 `*_feature_bc_matrix.h5`) and 10x / STARsolo Matrix Market folders,
 velocyto's included, matching what scanpy's `read_10x_h5` and `read_10x_mtx`
-read.
+read, and CellBender's `remove-background` output with its latent variables.
 
 | Element | Read | Write |
 |---|---|---|

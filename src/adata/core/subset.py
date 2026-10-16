@@ -476,7 +476,11 @@ def fan_out_sparse_matrix(
     n_major, n_minor = (n_rows, n_cols) if csr else (n_cols, n_rows)
 
     outputs: List[_SparseOutput] = []
-    for dst_parent, obs_idx, var_idx in targets:
+    for target in targets:
+        # A fourth element names this target's matrix, where it differs
+        # from `name`: one read can then fill X and a layer alike.
+        dst_parent, obs_idx, var_idx = target[:3]
+        out_name = target[3] if len(target) > 3 else name
         major_idx, minor_keep = (obs_idx, var_idx) if csr else (var_idx, obs_idx)
         _check_sorted(major_idx, "obs" if csr else "var")
         out_shape = (
@@ -487,7 +491,7 @@ def fan_out_sparse_matrix(
             _SparseOutput(
                 src,
                 dst_parent,
-                name,
+                out_name,
                 enc,
                 out_shape,
                 major_idx,

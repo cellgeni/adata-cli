@@ -215,7 +215,7 @@ def write_var(root: Any, target: Target) -> None:
     """
     var = write_dataframe_header(root, "var", target.var_names, list(target.columns))
     for key, values in target.columns.items():
-        if values.dtype.kind == "b":
+        if values.dtype.kind in "biuf":
             write_dense(var, key, values)
             continue
         categories, codes = np.unique(values, return_inverse=True)

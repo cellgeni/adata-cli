@@ -26,6 +26,7 @@ from typer.testing import CliRunner
 from adata.cli import app
 from tests.conftest import (
     write_10x_h5,
+    write_cellbender_h5,
     write_10x_mtx,
     write_10x_v2_h5,
     write_starsolo_velocyto,
@@ -311,6 +312,48 @@ def test_scanpy_reads_the_mtx_folder_we_export(tmp_path, layout):
     _convert(str(source), "-o", str(out), "--to", "10x-mtx")
     problems = _run(["scanpy"], _READ_MTX_EXPORT_WITH_SCANPY, str(source), str(out))
     assert problems == [], problems
+
+
+@pytest.mark.parametrize("filtered", [False, True], ids=["full", "filtered"])
+def test_a_cellbender_file_imports_as_scanpy_reads_its_matrix(tmp_path, filtered):
+    """scanpy reads CellBender output as a 10x matrix and ignores the latents;
+    the matrix, barcodes and features must agree. The latents themselves are
+    checked in test_cellbender.py."""
+    truth = write_cellbender_h5(
+        tmp_path / "cellbender.h5",
+        _counts(40, 6),
+        barcodes=_barcodes(40),
+        ids=[f"ENSG{i}" for i in range(6)],
+        names=[f"G{i}" for i in range(6)],
+        filtered=filtered,
+    )
+    out = tmp_path / "cellbender.h5ad"
+    _convert(str(truth.path), "-o", str(out))
+    problems = _run(["scanpy"], _COMPARE_CELLBENDER, str(truth.path), str(out))
+    assert problems == [], problems
+
+
+_COMPARE_CELLBENDER = r"""
+import json, sys, warnings
+warnings.filterwarnings("ignore")
+import numpy as np, scanpy as sc, anndata as ad
+
+ref, got = sc.read_10x_h5(sys.argv[1], gex_only=False), ad.read_h5ad(sys.argv[2])
+problems = []
+if ref.shape != got.shape:
+    problems.append(f"shape {ref.shape} != {got.shape}")
+else:
+    if not np.array_equal(ref.X.toarray(), got.X.toarray()):
+        problems.append("X differs")
+    if list(ref.obs_names) != list(got.obs_names):
+        problems.append("obs_names differ")
+    if list(ref.var_names) != list(got.var_names):
+        problems.append("var_names differ")
+    for column in ref.var.columns:
+        if list(ref.var[column].astype(str)) != list(got.var[column].astype(str)):
+            problems.append(f"var[{column!r}] differs")
+print("RESULT " + json.dumps(problems))
+"""
 
 
 _READ_EXPORT_WITH_SCANPY = r"""

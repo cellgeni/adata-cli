@@ -93,7 +93,10 @@ Each layer calls only the layers below it:
 
   Content sniffing runs before extensions, because extensions lie (`.h5`).
   A format with no extension, such as an MTX folder (`10x-mtx`), is chosen as
-  an output only with `--to`.
+  an output only with `--to`. Order in `FORMATS` matters: the first sniffer
+  that matches wins, so a more specific format (`cellbender`, which is also a
+  10x matrix) goes before the general one, and an output extension picks the
+  first format that can be written.
 - **`formats/`**: the per-file-type halves of `export` and `import`: npy, mtx,
   csv, json and images. `mtx.py` is a streaming Matrix Market codec (two
   passes in, block writes out) shared by `import`/`export sparse` and the

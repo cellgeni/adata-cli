@@ -1,6 +1,7 @@
 """Pytest configuration and fixtures for adata tests."""
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 import tempfile
@@ -496,3 +497,119 @@ def write_starsolo_velocyto(
     for name, counts in layers.items():
         write_mtx_file(folder / f"{name}.mtx", counts)
     return folder
+
+
+# ---------------------------------------------------------------------------
+# CellBender remove-background output
+#
+# As CellBender writes it (checked against its source at 0.2.2, 0.3.2 and
+# 0.4.0): a 10x matrix of the denoised counts plus latent variables. 0.3 and
+# later keep the latents in their own groups; 0.2 keeps them inside the
+# matrix group. Analysed droplets are ordered by descending UMI count, so a
+# filtered file's barcodes are not in the full file's order.
+
+
+@dataclass
+class CellbenderTruth:
+    """What a fixture holds, for tests to check the import against."""
+
+    path: Path
+    rows: np.ndarray  # which of the full barcodes the file holds, in order
+    analyzed: np.ndarray  # barcode indices of the analysed droplets
+    latents: Dict[str, np.ndarray]  # per analysed droplet, by stored name
+    encoding: np.ndarray
+    ambient: np.ndarray
+
+
+def write_cellbender_h5(
+    path: Path,
+    counts: np.ndarray,
+    *,
+    barcodes: Sequence[str],
+    ids: Sequence[str],
+    names: Sequence[str],
+    types: Optional[Sequence[str]] = None,
+    version: str = "0.3",
+    filtered: bool = False,
+    n_analyzed: Optional[int] = None,
+    z_dim: int = 4,
+    cellranger_v2: bool = False,
+    seed: int = 0,
+) -> CellbenderTruth:
+    """`counts` is every droplet x features; `filtered` writes cells only."""
+    rng = np.random.default_rng(seed)
+    n_all, n_features = counts.shape
+    n_analyzed = n_analyzed or max(2, n_all // 2)
+    analyzed = np.argsort(counts.sum(axis=1), kind="stable")[::-1][:n_analyzed]
+    p = rng.uniform(0, 1, n_analyzed)
+    p[0], p[-1] = 0.99, 0.01  # at least one cell and one empty droplet
+    latents = {
+        "cell_probability": p,
+        "cell_size": rng.uniform(100, 1000, n_analyzed),
+        "droplet_efficiency": rng.uniform(0.5, 1.5, n_analyzed),
+        "background_fraction": rng.uniform(0, 0.5, n_analyzed),
+    }
+    if version == "0.2":
+        latents = {
+            "latent_cell_probability": latents["cell_probability"],
+            "latent_scale": latents["cell_size"],
+            "latent_RT_efficiency": latents["droplet_efficiency"],
+        }
+    encoding = rng.normal(size=(n_analyzed, z_dim)).astype(np.float32)
+    ambient = rng.dirichlet(np.ones(n_features))
+
+    if filtered:
+        keep = p > 0.5
+        rows = analyzed[keep]
+        latents = {k: v[keep] for k, v in latents.items()}
+        encoding = encoding[keep]
+    else:
+        rows = np.arange(n_all)
+
+    file_barcodes = [barcodes[i] for i in rows]
+    file_counts = counts[rows]
+    if cellranger_v2:
+        with h5py.File(path, "w") as f:
+            group = f.create_group("background_removed")
+            _write_10x_arrays(group, file_counts, file_barcodes)
+            group.create_dataset("genes", data=_fixed(ids))
+            group.create_dataset("gene_names", data=_fixed(names))
+            group.create_dataset("genome", data=_fixed(["NA"] * n_features))
+    else:
+        write_10x_h5(
+            path, file_counts, barcodes=file_barcodes, ids=ids, names=names, types=types
+        )
+
+    with h5py.File(path, "a") as f:
+        if version == "0.2":
+            group = f["background_removed" if cellranger_v2 else "matrix"]
+            if not filtered:
+                group.create_dataset("barcode_indices_for_latents", data=analyzed)
+            group.create_dataset("latent_gene_encoding", data=encoding)
+            for key, values in latents.items():
+                group.create_dataset(key, data=values)
+            group.create_dataset("ambient_expression", data=ambient)
+            group.create_dataset("target_false_positive_rate", data=0.01)
+            group.create_dataset("lambda_multiplier", data=0.5)
+            group.create_dataset("training_elbo_per_epoch", data=rng.normal(size=20))
+            group.create_dataset("overdispersion_mean_and_scale", data=[0.1, 0.2])
+        else:
+            droplets = f.create_group("droplet_latents")
+            # In 0.3+ every analysed droplet, even in the filtered file.
+            droplets.create_dataset("barcode_indices_for_latents", data=analyzed)
+            droplets.create_dataset("gene_expression_encoding", data=encoding)
+            for key, values in latents.items():
+                droplets.create_dataset(key, data=values)
+            glob = f.create_group("global_latents")
+            glob.create_dataset("ambient_expression", data=ambient)
+            glob.create_dataset("empty_droplet_size_lognormal_loc", data=5.5)
+            glob.create_dataset("swapping_fraction_dist_params", data=[1.0, 20.0])
+            meta = f.create_group("metadata")
+            meta.create_dataset("learning_curve_train_elbo", data=rng.normal(size=20))
+            meta.create_dataset("barcodes_analyzed", data=_fixed([barcodes[i] for i in analyzed]))
+            meta.create_dataset("barcodes_analyzed_inds", data=analyzed)
+            meta.create_dataset("features_analyzed_inds", data=np.arange(n_features))
+            meta.create_dataset("target_false_positive_rate", data=[0.01])
+            meta.create_dataset("estimator", data=_fixed(["mckp"]))
+
+    return CellbenderTruth(path, rows, analyzed, latents, encoding, ambient)

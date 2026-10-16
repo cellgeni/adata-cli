@@ -112,6 +112,7 @@ def test_each_layout_imports_as_scanpy_reads_it(tmp_path, counts, layout, suffix
 
 @pytest.mark.parametrize("order", ["cell", "gene", "shuffled"])
 def test_entry_order_does_not_change_the_store(tmp_path, counts, order, monkeypatch):
+    import adata.core.csr_build as csr_build
     import adata.formats.mtx as mtx_module
 
     if order == "cell":
@@ -119,7 +120,7 @@ def test_entry_order_does_not_change_the_store(tmp_path, counts, order, monkeypa
         def refuse(*args, **kwargs):
             raise AssertionError("an ordered file must not go through the buckets")
 
-        monkeypatch.setattr(mtx_module, "BucketSorter", refuse)
+        monkeypatch.setattr(csr_build, "BucketSorter", refuse)
     else:
         monkeypatch.setattr(mtx_module, "DEFAULT_CHUNK", 8)
 

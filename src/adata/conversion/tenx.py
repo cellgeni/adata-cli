@@ -261,6 +261,44 @@ class _AsCsr:
 # import
 
 
+def plan_matrix_import(
+    handle: h5py.File, output: Path, options: Options
+) -> Tuple[_Matrix, List[Path], List[Target], List[str]]:
+    """Read a 10x matrix's description and plan the AnnData outputs from it.
+
+    Shared by every format built on a 10x matrix: the import flags mean the
+    same thing for all of them.
+    """
+    check_import_options(options)
+    matrix = _read_matrix(handle, options.genome)
+
+    if matrix.version == 2 and (
+        options.feature_type is not None or options.split_feature_types
+    ):
+        raise ValueError(
+            "This is a Cell Ranger 2 file, which records no feature types; "
+            "--feature-type and --split-feature-types need a v3 file."
+        )
+
+    keep = np.ones(matrix.n_features, dtype=bool)
+    if options.genome is not None and matrix.version == 3:
+        genomes = matrix.columns.get("genome")
+        if genomes is None:
+            raise ValueError("This file records no genome per feature to filter on.")
+        if options.genome not in set(genomes):
+            raise ValueError(
+                f"No features of genome {options.genome!r}; this file has: "
+                f"{', '.join(sorted(set(genomes)))}."
+            )
+        keep &= genomes == options.genome
+
+    outputs, targets, warnings = plan_targets(
+        output, matrix.names, matrix.columns, matrix.feature_types, keep, options,
+        noun="file",
+    )
+    return matrix, outputs, targets, warnings
+
+
 class TenxImport(Converter):
     options = frozenset(
         {"--genome", "--var-names", "--make-unique", "--feature-type",
@@ -275,38 +313,13 @@ class TenxImport(Converter):
         dst_format: str,
         options: Options,
     ) -> ConversionPlan:
-        check_import_options(options)
-
         with h5py.File(source, "r") as handle:
-            matrix = _read_matrix(handle, options.genome)
-            has_filtered = "filtered_barcodes" in handle[matrix.group]
-
-        if matrix.version == 2 and (
-            options.feature_type is not None or options.split_feature_types
-        ):
-            raise ValueError(
-                "This is a Cell Ranger 2 file, which records no feature types; "
-                "--feature-type and --split-feature-types need a v3 file."
+            matrix, outputs, targets, warnings = plan_matrix_import(
+                handle, output, options
             )
-
-        keep = np.ones(matrix.n_features, dtype=bool)
-        if options.genome is not None and matrix.version == 3:
-            genomes = matrix.columns.get("genome")
-            if genomes is None:
-                raise ValueError("This file records no genome per feature to filter on.")
-            if options.genome not in set(genomes):
-                raise ValueError(
-                    f"No features of genome {options.genome!r}; this file has: "
-                    f"{', '.join(sorted(set(genomes)))}."
-                )
-            keep &= genomes == options.genome
-
-        types = matrix.feature_types
-        outputs, targets, warnings = plan_targets(
-            output, matrix.names, matrix.columns, types, keep, options, noun="file"
-        )
+            has_filtered = "filtered_barcodes" in handle[matrix.group]
         described = describe_import(
-            matrix.n_barcodes, matrix.n_features, types, targets
+            matrix.n_barcodes, matrix.n_features, matrix.feature_types, targets
         )
 
         return ConversionPlan(
