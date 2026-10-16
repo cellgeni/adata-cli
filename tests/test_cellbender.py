@@ -132,6 +132,36 @@ def test_each_latent_lands_on_its_own_barcode(tmp_path, version, filtered, suffi
     if version == "0.3":
         assert "features_analyzed_inds" in uns, "metadata stays in uns"
         assert "features_analyzed_inds" not in got.var
+        assert got.var["cellbender_analyzed"].all(), "as CellBender's anndata_from_h5 adds it"
+
+
+@pytest.mark.parametrize("filtered", [False, True], ids=["full", "filtered"])
+def test_latents_land_right_when_read_in_many_blocks(tmp_path, filtered, monkeypatch):
+    """The embedding is sorted into output blocks through scratch, and the
+    barcodes picked out of contiguous reads; tiny blocks make every row of
+    the fixture cross a block boundary."""
+    from adata.conversion import cellbender
+
+    monkeypatch.setattr(cellbender, "_ROW_STEP", 3)
+    monkeypatch.setattr(cellbender, "STRING_STEP", 7)
+    truth = _cellbender(tmp_path, filtered=filtered)
+    raw = _raw_file(tmp_path)
+    for extra in ([], ["--min-cell-probability", "0.5"]):
+        out = tmp_path / f"out{len(extra)}.h5ad"
+        _ok(truth.path, "-o", out, "--raw", raw, *extra)
+        got = _read(out)
+        position = {b: i for i, b in enumerate(truth.analyzed)}
+        latent_row = (
+            np.arange(len(truth.rows)) if filtered
+            else np.array([position.get(b, -1) for b in truth.rows])
+        )
+        index = {barcode: i for i, barcode in enumerate(_barcodes()[r] for r in truth.rows)}
+        for row, barcode in enumerate(got.obs_names):
+            source = latent_row[index[barcode]]
+            expected = truth.encoding[source] if source >= 0 else np.full(truth.encoding.shape[1], np.nan)
+            np.testing.assert_array_equal(got.obsm["gene_expression_encoding"][row], expected)
+        rows = [_barcodes().index(b) for b in got.obs_names]
+        assert np.array_equal(got.layers["cellranger"].toarray(), _raw_counts()[rows])
 
 
 def test_cellbender_0_2_on_cell_ranger_2_input(tmp_path):
@@ -242,6 +272,27 @@ def test_raw_follows_feature_filters_and_splits(tmp_path):
     adt = _read(tmp_path / "split.Antibody_Capture.h5ad")
     assert np.array_equal(adt.layers["cellranger"].toarray(), _raw_counts()[truth.rows][:, 6:])
     assert np.array_equal(adt.X.toarray(), _denoised(_raw_counts())[truth.rows][:, 6:])
+
+
+def test_raw_buckets_are_sized_by_exact_counts_under_a_feature_filter(tmp_path, monkeypatch):
+    """Bucket sizes used to be estimated as each row's length scaled by the
+    kept share of features, which rounds to zero for a narrow filter: every
+    entry then landed in one bucket, held whole in memory."""
+    from adata.conversion import cellbender
+
+    seen = []
+    original = cellbender.write_runs
+
+    def watching(blocks, **kwargs):
+        seen.append(kwargs["counts"].copy())
+        return original(blocks, **kwargs)
+
+    monkeypatch.setattr(cellbender, "write_runs", watching)
+    truth = _cellbender(tmp_path, filtered=True)
+    raw = _raw_file(tmp_path)
+    _ok(truth.path, "-o", tmp_path / "adt.h5ad", "--raw", raw, "--feature-type", "Antibody Capture")
+    expected = (_raw_counts()[truth.rows][:, 6:] != 0).sum(axis=1)
+    assert np.array_equal(seen[-1], expected)
 
 
 @pytest.mark.parametrize(

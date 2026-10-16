@@ -47,7 +47,7 @@ from adata.conversion.features import (
     write_obs_index,
     write_var,
 )
-from adata.core.csr_build import CsrAppender, write_runs
+from adata.core.csr_build import CsrAppender, count_keys, scratch_group, write_runs
 from adata.core.recast import Matrix
 from adata.core.subset import fan_out_sparse_matrix
 from adata.elements import spec
@@ -241,10 +241,24 @@ class _Raw:
     in_order: bool
 
 
-def _barcode_blocks(dataset: h5py.Dataset) -> Iterator[np.ndarray]:
+def _barcode_blocks(
+    dataset: h5py.Dataset, rows: Optional[np.ndarray] = None
+) -> Iterator[np.ndarray]:
+    """The barcodes, or those at `rows` (ascending), a block of the column at a time.
+
+    Rows are picked out of contiguous reads. h5py's fancy indexing pays per
+    index selected: 65,536 scattered rows read some 500 times slower than a
+    slice of the whole column.
+    """
     n = dataset.shape[0]
     for lo in range(0, n, STRING_STEP):
-        yield decode_str_array(np.asarray(dataset[lo : min(lo + STRING_STEP, n)]))
+        hi = min(lo + STRING_STEP, n)
+        if rows is None:
+            yield decode_str_array(np.asarray(dataset[lo:hi]))
+            continue
+        first, last = np.searchsorted(rows, (lo, hi))
+        if first < last:
+            yield decode_str_array(np.asarray(dataset[lo:hi])[rows[first:last] - lo])
 
 
 def _plan_raw(
@@ -280,18 +294,19 @@ def _plan_raw(
             for a, b in zip(_barcode_blocks(raw_barcodes), _barcode_blocks(barcodes))
         ):
             to_output[:] = np.arange(raw.n_barcodes)
-        else:
-            wanted = np.concatenate(list(_barcode_blocks(barcodes))) if n_out else np.array([], dtype=object)
-            if out_rows is not None:
-                wanted = wanted[out_rows]
-            lookup = {barcode: i for i, barcode in enumerate(wanted)}
+        elif n_out:
+            # The output's barcodes, sorted, to look each raw block up in:
+            # a numpy array, rather than a dict whose per-string overhead is
+            # several times the barcode itself.
+            wanted = np.concatenate(list(_barcode_blocks(barcodes, out_rows)))
+            order = np.argsort(wanted, kind="stable")
+            ranked = wanted[order]
             start = 0
             for block in _barcode_blocks(raw_barcodes):
-                for offset, barcode in enumerate(block):
-                    hit = lookup.get(barcode)
-                    if hit is not None:
-                        to_output[start + offset] = hit
-                start += len(block)
+                at = np.minimum(np.searchsorted(ranked, block), ranked.size - 1)
+                hit = ranked[at] == block
+                to_output[start : start + block.size][hit] = order[at[hit]]
+                start += block.size
         found = int((to_output >= 0).sum())
         if found != n_out:
             raise ValueError(
@@ -328,21 +343,27 @@ def _write_raw(
             tenx._AsCsr(group, (raw.n_barcodes, n_features)), spec.CSR_MATRIX,
             (raw.n_barcodes, n_features), group["data"].dtype,
         )
-        # Rows per output, for the bucket bounds; features dropped by a
-        # filter are counted too, which only makes the bounds approximate.
-        per_row = np.zeros(n_out, dtype=np.int64)
-        indptr = np.asarray(group["indptr"][...], dtype=np.int64)
-        hit = raw.to_output >= 0
-        per_row[raw.to_output[hit]] = np.diff(indptr)[hit]
-        counts = np.concatenate([
-            per_row * width // max(1, n_features) for width in emap.target_cols
-        ])
-
         def blocks():
             for rows, cols, values in iter_matrix_entries(source, transpose=False):
                 out = raw.to_output[rows]
                 kept = out >= 0
                 yield emap.apply(out[kept], cols[kept], values[kept])
+
+        grouped = raw.in_order and emap.n_targets == 1
+        # Entries per output row, which size the buckets. Without a feature
+        # filter that is each raw row's length; with one, only a counting
+        # pass knows, and an estimate from widths alone can put a target's
+        # concentrated entries all in one bucket.
+        counts = np.zeros(emap.n_targets * n_out, dtype=np.int64)
+        if grouped:
+            pass  # streamed straight through: no buckets to size
+        elif emap.owner is None:
+            indptr = np.asarray(group["indptr"][...], dtype=np.int64)
+            hit = raw.to_output >= 0
+            counts[raw.to_output[hit]] = np.diff(indptr)[hit]
+        else:
+            for keys, _, _ in blocks():
+                count_keys(counts, keys)
 
         write_runs(
             blocks(),
@@ -350,7 +371,7 @@ def _write_raw(
             n_targets=emap.n_targets,
             destinations=destinations,
             scratch_parent=roots[0],
-            grouped=raw.in_order and emap.n_targets == 1,
+            grouped=grouped,
             canonical=False,
             counts=counts,
             value_dtype=raw.dtype,
@@ -483,6 +504,11 @@ class CellbenderImport(Converter):
             per_feature = {
                 key: np.asarray(handle[path][...]) for key, path in latents.per_feature.items()
             }
+            if "features_analyzed_inds" in latents.other:
+                # As CellBender's anndata_from_h5 adds it.
+                analysed = np.zeros(matrix.n_features, dtype=bool)
+                analysed[np.asarray(handle[latents.other["features_analyzed_inds"]][...])] = True
+                per_feature["cellbender_analyzed"] = analysed
             with console.status("[cyan]Writing obs, var and the latents...[/]"):
                 for root, target in zip(roots, detail.targets):
                     _write_obs(root, handle, group, latents, matrix.n_barcodes, out_rows)
@@ -522,18 +548,8 @@ def _write_obs(
     root: Any, handle: h5py.File, group: h5py.Group, latents: _Latents,
     n_barcodes: int, out_rows: Optional[np.ndarray],
 ) -> None:
-    barcodes = group["barcodes"]
-    if out_rows is None:
-        blocks = (
-            [str(v) for v in block] for block in _barcode_blocks(barcodes)
-        )
-        n = n_barcodes
-    else:
-        n = out_rows.size
-        blocks = (
-            [str(v) for v in decode_str_array(np.asarray(barcodes[out_rows[lo : lo + STRING_STEP]]))]
-            for lo in range(0, n, STRING_STEP)
-        )
+    n = n_barcodes if out_rows is None else out_rows.size
+    blocks = ([str(v) for v in block] for block in _barcode_blocks(group["barcodes"], out_rows))
     obs = write_obs_index(root, n, blocks)
 
     analyzed = np.zeros(n_barcodes, dtype=bool)
@@ -554,27 +570,70 @@ def _write_embeddings(
     root: Any, handle: h5py.File, latents: _Latents, n_barcodes: int,
     out_rows: Optional[np.ndarray],
 ) -> None:
-    """Each embedding, a block of output rows at a time, NaN where none was inferred."""
-    inverse = np.full(n_barcodes, -1, dtype=np.int64)
-    if latents.rows is None:
-        inverse[: latents.n_latent] = np.arange(latents.n_latent)
-    else:
-        inverse[latents.rows] = np.arange(latents.n_latent)
-    rows = np.arange(n_barcodes) if out_rows is None else out_rows
-    for key, path in latents.embeddings.items():
-        values = np.asarray(handle[path][...])
-        dtype = values.dtype if values.dtype.kind == "f" else np.float64
-        out = create_dataset(
-            root["obsm"], key, shape=(rows.size, values.shape[1]), dtype=dtype,
-            chunks=(min(max(rows.size, 1), _ROW_STEP), values.shape[1]),
-        )
-        for lo in range(0, rows.size, _ROW_STEP):
-            source = inverse[rows[lo : lo + _ROW_STEP]]
-            block = np.full((source.size, values.shape[1]), np.nan, dtype=dtype)
-            have = source >= 0
-            block[have] = values[source[have]]
-            out[lo : lo + source.size] = block
-        spec.set_encoding(out, spec.ARRAY)
+    """Each embedding, a block of output rows at a time, NaN where none was inferred.
+
+    Latent rows come in CellBender's order, analysed droplets by count, and
+    output rows in the file's, so one block of output draws on latents from
+    anywhere. Reading those rows by fancy indexing is some 500 times slower
+    than a slice, so the latents are read in slices and sorted, by the output
+    block they belong to, into a scratch copy that each block then reads in
+    one piece.
+    """
+    if not latents.embeddings:
+        return
+    n_out = n_barcodes if out_rows is None else out_rows.size
+    position = np.arange(n_barcodes) if out_rows is None else np.full(n_barcodes, -1)
+    if out_rows is not None:
+        position[out_rows] = np.arange(n_out)
+    # Each latent row's output row, or -1.
+    target = (
+        position[: latents.n_latent] if latents.rows is None else position[latents.rows]
+    )
+    kept = np.flatnonzero(target >= 0)
+    block_of = target[kept] // _ROW_STEP
+    by_block = np.argsort(block_of, kind="stable")
+    n_blocks = -(-n_out // _ROW_STEP)
+    starts = np.concatenate(([0], np.cumsum(np.bincount(block_of, minlength=n_blocks))))
+    # The output row of each scratch row.
+    placed = target[kept][by_block]
+
+    with scratch_group(root, "__embedding_scratch__") as scratch:
+        for key, path in latents.embeddings.items():
+            source = handle[path]
+            width = source.shape[1]
+            dtype = source.dtype if source.dtype.kind == "f" else np.float64
+            sorted_rows = create_dataset(
+                scratch, key, shape=(kept.size, width), dtype=dtype,
+                chunks=(min(max(kept.size, 1), _ROW_STEP), width),
+            )
+            cursor = starts[:-1].copy()
+            for lo in range(0, latents.n_latent, _ROW_STEP):
+                hi = min(lo + _ROW_STEP, latents.n_latent)
+                here = target[lo:hi]
+                have = np.flatnonzero(here >= 0)
+                if have.size == 0:
+                    continue
+                values = np.asarray(source[lo:hi])[have]
+                blocks = here[have] // _ROW_STEP
+                order = np.argsort(blocks, kind="stable")
+                values, blocks = values[order], blocks[order]
+                edges = np.flatnonzero(np.diff(blocks)) + 1
+                for run, b in zip(np.split(values, edges), blocks[np.r_[0, edges]]):
+                    sorted_rows[cursor[b] : cursor[b] + len(run)] = run
+                    cursor[b] += len(run)
+
+            out = create_dataset(
+                root["obsm"], key, shape=(n_out, width), dtype=dtype,
+                chunks=(min(max(n_out, 1), _ROW_STEP), width),
+            )
+            for b in range(n_blocks):
+                lo = b * _ROW_STEP
+                block = np.full((min(_ROW_STEP, n_out - lo), width), np.nan, dtype=dtype)
+                a, z = starts[b], starts[b + 1]
+                if a < z:
+                    block[placed[a:z] - lo] = sorted_rows[a:z]
+                out[lo : lo + block.shape[0]] = block
+            spec.set_encoding(out, spec.ARRAY)
 
 
 def _write_uns(root: Any, handle: h5py.File, latents: _Latents) -> None:

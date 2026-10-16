@@ -212,6 +212,7 @@ against those keeps working:
 | which droplets were analysed | `obs["cellbender_analyzed"]` |
 | `gene_expression_encoding` (`latent_gene_encoding` in 0.2) | obsm, same name |
 | `ambient_expression` | `var["ambient_expression"]` |
+| which features were analysed (`features_analyzed_inds`, 0.3+) | `var["cellbender_analyzed"]` |
 | everything else (fitted constants, learning curve, settings) | `uns["cellbender"]` |
 
 ```bash
