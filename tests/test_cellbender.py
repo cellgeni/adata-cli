@@ -128,15 +128,11 @@ def test_each_latent_lands_on_its_own_barcode(tmp_path, version, filtered, suffi
     np.testing.assert_allclose(got.var["ambient_expression"], truth.ambient)
     uns = got.uns["cellbender"]
     assert uns["version"] == version
-    # As CellBender stores it: a scalar in 0.2, a one-element array since.
-    assert np.shape(uns["target_false_positive_rate"]) == (() if version == "0.2" else (1,))
     assert np.ravel(uns["target_false_positive_rate"]).tolist() == [0.01]
     if version == "0.3":
         assert "features_analyzed_inds" in uns, "metadata stays in uns"
         assert "features_analyzed_inds" not in got.var
         assert got.var["cellbender_analyzed"].all(), "as CellBender's anndata_from_h5 adds it"
-        # Unused for rows in a filtered file, so kept in uns as CellBender's loader does.
-        assert ("barcode_indices_for_latents" in uns) == filtered
 
 
 @pytest.mark.parametrize("filtered", [False, True], ids=["full", "filtered"])
@@ -166,6 +162,24 @@ def test_latents_land_right_when_read_in_many_blocks(tmp_path, filtered, monkeyp
             np.testing.assert_array_equal(got.obsm["gene_expression_encoding"][row], expected)
         rows = [_barcodes().index(b) for b in got.obs_names]
         assert np.array_equal(got.layers["cellranger"].toarray(), _raw_counts()[rows])
+
+
+@pytest.mark.parametrize("filtered", [False, True], ids=["full", "filtered"])
+@pytest.mark.parametrize("version", ["0.3", "0.2"])
+def test_uns_holds_what_cellbender_stored_as_its_loader_gives_it(tmp_path, version, filtered):
+    """Checked against real CellBender 0.3.2 output, uns differed from
+    CellBender's own loader twice: one-element settings were unwrapped to
+    scalars, so `uns[...][0]` broke, and a filtered file's
+    barcode_indices_for_latents, which places no rows there, was dropped."""
+    truth = _cellbender(tmp_path, version=version, filtered=filtered)
+    out = tmp_path / "out.h5ad"
+    _ok(truth.path, "-o", out)
+    uns = _read(out).uns["cellbender"]
+    # A scalar in 0.2, a one-element array since.
+    assert np.shape(uns["target_false_positive_rate"]) == (() if version == "0.2" else (1,))
+    # 0.2 drops the index from filtered files; 0.3+ keeps every analysed droplet's.
+    kept = version != "0.2" and filtered
+    assert ("barcode_indices_for_latents" in uns) == kept
 
 
 def test_cellbender_0_2_on_cell_ranger_2_input(tmp_path):
