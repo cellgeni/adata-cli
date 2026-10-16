@@ -592,6 +592,41 @@ def test_10x_mtx_export_reads_each_block_once(tmp_path):
     assert_independent_of(measure, what="convert h5ad to 10x mtx read calls", axis="n_obs")
 
 
+def _parse_run(path: Path, n: int) -> Path:
+    from tests.conftest import write_parse_run
+
+    return write_parse_run(path, n_cells=n, n_genes=8, genomes=("hg38", "mm10")).root
+
+
+@pytest.mark.parametrize("extra", [{}, {"genome": "mm10"}, {"all_samples": True}])
+def test_parse_import_work_grows_linearly(tmp_path, extra):
+    """Plain, with --genome's row map and gene filter, and one output per sample."""
+    from adata.commands.convert import convert_store
+    from adata.conversion import Options
+
+    tag = "".join(extra)
+
+    def measure(n: int) -> int:
+        source = _parse_run(tmp_path / f"pa{tag}{n}", n)
+        with count_io() as io:
+            convert_store(source, tmp_path / f"opa{tag}{n}.h5ad", QUIET, options=Options(**extra))
+        return io.work
+
+    assert_grows_linearly(measure, what=f"convert Parse ({extra}) to h5ad", axis="n_cells")
+
+
+def test_parse_import_writes_obs_and_x_in_blocks(tmp_path):
+    from adata.commands.convert import convert_store
+
+    def measure(n: int) -> int:
+        source = _parse_run(tmp_path / f"pw{n}", n)
+        with count_io() as io:
+            convert_store(source, tmp_path / f"opw{n}.h5ad", QUIET)
+        return io.h5_write_calls
+
+    assert_independent_of(measure, what="convert Parse write calls", axis="n_cells")
+
+
 def _cellbender_pair(path: Path, n: int, filtered: bool):
     from tests.conftest import write_10x_h5, write_cellbender_h5
 

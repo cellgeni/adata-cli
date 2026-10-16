@@ -39,6 +39,11 @@ class Options:
     raw: Optional[Path] = None
     min_cell_probability: Optional[float] = None
 
+    # Reading Parse split-pipe output.
+    sample: Optional[str] = None
+    all_samples: bool = False
+    unfiltered: bool = False
+
 
 @dataclass
 class ConversionPlan:

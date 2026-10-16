@@ -100,7 +100,9 @@ Each layer calls only the layers below it:
 - **`formats/`**: the per-file-type halves of `export` and `import`: npy, mtx,
   csv, json and images. `mtx.py` is a streaming Matrix Market codec (two
   passes in, block writes out) shared by `import`/`export sparse` and the
-  `10x-mtx` converter; `textio.py` holds its gzip-aware block I/O.
+  `10x-mtx` and `parse` converters; `textio.py` holds its gzip-aware block
+  I/O, and `table.py` a streaming CSV reader that types columns as pandas
+  does (Parse's cell metadata; meant for #25's delimited tables too).
 - **`util/`**: `staging.py` and `path.py` (below), plus `names.py`.
 
 ## Rules the code depends on

@@ -524,6 +524,9 @@ _CONVERT_FLAGS = {
     "feature_types_column": "--feature-types-column",
     "raw": "--raw",
     "min_cell_probability": "--min-cell-probability",
+    "sample": "--sample",
+    "all_samples": "--all-samples",
+    "unfiltered": "--unfiltered",
 }
 
 #: Flags that only make sense for format conversion; with recast's flags,
@@ -663,6 +666,21 @@ def convert(
         help="CellBender input: keep droplets with cell_probability at least "
         "this (CellBender's own cutoff is 0.5)",
     ),
+    sample: Optional[str] = typer.Option(
+        None,
+        "--sample",
+        help="Parse input: the sample folder to read (default: all-sample)",
+    ),
+    all_samples: bool = typer.Option(
+        False,
+        "--all-samples",
+        help="Parse input: write one output per sample, OUT.<sample>.h5ad",
+    ),
+    unfiltered: bool = typer.Option(
+        False,
+        "--unfiltered",
+        help="Parse input: read DGE_unfiltered (every barcode) not DGE_filtered",
+    ),
     # Deprecated: recast's flags, so `convert` keeps working as it did until
     # 1.0.0. Hidden from --help; the old matrix paths arrive in ctx.args.
     inplace: bool = typer.Option(False, "--inplace", hidden=True),
@@ -681,12 +699,13 @@ def convert(
     writes a Matrix Market folder. Between h5ad and zarr every element is
     copied, streamed, keeping the source's chunking and compression where the
     target can express them. CellBender output keeps its latent variables, as
-    CellBender's own loader names them. A 10x matrix is read as scanpy's read_10x_h5 or
-    read_10x_mtx (gex_only=False) reads it, keeping integer counts, and
-    written as Cell Ranger writes it. Features are named by gene id, unique
+    CellBender's own loader names them. A 10x matrix is read as scanpy's
+    read_10x_h5 or read_10x_mtx (gex_only=False) reads it, keeping integer
+    counts, and written as Cell Ranger writes it. MTX folders from Cell
+    Ranger and STARsolo, velocyto's included, and Parse split-pipe output
+    are read in two streaming passes. Features are named by gene id, unique
     but in probe-level (Flex) matrices; --var-names gene_symbols names them
-    as scanpy does. MTX folders from Cell Ranger and
-    STARsolo, velocyto's included, are read in two streaming passes.
+    as scanpy does.
 
     Nothing is written until every check has passed, and the output is moved
     into place only once complete: a failed conversion leaves nothing
@@ -707,6 +726,8 @@ def convert(
         adata convert counts.h5ad -o counts_mtx --to 10x-mtx --layer counts
         adata convert cellbender_output.h5 -o cb.h5ad --raw raw_feature_bc_matrix.h5
         adata convert cellbender_output.h5 -o cells.h5ad --min-cell-probability 0.5
+        adata convert splitpipe_out -o parse.h5ad
+        adata convert splitpipe_out -o parse.h5ad --all-samples --unfiltered
     """
     entries = list(ctx.args)
     recast_flags = _given(ctx, _RECAST_FLAGS)
@@ -792,6 +813,9 @@ def convert(
                 feature_types_column=feature_types_column,
                 raw=raw,
                 min_cell_probability=min_cell_probability,
+                sample=sample,
+                all_samples=all_samples,
+                unfiltered=unfiltered,
             ),
         )
     except Exception as e:
