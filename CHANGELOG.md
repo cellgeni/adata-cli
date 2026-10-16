@@ -3,6 +3,56 @@
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
+## 0.9.0
+
+Adds CellBender's `remove-background` output to `adata convert`. The
+denoised counts become X, and CellBender's latent variables are kept under
+the names its own loaders use, so notebooks written against those keep
+working. `--raw` adds the Cell Ranger counts CellBender started from.
+
+### Added
+
+- **`adata convert` reads CellBender `remove-background` output**
+  ([#29](https://github.com/cellgeni/adata-cli/issues/29)). An `output.h5`
+  or `output_filtered.h5` from CellBender 0.2, 0.3 or 0.4 is recognised by
+  its latents, whatever it is called:
+  - per-droplet latents (`cell_probability`, `cell_size`,
+    `background_fraction`, `droplet_efficiency`; `latent_*` in 0.2) become
+    obs columns, NaN for droplets CellBender did not analyse, with
+    `obs["cellbender_analyzed"]` marking the ones it did;
+  - the embedding becomes `obsm["gene_expression_encoding"]`
+    (`latent_gene_encoding` in 0.2), the ambient profile
+    `var["ambient_expression"]`, and the analysed features
+    `var["cellbender_analyzed"]`;
+  - everything else (fitted constants, learning curve, settings) goes to
+    `uns["cellbender"]`.
+
+  The 10x HDF5 flags apply. `--from 10x-h5` still reads such a file as a
+  plain 10x matrix. Checked against real CellBender 0.2.2 and 0.3.2 output,
+  full and filtered, and CellBender's own `load_anndata_from_input_and_output`:
+  X, both layers, every latent at its barcode, var and `uns` all match
+  ([#52](https://github.com/cellgeni/adata-cli/pull/52)).
+
+- **`--min-cell-probability P`** ([#29](https://github.com/cellgeni/adata-cli/issues/29))
+  keeps the droplets CellBender gives a cell probability of at least `P`,
+  in file order. At 0.5 it picks the same cells as CellBender's own
+  `output_filtered.h5`.
+
+- **`--raw raw_feature_bc_matrix.h5`** ([#29](https://github.com/cellgeni/adata-cli/issues/29))
+  adds the Cell Ranger counts of the same barcodes as `layers["cellranger"]`,
+  and the denoised counts as `layers["cellbender"]`, as CellBender's loader
+  does. A filtered file lists cells by count rather than in the raw file's
+  order, so its raw counts go through the on-disk bucket sort the MTX
+  import uses, now shared in `core/csr_build.py`
+  ([#51](https://github.com/cellgeni/adata-cli/pull/51)).
+
+### Changed
+
+- **An output extension picks a format that can be written**
+  ([#51](https://github.com/cellgeni/adata-cli/pull/51)). `.h5` stays a 10x
+  HDF5 matrix, and `--to cellbender` is refused, since CellBender files can
+  be read but not written.
+
 ## 0.8.0
 
 Adds 10x Genomics and STARsolo Matrix Market folders to `adata convert`, in
