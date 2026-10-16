@@ -202,6 +202,10 @@ def _read_latents(handle: h5py.File, group: str, n_barcodes: int, n_features: in
         rows = index
     elif n_latent in (0, n_barcodes):
         rows = None
+        if index_path is not None:
+            # A filtered 0.3+ file still lists every analysed droplet, which
+            # places nothing here; CellBender's loader keeps it in uns.
+            other[_INDEX] = index_path
     else:
         raise ValueError(
             f"Cannot tell which barcode each of CellBender's {n_latent:,} latent "
@@ -641,10 +645,9 @@ def _write_uns(root: Any, handle: h5py.File, latents: _Latents) -> None:
     meta = write_mapping(root["uns"], "cellbender")
     write_scalar(meta, "version", latents.version)
     for key, path in latents.other.items():
+        # A setting stays the one-element array CellBender stores it as,
+        # as its own loader gives it.
         value = np.asarray(handle[path][...])
-        if value.ndim == 1 and value.size == 1:
-            # CellBender wraps each scalar setting in a one-element array.
-            value = value.reshape(())
         if value.ndim == 0:
             item = value.item()
             write_scalar(meta, key, item.decode("utf-8", "replace") if isinstance(item, bytes) else item)

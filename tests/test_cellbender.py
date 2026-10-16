@@ -128,11 +128,15 @@ def test_each_latent_lands_on_its_own_barcode(tmp_path, version, filtered, suffi
     np.testing.assert_allclose(got.var["ambient_expression"], truth.ambient)
     uns = got.uns["cellbender"]
     assert uns["version"] == version
-    assert float(uns["target_false_positive_rate"]) == 0.01
+    # As CellBender stores it: a scalar in 0.2, a one-element array since.
+    assert np.shape(uns["target_false_positive_rate"]) == (() if version == "0.2" else (1,))
+    assert np.ravel(uns["target_false_positive_rate"]).tolist() == [0.01]
     if version == "0.3":
         assert "features_analyzed_inds" in uns, "metadata stays in uns"
         assert "features_analyzed_inds" not in got.var
         assert got.var["cellbender_analyzed"].all(), "as CellBender's anndata_from_h5 adds it"
+        # Unused for rows in a filtered file, so kept in uns as CellBender's loader does.
+        assert ("barcode_indices_for_latents" in uns) == filtered
 
 
 @pytest.mark.parametrize("filtered", [False, True], ids=["full", "filtered"])
