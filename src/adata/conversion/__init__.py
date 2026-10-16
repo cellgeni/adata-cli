@@ -17,7 +17,7 @@ from typing import Dict, FrozenSet, List, Optional
 
 import h5py
 
-from adata.conversion import cellbender, mtx, tenx
+from adata.conversion import cellbender, mtx, parse, tenx
 from adata.conversion.anndata_copy import AnnDataCopy
 from adata.conversion.base import ConversionPlan, Converter, Format, Options
 from adata.storage import has_valid_anndata_root_attrs, is_zarr_path
@@ -91,6 +91,14 @@ FORMATS: Dict[str, Format] = {
         sniff=mtx.sniff,
         importer=mtx.MtxImport(),
         exporter=mtx.MtxExport(),
+    ),
+    # A folder too; read only.
+    "parse": Format(
+        name="parse",
+        description="Parse Biosciences split-pipe output (a run, sample or DGE folder)",
+        extensions=(),
+        sniff=parse.sniff,
+        importer=parse.ParseImport(),
     ),
 }
 

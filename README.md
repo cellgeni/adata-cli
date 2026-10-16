@@ -101,6 +101,7 @@ adata convert data.zarr -o data.h5ad --compression gzip
 adata convert filtered_feature_bc_matrix.h5 -o counts.h5ad --feature-type "Gene Expression"
 adata convert counts.h5ad -o for_cellbender.h5 --layer counts
 adata convert Solo.out/Velocyto/raw -o velocyto.h5ad
+adata convert splitpipe_out -o parse.h5ad --unfiltered
 ```
 
 ## Documentation

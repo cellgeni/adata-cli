@@ -127,6 +127,22 @@ def write_categorical(
     return group
 
 
+def create_categorical(
+    parent: Any, name: str, categories: Sequence[Any], n: int, ordered: bool = False
+) -> Any:
+    """A `categorical` of `n` values whose codes the caller fills in blocks.
+
+    Returns the `codes` array, sized and typed for `categories`.
+    """
+    group = parent.create_group(name)
+    spec.set_encoding(group, spec.CATEGORICAL)
+    group.attrs["ordered"] = bool(ordered)
+    write_string_array(group, "categories", np.asarray(list(categories), dtype=object))
+    codes = create_dataset(group, "codes", shape=(n,), dtype=_codes_dtype(len(categories)))
+    spec.set_encoding(codes, spec.ARRAY)
+    return codes
+
+
 def _codes_dtype(n_categories: int) -> Any:
     """Smallest signed integer dtype that can index `n_categories` plus -1."""
     if n_categories < 128:
