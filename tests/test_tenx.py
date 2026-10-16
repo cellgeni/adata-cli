@@ -87,7 +87,7 @@ def tenx(tmp_path, counts) -> Path:
 @pytest.mark.parametrize("suffix", [".h5ad", ".zarr"])
 def test_import_maps_the_matrix_as_scanpy_does(tenx, tmp_path, counts, suffix):
     out = tmp_path / f"out{suffix}"
-    _ok(tenx, "-o", out)
+    _ok(tenx, "-o", out, "--var-names", "gene_symbols")
     got = _read(out)
 
     assert got.X.dtype == np.dtype("int32"), "counts stay integers"
@@ -114,20 +114,23 @@ def test_import_keeps_the_run_metadata(tenx, tmp_path):
 
 
 def test_import_warns_about_repeated_names_and_can_fix_them(tenx, tmp_path):
-    result = _ok(tenx, "-o", tmp_path / "dup.h5ad")
+    result = _ok(tenx, "-o", tmp_path / "dup.h5ad", "--var-names", "gene_symbols")
     assert "1 var names repeat an earlier one" in _out(result)
 
     out = tmp_path / "unique.h5ad"
-    result = _ok(tenx, "-o", out, "--make-unique")
+    result = _ok(tenx, "-o", out, "--var-names", "gene_symbols", "--make-unique")
     assert "repeat an earlier one" not in _out(result)
     expected = ad.AnnData(np.zeros((1, len(NAMES))), var=pd.DataFrame(index=NAMES))
     expected.var_names_make_unique()
     assert list(_read(out).var_names) == list(expected.var_names)
 
 
-def test_var_names_can_be_the_gene_ids(tenx, tmp_path):
+def test_var_names_are_the_gene_ids_by_default(tenx, tmp_path):
+    """Symbols repeat (the fixture repeats one, as real references do), so
+    naming var by them needed --make-unique; ids do not."""
     out = tmp_path / "ids.h5ad"
-    _ok(tenx, "-o", out, "--var-names", "gene_ids")
+    result = _ok(tenx, "-o", out)
+    assert "repeat an earlier one" not in _out(result)
     got = _read(out)
     assert list(got.var_names) == IDS
     assert list(got.var.columns) == ["gene_symbols", "feature_types", "genome", "pattern"]
@@ -139,7 +142,7 @@ def test_a_feature_type_can_be_kept_on_its_own(tenx, tmp_path, counts):
     result = _ok(tenx, "-o", out, "--feature-type", "Gene Expression")
     assert "keeping 6 features" in _out(result)
     got = _read(out)
-    assert list(got.var_names) == NAMES[:6]
+    assert list(got.var_names) == IDS[:6]
     assert np.array_equal(got.X.toarray(), counts[:, :6])
 
 
@@ -152,7 +155,7 @@ def test_split_feature_types_writes_one_output_each(tenx, tmp_path, counts):
     assert not out.exists()
     assert np.array_equal(rna.X.toarray(), counts[:, :6])
     assert np.array_equal(adt.X.toarray(), counts[:, 6:])
-    assert list(adt.var_names) == NAMES[6:]
+    assert list(adt.var_names) == IDS[6:]
     assert list(rna.obs_names) == list(adt.obs_names) == _barcodes()
 
 
@@ -194,7 +197,7 @@ def test_a_genome_filter_keeps_that_genomes_features(tmp_path):
     out = tmp_path / "mouse.h5ad"
     _ok(h5, "-o", out, "--genome", "mm10")
     got = _read(out)
-    assert list(got.var_names) == ["B", "D"]
+    assert list(got.var_names) == ["b", "d"]
     assert np.array_equal(got.X.toarray(), counts[:, [1, 3]])
 
 
@@ -209,7 +212,8 @@ def test_a_probe_barcode_matrix_names_genes_and_probes(tmp_path):
     out = tmp_path / "flex.h5ad"
     _ok(h5, "-o", out)
     got = _read(out)
-    assert list(got.var["gene_ids"]) == ["E1", "E1", "E2", "E3"]
+    assert list(got.var_names) == ["E1", "E1", "E2", "E3"]
+    assert list(got.var["gene_symbols"]) == ["G1", "G1", "G2", "G3"]
     assert list(got.var["probe_ids"]) == ["p1", "p2", "p3", "p4"]
     assert got.var["filtered_probes"].dtype == bool
     assert list(got.var["filtered_probes"]) == [True, False, True, True]
@@ -236,9 +240,9 @@ def test_a_cell_ranger_2_file_needs_a_genome_when_it_has_several(tmp_path):
     out = tmp_path / "mm10.h5ad"
     _ok(h5, "-o", out, "--genome", "mm10")
     got = _read(out)
-    assert list(got.var_names) == list("xyz")
-    assert list(got.var.columns) == ["gene_ids"]
-    assert list(got.var["gene_ids"]) == ["mm10_0", "mm10_1", "mm10_2"]
+    assert list(got.var_names) == ["mm10_0", "mm10_1", "mm10_2"]
+    assert list(got.var.columns) == ["gene_symbols"]
+    assert list(got.var["gene_symbols"]) == list("xyz")
     assert np.array_equal(got.X.toarray(), _counts(n_features=3, seed=1))
     assert got.uns["cellranger"]["genome"] == "mm10"
     assert got.uns["cellranger"]["layout"] == 2
@@ -354,7 +358,8 @@ def test_export_writes_any_matrix_layout_as_cell_ranger_does(tmp_path, layout, c
 
     got = _read(_ok_import(out, tmp_path))
     assert np.array_equal(got.X.toarray(), counts)
-    assert list(got.var["gene_ids"]) == IDS
+    assert list(got.var_names) == IDS
+    assert list(got.var["gene_symbols"]) == NAMES
     assert list(got.var["feature_types"]) == TYPES
     assert list(got.obs_names) == _barcodes()
 
@@ -413,7 +418,7 @@ def test_layer_picks_the_matrix_to_export(tmp_path, layer):
     _ok(source, "-o", out, "--layer", layer)
     got = _read(_ok_import(out, tmp_path))
     assert np.array_equal(got.X.toarray(), _counts())
-    assert list(got.var["gene_ids"]) == IDS
+    assert list(got.var_names) == IDS
 
 
 def test_var_names_that_are_ids_export_with_their_symbols(tmp_path):

@@ -92,7 +92,7 @@ def test_each_layout_imports_as_scanpy_reads_it(tmp_path, counts, layout, suffix
         types=types, layout=layout,
     )
     out = tmp_path / f"out{suffix}"
-    _ok(folder, "-o", out)
+    _ok(folder, "-o", out, "--var-names", "gene_symbols")
 
     got = _read(out)
     assert got.X.dtype == np.int32, "integer counts stay integers"
@@ -159,16 +159,17 @@ def test_real_values_become_float64(tmp_path, counts):
 
 def test_var_names_and_make_unique_follow_scanpy(cr3, tmp_path):
     out = tmp_path / "ids.h5ad"
-    _ok(cr3, "-o", out, "--var-names", "gene_ids")
+    result = _ok(cr3, "-o", out)
+    assert "repeat an earlier one" not in _out(result), "ids are the default names"
     got = _read(out)
     assert list(got.var_names) == IDS
     assert list(got.var["gene_symbols"]) == NAMES
 
     out = tmp_path / "unique.h5ad"
-    result = _ok(cr3, "-o", out)
+    result = _ok(cr3, "-o", out, "--var-names", "gene_symbols")
     assert "repeat an earlier one" in _out(result)
     out = tmp_path / "unique2.h5ad"
-    _ok(cr3, "-o", out, "--make-unique")
+    _ok(cr3, "-o", out, "--var-names", "gene_symbols", "--make-unique")
     names = list(_read(out).var_names)
     assert len(set(names)) == len(names)
 
@@ -177,7 +178,7 @@ def test_feature_types_can_be_kept_or_split(cr3, tmp_path, counts):
     out = tmp_path / "gex.h5ad"
     _ok(cr3, "-o", out, "--feature-type", "Gene Expression")
     got = _read(out)
-    assert list(got.var_names) == NAMES[:6]
+    assert list(got.var_names) == IDS[:6]
     assert np.array_equal(got.X.toarray(), counts[:, :6])
 
     out = tmp_path / "split.h5ad"
@@ -187,7 +188,7 @@ def test_feature_types_can_be_kept_or_split(cr3, tmp_path, counts):
     adt = _read(tmp_path / "split.Antibody_Capture.h5ad")
     assert np.array_equal(gex.X.toarray(), counts[:, :6])
     assert np.array_equal(adt.X.toarray(), counts[:, 6:])
-    assert list(adt.var_names) == NAMES[6:]
+    assert list(adt.var_names) == IDS[6:]
 
 
 def test_velocyto_matrices_become_layers_with_x_as_spliced(tmp_path):

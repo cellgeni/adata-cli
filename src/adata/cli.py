@@ -608,9 +608,10 @@ def convert(
         "Cell Ranger 2 matrix)",
     ),
     var_names: str = typer.Option(
-        "gene_symbols",
+        "gene_ids",
         "--var-names",
-        help="10x input: name features by gene_symbols or gene_ids",
+        help="10x input: name features by gene_ids (default; unique) or "
+        "gene_symbols (scanpy's default)",
     ),
     make_unique: bool = typer.Option(
         False,
@@ -682,7 +683,9 @@ def convert(
     target can express them. CellBender output keeps its latent variables, as
     CellBender's own loader names them. A 10x matrix is read as scanpy's read_10x_h5 or
     read_10x_mtx (gex_only=False) reads it, keeping integer counts, and
-    written as Cell Ranger writes it. MTX folders from Cell Ranger and
+    written as Cell Ranger writes it. Features are named by gene id, unique
+    but in probe-level (Flex) matrices; --var-names gene_symbols names them
+    as scanpy does. MTX folders from Cell Ranger and
     STARsolo, velocyto's included, are read in two streaming passes.
 
     Nothing is written until every check has passed, and the output is moved
