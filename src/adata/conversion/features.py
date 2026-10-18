@@ -40,7 +40,12 @@ from adata.elements.write import (
     write_string_array,
 )
 from adata.storage import create_dataset, is_group, is_zarr_group, open_store
-from adata.util.names import count_duplicates, make_index_unique, unique_names
+from adata.util.names import (
+    count_duplicates,
+    make_index_unique,
+    natural_sorted,
+    unique_names,
+)
 
 VAR_NAMES = ("gene_symbols", "gene_ids")
 
@@ -218,9 +223,10 @@ def write_var(root: Any, target: Target) -> None:
         if values.dtype.kind in "biuf":
             write_dense(var, key, values)
             continue
-        categories, codes = np.unique(values, return_inverse=True)
+        categories = natural_sorted(set(values.tolist()))
         if len(categories) < len(values):
-            write_categorical(var, key, codes, list(categories))
+            lookup = {c: i for i, c in enumerate(categories)}
+            write_categorical(var, key, [lookup[v] for v in values.tolist()], categories)
         else:
             write_string_array(var, key, values)
 

@@ -135,3 +135,30 @@ def test_a_malformed_table_is_refused(tmp_path, text, message):
 def test_a_missing_index_column_is_named(tmp_path):
     with pytest.raises(ValueError, match="no 'bc_wells' column"):
         scan_table(_write(tmp_path, CSV), index="bc_wells")
+
+
+def test_categories_are_ordered_and_gaps_counted_as_anndata_does(tmp_path):
+    """anndata orders categories naturally (A2 before A10), and a column of
+    distinct values with one gap is still a categorical whose gap is code -1;
+    sorting plainly, and counting the gap as a value, both used to differ."""
+    wells = ["A1", "A10", "A2", "B1", "A10", "A2"]
+    tags = ["x", "y", "", "z", "w", "v"]
+    rows = ["id,well,tag"] + [f"c{i},{w},{t}" for i, (w, t) in enumerate(zip(wells, tags))]
+    path = _write(tmp_path, "\n".join(rows) + "\n")
+    scan = scan_table(path, index="id")
+    got = _read_back(tmp_path, scan)
+    assert list(got["well"].cat.categories) == ["A1", "A2", "A10", "B1"]
+    assert got["tag"].dtype == "category"
+    assert got["tag"].isna().tolist() == [False, False, True, False, False, False]
+    _same(got, _expected(path))
+
+
+def test_natural_order_matches_natsort():
+    natsort = pytest.importorskip("natsort")
+    from adata.util.names import natural_sorted
+
+    values = [
+        "A10", "A2", "a1", "B1", "A1", "x10", "x9", "1.5", "10", "9", "01", "1",
+        "", "A", "A01b", "A1b", "GRCh38", "GRCh37", "mm10", "s10_r2", "s2_r10",
+    ]
+    assert natural_sorted(values) == natsort.natsorted(sorted(values))

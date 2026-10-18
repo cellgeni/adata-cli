@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from typing import Dict, List, Sequence
+from typing import Dict, Iterable, List, Sequence
 
 
 def sanitize_label(label: str) -> str:
@@ -67,3 +67,20 @@ def make_index_unique(names: Sequence[str], join: str = "-") -> List[str]:
                 values[i] = candidate
                 break
     return values
+
+
+_DIGITS = re.compile(r"(\d+)")
+
+
+def natural_key(text: str) -> tuple:
+    """Sort key putting "A2" before "A10", as natsort's default does."""
+    parts = _DIGITS.split(text)
+    return tuple(int(part) if i % 2 else part for i, part in enumerate(parts))
+
+
+def natural_sorted(values: Iterable[str]) -> List[str]:
+    """`values` in natsort's default order, which is how anndata orders the
+    categories it makes from strings (`strings_to_categoricals`). Equal keys
+    ("01" and "1") keep their plain sorted order, as natsort's stable sort
+    of pandas' sorted categories does."""
+    return sorted(sorted(values), key=natural_key)

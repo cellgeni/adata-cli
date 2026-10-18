@@ -36,6 +36,7 @@ from adata.elements.strings import string_dtype_for
 from adata.elements.write import create_categorical, set_column_order, write_string_array
 from adata.formats.textio import iter_line_blocks, open_binary
 from adata.storage import create_dataset, is_zarr_group
+from adata.util.names import natural_sorted
 
 #: Distinct values tracked per text column before it is left as strings.
 CATEGORY_CAP = 1 << 16
@@ -68,8 +69,8 @@ class Column:
 
     @property
     def categories(self) -> Optional[List[str]]:
-        """The categories, when the column is written as a categorical."""
-        return None if self.seen is None else sorted(self.seen)
+        """The categories, in the order anndata gives them."""
+        return None if self.seen is None else natural_sorted(self.seen)
 
 
 @dataclass
@@ -99,8 +100,9 @@ class TableScan:
     def is_categorical(self, column: Column) -> bool:
         if column.kind not in ("text", "bool") or column.seen is None:
             return False
-        distinct = len(column.seen) + (1 if column.has_missing else 0)
-        return distinct < self.n_rows
+        # anndata's rule: fewer categories (missing values are none) than
+        # rows. So a column of distinct values and one gap is categorical.
+        return len(column.seen) < self.n_rows
 
 
 def _rows(
