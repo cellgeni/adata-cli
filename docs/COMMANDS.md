@@ -383,7 +383,10 @@ kept, where anndata drops them; and genes are named by id (`Accession`),
 the symbols (`Gene`) staying a column, unless `--var-names gene_symbols` is
 given. Strings are read as loompy reads them, with XML references such as
 `&#233;` turned back into characters. SCope's compound attributes
-(`RegulonsAUC`) are left out with a warning; #27 will read them.
+(`RegulonsAUC`) are left out with a warning; #27 will read them. Looms from
+other writers read too: R's LoomExperiment (graph vertices stored as
+floats), Baysor (genes in a `Name` attribute, and a `.loom` holding the
+matrix alone, which is recognised by its name).
 
 The matrix is read a slab of cells at a time, a whole number of the file's
 64-cell chunks, so each chunk is decompressed once and memory is set by the

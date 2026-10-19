@@ -86,7 +86,7 @@ from adata.util.names import count_duplicates, make_index_unique
 #: kallisto|bustools'.
 OBS_NAMES = ("CellID", "cell_id", "obs_names", "barcode", "barcodes")
 GENE_IDS = ("Accession", "gene_id", "gene_ids")
-GENE_SYMBOLS = ("Gene", "gene_name", "gene_names", "gene_symbols")
+GENE_SYMBOLS = ("Gene", "gene_name", "gene_names", "gene_symbols", "Name")
 
 #: Bytes of matrix held at once: one slab of cells across every gene.
 SLAB_BYTES = 64 << 20
@@ -108,15 +108,17 @@ _GZIP_LEVEL = 2
 
 
 def sniff(path: Path) -> bool:
+    """A 2-D `/matrix` dataset with `row_attrs` and `col_attrs` -- or, in a
+    file named `.loom`, the matrix alone, as some tools (Baysor) write it."""
     path = Path(path)
     if path.is_dir() or not h5py.is_hdf5(path):
         return False
     with h5py.File(path, "r") as handle:
         matrix = handle.get("matrix")
-        return (
-            isinstance(matrix, h5py.Dataset)
-            and matrix.ndim == 2
-            and isinstance(handle.get("row_attrs"), h5py.Group)
+        if not isinstance(matrix, h5py.Dataset) or matrix.ndim != 2:
+            return False
+        return path.suffix.lower() == ".loom" or (
+            isinstance(handle.get("row_attrs"), h5py.Group)
             and isinstance(handle.get("col_attrs"), h5py.Group)
         )
 
@@ -138,11 +140,15 @@ def decode(values: Any) -> Any:
 
 
 def _version(handle: h5py.File) -> str:
+    value = None
     if isinstance(handle.get("attrs"), h5py.Group) and "LOOM_SPEC_VERSION" in handle["attrs"]:
-        return str(decode(handle["attrs"]["LOOM_SPEC_VERSION"][()]))
-    if "LOOM_SPEC_VERSION" in handle.attrs:
-        return str(decode(handle.attrs["LOOM_SPEC_VERSION"]))
-    return "pre-2"
+        value = handle["attrs"]["LOOM_SPEC_VERSION"][()]
+    elif "LOOM_SPEC_VERSION" in handle.attrs:
+        value = handle.attrs["LOOM_SPEC_VERSION"]
+    if value is None:
+        return "pre-2"
+    # R's LoomExperiment writes it as a one-element array.
+    return str(np.asarray(decode(value), dtype=object).reshape(-1)[0])
 
 
 @dataclass
@@ -156,7 +162,7 @@ class _Axis:
     skipped: List[str] = field(default_factory=list)
 
 
-def _axis(group: h5py.Group, n: int, what: str) -> _Axis:
+def _axis(group: Any, n: int, what: str) -> _Axis:
     axis = _Axis(n)
     for name, ds in group.items():
         if not isinstance(ds, h5py.Dataset):
@@ -262,8 +268,9 @@ class LoomImport(Converter):
                 # that name -- from an exported AnnData -- takes it.
                 sources[""].append("layers/matrix")
 
-            obs = _axis(handle["col_attrs"], n_cells, "Column")
-            var = _axis(handle["row_attrs"], n_genes, "Row")
+            empty: Dict[str, Any] = {}
+            obs = _axis(handle.get("col_attrs", empty), n_cells, "Column")
+            var = _axis(handle.get("row_attrs", empty), n_genes, "Row")
             obs.names = _pick(obs, options.obs_names_attr, OBS_NAMES, "--obs-names-attr")
             if obs.names is None:
                 warnings.append(
@@ -298,7 +305,7 @@ class LoomImport(Converter):
                     )
 
             var_names = (
-                [str(v) for v in decode(handle["row_attrs"][var.names][...]).reshape(-1)]
+                [str(v) for v in decode(handle.get("row_attrs", {})[var.names][...]).reshape(-1)]
                 if var.names is not None else [str(i) for i in range(n_genes)]
             )
             if options.make_unique:
@@ -364,12 +371,12 @@ class LoomImport(Converter):
                 open_store(staged[0], "w", zarr_format=detail.zarr_format)
             ).root
             with console.status("[cyan]Writing obs, var and the attributes...[/]"):
-                _write_obs(root, handle["col_attrs"], detail.obs)
-                _write_var(root, handle["row_attrs"], detail.var, detail.var_names)
+                _write_obs(root, handle.get("col_attrs", {}), detail.obs)
+                _write_var(root, handle.get("row_attrs", {}), detail.var, detail.var_names)
                 ensure_anndata_skeleton(root)
                 for axis, group, key in (
-                    (detail.obs, handle["col_attrs"], "obsm"),
-                    (detail.var, handle["row_attrs"], "varm"),
+                    (detail.obs, handle.get("col_attrs", {}), "obsm"),
+                    (detail.var, handle.get("row_attrs", {}), "varm"),
                 ):
                     for name in axis.matrices:
                         _copy_rows(group[name], root[key], name)
@@ -458,10 +465,16 @@ def _write_graph(graph: h5py.Group, root: Any, key: str, name: str, n: int) -> N
         raise ValueError(f"Graph {name!r} has a, b and w of different lengths.")
     step = 1 << 20
 
+    def coordinates(ds: h5py.Dataset, lo: int) -> np.ndarray:
+        values = np.asarray(ds[lo : lo + step])
+        if values.dtype.kind == "f" and not np.array_equal(values, np.trunc(values)):
+            raise ValueError(f"Graph {name!r} has a vertex that is not a whole number.")
+        return values.astype(np.int64)
+
     def blocks() -> Iterator[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
         for lo in range(0, m, step):
-            rows = np.asarray(a[lo : lo + step], dtype=np.int64)
-            cols = np.asarray(b[lo : lo + step], dtype=np.int64)
+            # R's LoomExperiment stores the vertices as floats.
+            rows, cols = coordinates(a, lo), coordinates(b, lo)
             if rows.size and (rows.min() < 0 or rows.max() >= n or cols.min() < 0 or cols.max() >= n):
                 raise ValueError(f"Graph {name!r} has an edge outside 0..{n - 1}.")
             yield rows, cols, np.asarray(w[lo : lo + step])
