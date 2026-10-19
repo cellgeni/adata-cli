@@ -3,6 +3,59 @@
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
+## 0.10.0
+
+Adds Parse Biosciences split-pipe output to `adata convert`, read in two
+streaming passes like the MTX folders of 0.8.0. Features are now named by
+gene id by default, for every format: ids are unique where symbols repeat,
+so a gene-level matrix no longer needs `--make-unique` (a probe-level Flex
+matrix still does).
+
+### Added
+
+- **`adata convert` reads Parse Biosciences split-pipe output**
+  ([#30](https://github.com/cellgeni/adata-cli/issues/30)). A run folder, a
+  sample folder or a `DGE_filtered`/`DGE_unfiltered` folder is recognised
+  whatever its name:
+  - `count_matrix.mtx` (cells x genes) becomes X through the streaming MTX
+    reader; integer counts stay integers;
+  - `cell_metadata.csv` becomes obs, indexed by `bc_wells`, each column
+    typed as pandas reads it and stored as anndata writes it;
+  - `all_genes.csv` becomes var, with `gene_symbols` and `genome`;
+  - `--sample NAME` reads one sample, `--all-samples` writes one output per
+    sample, and `--unfiltered` reads every barcode;
+  - `--genome G` keeps G's genes and the cells split-pipe called as G.
+
+  Checked against Parse's own scanpy recipe in CI, and on a real split-pipe
+  v1.6.1 run: X, obs and var all match, for 29,588 cells and for the
+  431,061 barcodes of the unfiltered folder, at a peak of about 200 MB.
+
+- **A streaming CSV table reader** ([#55](https://github.com/cellgeni/adata-cli/pull/55)),
+  `formats/table.py`: two passes over the file, columns typed as
+  `pd.read_csv` types them, the `obs` dataframe written a block of rows at
+  a time. It reads Parse's cell metadata, and is there for #25's delimited
+  tables.
+
+### Changed
+
+- **Features are named by gene id by default**
+  ([#54](https://github.com/cellgeni/adata-cli/pull/54)). This changes what
+  `adata convert` writes from 10x HDF5, MTX folders, CellBender and Parse:
+  var names are the gene ids, and the symbols are in `var["gene_symbols"]`,
+  the layout `scanpy.read_10x_mtx(var_names="gene_ids")` gives. Symbols
+  repeat (Cell Ranger's GRCh38-2020-A reference repeats 10), so naming by
+  them needed `--make-unique`. `--var-names gene_symbols` gives the old
+  names, as scanpy and CellBender's loaders give them. A probe-level (Flex)
+  matrix still repeats gene ids, and still warns.
+
+### Fixed
+
+- **Categories are ordered as anndata orders them**
+  ([#55](https://github.com/cellgeni/adata-cli/pull/55)). anndata sorts the
+  categories it makes from strings naturally (`A2` before `A10`); `convert`
+  sorted them plainly, so a categorical var column holding numbers in its
+  values came out in a different order from scanpy's.
+
 ## 0.9.0
 
 Adds CellBender's `remove-background` output to `adata convert`. The
