@@ -3,6 +3,30 @@
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
+## 0.11.1
+
+Reads the looms other tools write, as found converting 29 real looms from
+Baysor, R's LoomExperiment and anndata/loompy: all now convert, and match
+`anndata.read_loom` where it can read them.
+
+### Fixed
+
+- **A `.loom` holding the matrix alone is read**
+  ([#59](https://github.com/cellgeni/adata-cli/pull/59)). Baysor writes some
+  looms as `/matrix` with no attribute groups, which were not recognised.
+  In a file named `.loom` that is now a loom, its cells and genes numbered;
+  a 7,979,604 x 8,729 one converted in 10.5 minutes at a 211 MB peak.
+
+- **Baysor's gene names are used** ([#59](https://github.com/cellgeni/adata-cli/pull/59)).
+  Baysor names genes in a `Name` attribute; its looms came out with
+  numbered genes.
+
+- **R's LoomExperiment looms read cleanly** ([#59](https://github.com/cellgeni/adata-cli/pull/59)).
+  The spec version, stored as a one-element array, showed as `['2.0.1']`,
+  and graph vertices stored as floats were truncated without a check; they
+  must now be whole numbers. loompy, and so `anndata.read_loom`, refuses
+  these files.
+
 ## 0.11.0
 
 Adds loom to `adata convert`, both ways. A velocyto, loompy or
