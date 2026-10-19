@@ -29,6 +29,7 @@ from tests.conftest import (
     write_cellbender_h5,
     write_10x_mtx,
     write_10x_v2_h5,
+    write_parse_run,
     write_starsolo_velocyto,
 )
 from tests.reference_stores import must_build, offline, uv_available
@@ -453,3 +454,59 @@ def test_pytables_reads_what_we_export(tmp_path):
     assert got["/matrix/features/feature_type"] == ["Gene Expression"] * 4
     assert got["/matrix/features/_all_tag_keys"] == ["genome"]
     assert got["filetype"] == "matrix"
+
+
+@pytest.mark.parametrize("genome", [None, "mm10"], ids=["all", "mm10"])
+def test_a_parse_run_imports_as_parses_scanpy_recipe_reads_it(tmp_path, genome):
+    """Parse's own recipe: read_mtx, then both tables with pandas, indexed by
+    bc_wells and gene_name -- and, for one species of a barnyard run, the
+    cells and genes of that species."""
+    run = write_parse_run(tmp_path / "run", genomes=("hg38", "mm10"), n_cells=30, n_genes=8)
+    out = tmp_path / "parse.h5ad"
+    extra = ["--genome", genome] if genome else []
+    _convert(str(run.root), "-o", str(out), "--var-names", "gene_symbols", *extra)
+    problems = _run(
+        ["scanpy"], _PARSE_RECIPE, str(run.dge().path), str(out), genome or "",
+    )
+    assert problems == [], problems
+
+
+_PARSE_RECIPE = r"""
+import json, sys, warnings
+warnings.filterwarnings("ignore")
+import numpy as np, pandas as pd, scanpy as sc, anndata as ad
+
+dge, ours, genome = sys.argv[1], sys.argv[2], sys.argv[3]
+ref = sc.read_mtx(dge + "/count_matrix.mtx")
+ref.var = pd.read_csv(dge + "/all_genes.csv").set_index("gene_name")
+ref.obs = pd.read_csv(dge + "/cell_metadata.csv").set_index("bc_wells")
+ref.var.index.name = ref.obs.index.name = None
+if genome:
+    ref = ref[ref.obs["species"] == genome, ref.var["genome"] == genome].copy()
+ref.strings_to_categoricals()
+got = ad.read_h5ad(ours)
+problems = []
+if ref.shape != got.shape:
+    problems.append(f"shape {ref.shape} != {got.shape}")
+else:
+    if not np.array_equal(ref.X.toarray(), got.X.toarray()):
+        problems.append("X differs")
+    if list(ref.obs_names) != list(got.obs_names):
+        problems.append("obs_names differ")
+    if list(ref.var_names) != list(got.var_names):
+        problems.append("var_names differ")
+    if list(ref.var["gene_id"]) != list(got.var["gene_ids"]):
+        problems.append("gene ids differ")
+    for frame, mine in ((ref.obs, got.obs), (ref.var.drop(columns="gene_id"), got.var.drop(columns="gene_ids"))):
+        for column in frame.columns:
+            a, b = frame[column], mine[column]
+            if str(a.dtype) != str(b.dtype) and not (
+                isinstance(a.dtype, pd.CategoricalDtype) and isinstance(b.dtype, pd.CategoricalDtype)
+            ):
+                problems.append(f"{column!r} is {b.dtype}, the recipe's {a.dtype}")
+            elif isinstance(a.dtype, pd.CategoricalDtype) and list(a.cat.categories) != list(b.cat.categories):
+                problems.append(f"{column!r} categories differ")
+            elif list(a.astype(str)) != list(b.astype(str)):
+                problems.append(f"{column!r} differs")
+print("RESULT " + json.dumps(problems))
+"""

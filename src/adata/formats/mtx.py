@@ -216,7 +216,9 @@ class EntryMap:
     feature (the output's column axis), split the features among several
     outputs: `owner` gives each feature's output, or -1 to drop it, and
     `local` its column there. Outputs are numbered within one key space,
-    `key = output * n_rows + row`, so one sort orders them all.
+    `key = output * n_rows + row`, so one sort orders them all. `row_map`,
+    indexed by the file's row (after `transpose`), gives each its output row,
+    or -1 to drop it; `n_rows` then counts output rows.
     """
 
     n_rows: int
@@ -226,6 +228,7 @@ class EntryMap:
     local: Optional[np.ndarray] = None
     n_targets: int = 1
     target_cols: List[int] = field(default_factory=list)
+    row_map: Optional[np.ndarray] = None
 
     def __post_init__(self) -> None:
         if not self.target_cols:
@@ -235,6 +238,10 @@ class EntryMap:
         self, rows: np.ndarray, cols: np.ndarray, values: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         out_rows, features = (cols, rows) if self.transpose else (rows, cols)
+        if self.row_map is not None:
+            out_rows = self.row_map[out_rows]
+            kept = out_rows >= 0
+            out_rows, features, values = out_rows[kept], features[kept], values[kept]
         if self.owner is None:
             return out_rows, features, values
         owner = self.owner[features]

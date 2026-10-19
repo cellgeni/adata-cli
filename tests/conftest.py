@@ -3,7 +3,7 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import tempfile
 import pytest
 import h5py
@@ -613,3 +613,129 @@ def write_cellbender_h5(
             meta.create_dataset("estimator", data=_fixed(["mckp"]))
 
     return CellbenderTruth(path, rows, analyzed, latents, encoding, ambient)
+
+
+# ---------------------------------------------------------------------------
+# Parse Biosciences split-pipe output
+#
+# As split-pipe v1.6.1 writes it (checked on a real run): per sample, and for
+# the combined `all-sample`, DGE_filtered/ and DGE_unfiltered/ each hold a
+# cells x genes count_matrix.mtx, all_genes.csv with quoted gene names, and
+# cell_metadata.csv starting with bc_wells.
+
+PARSE_METADATA = (
+    "bc_wells", "sample", "species", "gene_count", "tscp_count", "mread_count",
+    "bc1_wind", "bc2_wind", "bc3_wind", "bc1_well", "bc2_well", "bc3_well",
+)
+
+
+@dataclass
+class ParseDge:
+    """What one DGE folder holds."""
+
+    path: Path
+    counts: np.ndarray
+    barcodes: List[str]
+    samples: List[str]
+    species: List[str]
+
+
+@dataclass
+class ParseRun:
+    root: Path
+    ids: List[str]
+    names: List[str]
+    genomes: List[str]
+    dges: Dict[Tuple[str, str], ParseDge]
+
+    def dge(self, sample: str = "all-sample", which: str = "DGE_filtered") -> ParseDge:
+        return self.dges[(sample, which)]
+
+
+def write_parse_dge(
+    folder: Path,
+    counts: np.ndarray,
+    *,
+    barcodes: Sequence[str],
+    samples: Sequence[str],
+    species: Sequence[str],
+    ids: Sequence[str],
+    names: Sequence[str],
+    genomes: Sequence[str],
+    gz: bool = False,
+) -> Path:
+    import gzip
+
+    folder.mkdir(parents=True, exist_ok=True)
+    cells, genes = np.nonzero(counts)  # row-major: in cell order, as split-pipe writes
+    lines = [
+        "%%MatrixMarket matrix coordinate integer general",
+        f"%Rows=cells ({counts.shape[0]}), Cols=genes ({counts.shape[1]})",
+        f"{counts.shape[0]} {counts.shape[1]} {cells.size}",
+    ]
+    lines += [f"{c + 1} {g + 1} {int(counts[c, g])}" for c, g in zip(cells, genes)]
+    data = ("\n".join(lines) + "\n").encode()
+    name = "count_matrix.mtx.gz" if gz else "count_matrix.mtx"
+    (folder / name).write_bytes(gzip.compress(data) if gz else data)
+
+    gene_lines = ["gene_id,gene_name,genome"]
+    gene_lines += [f'{i},"{n}",{g}' for i, n, g in zip(ids, names, genomes)]
+    (folder / "all_genes.csv").write_text("\n".join(gene_lines) + "\n")
+
+    wells = [f"{r}{c}" for r in "ABCDEFGH" for c in range(1, 13)]
+    meta = [",".join(PARSE_METADATA)]
+    for k, (barcode, sample, sp) in enumerate(zip(barcodes, samples, species)):
+        winds = [int(part) for part in barcode.split("_")]
+        row = counts[k]
+        meta.append(",".join(map(str, [
+            barcode, sample, sp, int((row > 0).sum()), int(row.sum()), int(row.sum()) + k,
+            *winds, *(wells[(w - 1) % 96] for w in winds),
+        ])))
+    (folder / "cell_metadata.csv").write_text("\n".join(meta) + "\n")
+    return folder
+
+
+def write_parse_run(
+    root: Path,
+    *,
+    n_cells: int = 12,
+    n_genes: int = 6,
+    samples: Sequence[str] = ("s1", "s2"),
+    genomes: Sequence[str] = ("GRCh38",),
+    combined: str = "all-sample",
+    gz: bool = False,
+    seed: int = 0,
+) -> ParseRun:
+    """A split-pipe run: the combined folder and one per sample, each with
+    DGE_filtered/ and DGE_unfiltered/ (two more, near-empty barcodes).
+
+    Genes and cells take the genomes in turn, so a barnyard run's cells
+    each belong to one species.
+    """
+    rng = np.random.default_rng(seed)
+    n_all = n_cells + 2
+    counts = rng.poisson(2.0, (n_all, n_genes))
+    counts[n_cells:] = 0
+    counts[n_cells:, 0] = 1
+    barcodes = [f"{1 + i // 4:02d}_{1 + i % 4:02d}_{1 + (i * 7) % 96:02d}" for i in range(n_all)]
+    cell_samples = [samples[i % len(samples)] if samples else combined for i in range(n_all)]
+    cell_species = [genomes[i % len(genomes)] for i in range(n_all)]
+    ids = [f"{genomes[g % len(genomes)]}_ENSG{g:05d}" for g in range(n_genes)]
+    names = [f"{genomes[g % len(genomes)]}_G{g % 4}" for g in range(n_genes)]  # some repeat
+    gene_genomes = [genomes[g % len(genomes)] for g in range(n_genes)]
+
+    dges = {}
+    for sample in [combined, *samples]:
+        for which, n in (("DGE_filtered", n_cells), ("DGE_unfiltered", n_all)):
+            keep = [i for i in range(n) if sample == combined or cell_samples[i] == sample]
+            folder = root / sample / which
+            dge = ParseDge(
+                folder, counts[keep], [barcodes[i] for i in keep],
+                [cell_samples[i] for i in keep], [cell_species[i] for i in keep],
+            )
+            write_parse_dge(
+                folder, dge.counts, barcodes=dge.barcodes, samples=dge.samples,
+                species=dge.species, ids=ids, names=names, genomes=gene_genomes, gz=gz,
+            )
+            dges[(sample, which)] = dge
+    return ParseRun(root, ids, names, gene_genomes, dges)
