@@ -71,8 +71,8 @@ in.h5ad -o out.zarr` converts a whole store, and `subset`, `split` and
 `*_feature_bc_matrix.h5`) and 10x / STARsolo Matrix Market folders,
 velocyto's included, matching what scanpy's `read_10x_h5` and `read_10x_mtx`
 read (features named by gene id unless `--var-names gene_symbols`),
-CellBender's `remove-background` output with its latent variables, and
-Parse Biosciences split-pipe runs.
+CellBender's `remove-background` output with its latent variables, Parse
+Biosciences split-pipe runs, and looms (velocyto's included), both ways.
 
 | Element | Read | Write |
 |---|---|---|

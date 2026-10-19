@@ -29,6 +29,7 @@ from tests.conftest import (
     write_cellbender_h5,
     write_10x_mtx,
     write_10x_v2_h5,
+    write_loom,
     write_parse_run,
     write_starsolo_velocyto,
 )
@@ -508,5 +509,103 @@ else:
                 problems.append(f"{column!r} categories differ")
             elif list(a.astype(str)) != list(b.astype(str)):
                 problems.append(f"{column!r} differs")
+print("RESULT " + json.dumps(problems))
+"""
+
+
+@pytest.mark.parametrize("velocyto", [False, True], ids=["loompy", "velocyto"])
+def test_a_loom_imports_as_anndata_reads_it(tmp_path, velocyto):
+    """anndata.read_loom (with loompy) is the reference: X, layers, names and
+    attributes. Ours keeps dtypes where anndata casts X to float32, so values
+    are compared, not types."""
+    truth = write_loom(tmp_path / "in.loom", velocyto=velocyto, compound=False)
+    out = tmp_path / "out.h5ad"
+    _convert(str(truth.path), "-o", str(out), "--var-names", "gene_symbols")
+    problems = _run(["anndata", "loompy", "scipy"], _COMPARE_LOOM, str(truth.path), str(out))
+    assert problems == [], problems
+
+
+_COMPARE_LOOM = r"""
+import json, sys, warnings
+warnings.filterwarnings("ignore")
+import numpy as np, anndata as ad
+
+ref, got = ad.io.read_loom(sys.argv[1]), ad.read_h5ad(sys.argv[2])
+problems = []
+dense = lambda m: m.toarray() if hasattr(m, "toarray") else np.asarray(m)
+names = lambda a: sorted(k for k in a.layers.keys() if k)
+if ref.shape != got.shape:
+    problems.append(f"shape {ref.shape} != {got.shape}")
+else:
+    if not np.array_equal(dense(ref.X), dense(got.X).astype(np.float32)):
+        problems.append("X differs")
+    if list(ref.obs_names) != list(got.obs_names):
+        problems.append("obs_names differ")
+    if list(ref.var_names) != list(got.var_names):
+        problems.append("var_names differ")
+    if names(ref) != names(got):
+        problems.append(f"layers {names(ref)} != {names(got)}")
+    for key in names(ref):
+        if key in got.layers and not np.array_equal(dense(ref.layers[key]), dense(got.layers[key])):
+            problems.append(f"layers[{key!r}] differs")
+    for frame, mine, axis in ((ref.obs, got.obs, "obs"), (ref.var, got.var, "var")):
+        if sorted(frame.columns) != sorted(mine.columns):
+            problems.append(f"{axis} columns {sorted(frame.columns)} != {sorted(mine.columns)}")
+        for column in frame.columns:
+            if column in mine and list(frame[column].astype(str)) != list(mine[column].astype(str)):
+                problems.append(f"{axis}[{column!r}] differs")
+    for key in ref.obsm:
+        if key not in got.obsm or not np.allclose(ref.obsm[key], got.obsm[key]):
+            problems.append(f"obsm[{key!r}] differs")
+print("RESULT " + json.dumps(problems))
+"""
+
+
+@pytest.mark.parametrize("layout", ["csr", "dense"])
+def test_loompy_accepts_and_anndata_reads_what_we_export(tmp_path, layout):
+    """loompy's own validator passes our loom, and anndata.read_loom reads
+    back the matrix, layers, names and columns we wrote."""
+    import anndata as ad
+    import pandas as pd
+    from scipy import sparse
+
+    counts = _counts(40, 7).astype(np.float32)
+    X = sparse.csr_matrix(counts) if layout == "csr" else counts
+    source = tmp_path / "in.h5ad"
+    ad.AnnData(
+        X=X,
+        obs=pd.DataFrame({"cluster": pd.Categorical(["a", "b"] * 20)}, index=_barcodes(40)),
+        var=pd.DataFrame({"gene_symbols": [f"G{i}" for i in range(7)]}, index=[f"ENSG{i}" for i in range(7)]),
+        layers={"spliced": sparse.csr_matrix(counts * 2)},
+    ).write_h5ad(source)
+    out = tmp_path / "out.loom"
+    _convert(str(source), "-o", str(out))
+    problems = _run(["anndata", "loompy", "scipy"], _CHECK_LOOM_EXPORT, str(source), str(out))
+    assert problems == [], problems
+
+
+_CHECK_LOOM_EXPORT = r"""
+import json, sys, warnings
+warnings.filterwarnings("ignore")
+import numpy as np, anndata as ad
+from loompy.loom_validator import LoomValidator
+
+src = ad.read_h5ad(sys.argv[1])
+validator = LoomValidator()
+problems = [] if validator.validate(sys.argv[2]) else [f"validator: {validator.errors}"]
+got = ad.io.read_loom(sys.argv[2], var_names="Accession")
+dense = lambda m: m.toarray() if hasattr(m, "toarray") else np.asarray(m)
+if not np.array_equal(dense(got.X), dense(src.layers["spliced"]).astype(np.float32)):
+    problems.append("X (spliced, as anndata picks it) differs")
+if not np.array_equal(dense(got.layers["matrix"]), dense(src.X)):
+    problems.append("the main matrix differs from X")
+if list(got.obs_names) != list(src.obs_names):
+    problems.append("obs_names differ")
+if list(got.var_names) != list(src.var_names):
+    problems.append("var_names differ")
+if list(got.var["Gene"]) != list(src.var["gene_symbols"]):
+    problems.append("Gene differs from gene_symbols")
+if list(got.obs["cluster"].astype(str)) != list(src.obs["cluster"].astype(str)):
+    problems.append("cluster differs")
 print("RESULT " + json.dumps(problems))
 """

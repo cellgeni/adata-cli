@@ -102,7 +102,9 @@ Each layer calls only the layers below it:
   passes in, block writes out) shared by `import`/`export sparse` and the
   `10x-mtx` and `parse` converters; `textio.py` holds its gzip-aware block
   I/O, and `table.py` a streaming CSV reader that types columns as pandas
-  does (Parse's cell metadata; meant for #25's delimited tables too).
+  does (Parse's cell metadata; meant for #25's delimited tables too), plus
+  `write_text_column`, which writes any text column as anndata would
+  (categorical when values repeat); the loom import uses it.
 - **`util/`**: `staging.py` and `path.py` (below), plus `names.py`.
 
 ## Rules the code depends on

@@ -27,7 +27,7 @@ import csv
 import io
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
@@ -362,3 +362,45 @@ def read_small_table(path: Path, delimiter: str = ",") -> Tuple[List[str], List[
     if header is None:
         raise ValueError(f"{Path(path).name} is empty: it has no header line.")
     return header, body
+
+
+def write_text_column(
+    parent: Any,
+    name: str,
+    n: int,
+    blocks: Callable[[], Iterable[Sequence[str]]],
+    *,
+    missing: Sequence[str] = (),
+) -> Any:
+    """A text column of `n` values, from `blocks()` called twice, as anndata
+    would write it: a categorical when it repeats a value, else strings.
+
+    Pass 1 collects the distinct values, up to `CATEGORY_CAP`; pass 2 writes
+    codes in anndata's (natural) category order, or the strings themselves.
+    Values in `missing` are gaps: no category, code -1.
+    """
+    gaps = frozenset(missing)
+    seen: Optional[Set[str]] = set()
+    for block in blocks():
+        seen.update(v for v in block if v not in gaps)
+        if len(seen) > CATEGORY_CAP:
+            seen = None
+            break
+    backend = "zarr" if is_zarr_group(parent) else "hdf5"
+    if seen is not None and len(seen) < n:
+        categories = natural_sorted(seen)
+        lookup = {c: i for i, c in enumerate(categories)}
+        target = create_categorical(parent, name, categories, n)
+        convert = lambda block: np.array([lookup.get(v, -1) for v in block], dtype=np.int64)  # noqa: E731
+    else:
+        target = create_dataset(parent, name, shape=(n,), dtype=string_dtype_for(backend))
+        spec.set_encoding(target, spec.STRING_ARRAY)
+        convert = lambda block: np.asarray(list(block), dtype=object)  # noqa: E731
+    written = 0
+    for block in blocks():
+        values = convert(block)
+        target[written : written + values.size] = values
+        written += values.size
+    if written != n:
+        raise ValueError(f"Column {name!r} has {written:,} values, not {n:,}.")
+    return parent[name]

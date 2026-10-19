@@ -592,6 +592,59 @@ def test_10x_mtx_export_reads_each_block_once(tmp_path):
     assert_independent_of(measure, what="convert h5ad to 10x mtx read calls", axis="n_obs")
 
 
+@pytest.mark.parametrize("extra", [{}, {"dense": True}])
+def test_loom_import_work_grows_linearly(tmp_path, monkeypatch, extra):
+    """Slabs of cells: each chunk read once, whatever the cell count."""
+    from adata.commands.convert import convert_store
+    from adata.conversion import Options, loom
+    from tests.conftest import write_loom
+
+    monkeypatch.setattr(loom, "SLAB_BYTES", 1)
+    tag = "".join(extra)
+
+    def measure(n: int) -> int:
+        source = write_loom(tmp_path / f"lm{tag}{n}.loom", n_cells=n, velocyto=True).path
+        with count_io() as io:
+            convert_store(source, tmp_path / f"olm{tag}{n}.h5ad", QUIET, options=Options(**extra))
+        return io.work
+
+    assert_grows_linearly(measure, what=f"convert loom ({extra}) to h5ad", axis="n_cells")
+
+
+def test_loom_import_writes_in_blocks(tmp_path):
+    from adata.commands.convert import convert_store
+    from tests.conftest import write_loom
+
+    def measure(n: int) -> int:
+        source = write_loom(tmp_path / f"lw{n}.loom", n_cells=n, velocyto=True).path
+        with count_io() as io:
+            convert_store(source, tmp_path / f"olw{n}.h5ad", QUIET)
+        return io.h5_write_calls
+
+    assert_independent_of(measure, what="convert loom write calls", axis="n_cells")
+
+
+@pytest.mark.parametrize("layout", ["csr", "csc", "dense"])
+def test_loom_export_work_grows_linearly(tmp_path, monkeypatch, layout):
+    from adata.commands.convert import convert_store
+    from adata.conversion import loom
+
+    monkeypatch.setattr(loom, "SLAB_BYTES", 1)
+
+    def measure(n: int) -> int:
+        from scipy import sparse
+
+        counts = np.random.default_rng(0).poisson(0.5, (n, 8)).astype(np.float32)
+        X = {"csr": sparse.csr_matrix, "csc": sparse.csc_matrix, "dense": np.asarray}[layout](counts)
+        source = tmp_path / f"le{layout}{n}.h5ad"
+        ad.AnnData(X=X, obs=pd.DataFrame(index=[f"c{i}" for i in range(n)])).write_h5ad(source)
+        with count_io() as io:
+            convert_store(source, tmp_path / f"ole{layout}{n}.loom", QUIET)
+        return io.work
+
+    assert_grows_linearly(measure, what=f"convert {layout} h5ad to loom", axis="n_obs")
+
+
 def _parse_run(path: Path, n: int) -> Path:
     from tests.conftest import write_parse_run
 
