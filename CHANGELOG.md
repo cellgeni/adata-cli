@@ -8,7 +8,8 @@ Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 Adds Parse Biosciences split-pipe output to `adata convert`, read in two
 streaming passes like the MTX folders of 0.8.0. Features are now named by
 gene id by default, for every format: ids are unique where symbols repeat,
-so the output no longer needs `--make-unique`.
+so a gene-level matrix no longer needs `--make-unique` (a probe-level Flex
+matrix still does).
 
 ### Added
 
