@@ -112,7 +112,8 @@ print("RESULT " + json.dumps(problems))
 
 def _import_matches_scanpy(h5: Path, tmp_path: Path, *extra: str, genome: str = ""):
     out = tmp_path / f"{h5.stem}.h5ad"
-    _convert(str(h5), "-o", str(out), *extra)
+    # scanpy names var by symbol; adata's default is ids.
+    _convert(str(h5), "-o", str(out), "--var-names", "gene_symbols", *extra)
     problems = _run(["scanpy"], _COMPARE_IMPORT, str(h5), str(out), genome)
     assert problems == [], problems
 
@@ -222,7 +223,10 @@ def test_an_mtx_folder_imports_as_scanpy_reads_it(tmp_path, layout, make_unique)
         prefix="GSM1_" if layout == "cr3" else "",
     )
     out = tmp_path / "out.h5ad"
-    _convert(str(folder), "-o", str(out), *(["--make-unique"] if make_unique else []))
+    _convert(
+        str(folder), "-o", str(out), "--var-names", "gene_symbols",
+        *(["--make-unique"] if make_unique else []),
+    )
     problems = _run(
         ["scanpy"], _COMPARE_MTX, str(folder), str(out),
         "GSM1_" if layout == "cr3" else "", "1" if layout == "cr3" else "0",
@@ -258,7 +262,7 @@ def test_velocyto_layers_match_scanpys_read_mtx(tmp_path):
         names=[f"g{i}" for i in range(5)],
     )
     out = tmp_path / "velo.h5ad"
-    _convert(str(folder), "-o", str(out))
+    _convert(str(folder), "-o", str(out), "--var-names", "gene_symbols")
     problems = _run(["scanpy"], _COMPARE_VELOCYTO, str(folder), str(out))
     assert problems == [], problems
 
@@ -328,7 +332,7 @@ def test_a_cellbender_file_imports_as_scanpy_reads_its_matrix(tmp_path, filtered
         filtered=filtered,
     )
     out = tmp_path / "cellbender.h5ad"
-    _convert(str(truth.path), "-o", str(out))
+    _convert(str(truth.path), "-o", str(out), "--var-names", "gene_symbols")
     problems = _run(["scanpy"], _COMPARE_CELLBENDER, str(truth.path), str(out))
     assert problems == [], problems
 

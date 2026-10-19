@@ -24,7 +24,7 @@ class Options:
 
     # Reading a 10x matrix.
     genome: Optional[str] = None
-    var_names: str = "gene_symbols"
+    var_names: str = "gene_ids"
     make_unique: bool = False
     feature_type: Optional[str] = None
     split_feature_types: bool = False

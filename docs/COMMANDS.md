@@ -162,7 +162,7 @@ adata convert counts.h5ad -o out.h5 --layer counts
 | Flag | Meaning |
 |---|---|
 | `--genome` | Keep this genome's features; picks the group in a Cell Ranger 2 file holding several |
-| `--var-names` | `gene_symbols` (default) or `gene_ids` |
+| `--var-names` | `gene_ids` (default) or `gene_symbols`, scanpy's default |
 | `--make-unique` | Suffix repeated var names as `var_names_make_unique` does |
 | `--feature-type` | Keep one feature type, e.g. `"Gene Expression"` |
 | `--split-feature-types` | Write one output per type, `OUT.<type>.h5ad` |
@@ -171,7 +171,15 @@ adata convert counts.h5ad -o out.h5 --layer counts
 | `--gene-names-column` | Export: var column with gene names (default the var names) |
 | `--feature-types-column` | Export: var column with feature types (default `feature_types`) |
 
-Reading gives what `scanpy.read_10x_h5(gex_only=False)` gives, column for
+Features are named by gene id, with the symbols in `var["gene_symbols"]`:
+the layout `scanpy.read_10x_mtx(var_names="gene_ids")` gives. Ids are
+unique where symbols repeat (Cell Ranger's GRCh38-2020-A reference repeats
+10), so naming by them, as scanpy does by default, needs `--make-unique` to
+give unique names; `--var-names gene_symbols` does that when wanted. The
+exception is a probe-level (Flex) matrix, whose several probes per gene
+share a gene id: pass `--make-unique` there, or use `var["probe_ids"]`.
+Either way, repeated names are reported when they occur. With it,
+reading gives what `scanpy.read_10x_h5(gex_only=False)` gives, column for
 column: `gene_ids`, `feature_types`, every other per-feature field Cell Ranger
 recorded (`genome`, and `pattern`, `read` and so on for antibody and CRISPR
 features), `probe_ids` for a probe-based (Flex) matrix, and
@@ -179,7 +187,7 @@ features), `probe_ids` for a probe-based (Flex) matrix, and
 is kept unless `--feature-type` says otherwise, and `X` keeps Cell Ranger's
 integer counts, where scanpy converts them to float32; run `adata recast
 out.h5ad X --inplace --dtype float32` if a tool needs floats. Repeated var
-names are kept and reported, as scanpy does. The run's metadata, which scanpy
+names are kept and reported, as scanpy does; `--make-unique` suffixes them. The run's metadata, which scanpy
 drops, goes in `uns["cellranger"]`.
 
 The matrix is stored genes x cells in CSC, which is byte for byte cells x
@@ -203,7 +211,8 @@ The output of CellBender's `remove-background` (`output.h5` and
 `output_filtered.h5`, 0.2 and later) is recognised by its latent variables,
 whatever its name. Its matrix is a 10x one and is read as above; the latents
 are kept, under the names CellBender's own loaders give them, so code written
-against those keeps working:
+against those keeps working. Those loaders name features by symbol; pass
+`--var-names gene_symbols` for the same var names.
 
 | CellBender | AnnData |
 |---|---|
@@ -263,8 +272,9 @@ adata convert counts.h5ad -o counts_mtx --to 10x-mtx --layer counts
 The import flags are those of the HDF5 format above (`--genome`,
 `--var-names`, `--make-unique`, `--feature-type`, `--split-feature-types`),
 plus `--compression` for the output store, which is gzip on h5ad unless
-given. Reading gives what `scanpy.read_10x_mtx(gex_only=False)` gives,
-column for column, except that integer counts stay integers (int32, int64
+given. Features are named by gene id unless `--var-names gene_symbols` is
+given; with it, reading gives what `scanpy.read_10x_mtx(gex_only=False)`
+gives, column for column, except that integer counts stay integers (int32, int64
 when a value needs it) where scanpy converts them to float32; a `real` matrix
 is read as float64. Duplicate entries are summed, as scipy does.
 

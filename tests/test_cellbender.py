@@ -106,7 +106,8 @@ def test_each_latent_lands_on_its_own_barcode(tmp_path, version, filtered, suffi
     got = _read(out)
     assert np.array_equal(got.X.toarray(), _denoised(_raw_counts())[truth.rows])
     assert list(got.obs_names) == [_barcodes()[i] for i in truth.rows]
-    assert list(got.var_names) == NAMES
+    assert list(got.var_names) == IDS
+    assert list(got.var["gene_symbols"]) == NAMES
 
     for key, values in truth.latents.items():
         np.testing.assert_array_equal(got.obs[key].to_numpy(), _expected(truth, values), key)
