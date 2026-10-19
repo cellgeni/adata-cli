@@ -527,6 +527,9 @@ _CONVERT_FLAGS = {
     "sample": "--sample",
     "all_samples": "--all-samples",
     "unfiltered": "--unfiltered",
+    "dense": "--dense",
+    "obs_names_attr": "--obs-names-attr",
+    "var_names_attr": "--var-names-attr",
 }
 
 #: Flags that only make sense for format conversion; with recast's flags,
@@ -634,7 +637,9 @@ def convert(
     layer: Optional[str] = typer.Option(
         None,
         "--layer",
-        help="10x output: the matrix to write: X (default), raw/X, or a layer",
+        help="10x or loom output: the matrix to write: X (default), raw/X, or "
+        "a layer; loom input: the loom layer that becomes X (default spliced, "
+        "else the main matrix)",
     ),
     gene_ids_column: Optional[str] = typer.Option(
         None,
@@ -681,6 +686,22 @@ def convert(
         "--unfiltered",
         help="Parse input: read DGE_unfiltered (every barcode) not DGE_filtered",
     ),
+    dense: bool = typer.Option(
+        False,
+        "--dense",
+        help="loom input: keep X and the layers dense (default: sparse CSR)",
+    ),
+    obs_names_attr: Optional[str] = typer.Option(
+        None,
+        "--obs-names-attr",
+        help="loom input: the column attribute naming cells (default CellID)",
+    ),
+    var_names_attr: Optional[str] = typer.Option(
+        None,
+        "--var-names-attr",
+        help="loom input: the row attribute naming genes (default Accession, "
+        "or Gene with --var-names gene_symbols)",
+    ),
     # Deprecated: recast's flags, so `convert` keeps working as it did until
     # 1.0.0. Hidden from --help; the old matrix paths arrive in ctx.args.
     inplace: bool = typer.Option(False, "--inplace", hidden=True),
@@ -694,9 +715,9 @@ def convert(
     """
     Convert a store to another format.
 
-    The output's extension picks the format: .h5ad, .zarr, or .h5 for a 10x
-    Genomics matrix (Cell Ranger's *_feature_bc_matrix.h5); --to 10x-mtx
-    writes a Matrix Market folder. Between h5ad and zarr every element is
+    The output's extension picks the format: .h5ad, .zarr, .loom, or .h5 for
+    a 10x Genomics matrix (Cell Ranger's *_feature_bc_matrix.h5); --to
+    10x-mtx writes a Matrix Market folder. Between h5ad and zarr every element is
     copied, streamed, keeping the source's chunking and compression where the
     target can express them. CellBender output keeps its latent variables, as
     CellBender's own loader names them. A 10x matrix is read as scanpy's
@@ -728,6 +749,8 @@ def convert(
         adata convert cellbender_output.h5 -o cells.h5ad --min-cell-probability 0.5
         adata convert splitpipe_out -o parse.h5ad
         adata convert splitpipe_out -o parse.h5ad --all-samples --unfiltered
+        adata convert velocyto.loom -o velocyto.h5ad
+        adata convert counts.h5ad -o counts.loom
     """
     entries = list(ctx.args)
     recast_flags = _given(ctx, _RECAST_FLAGS)
@@ -816,6 +839,9 @@ def convert(
                 sample=sample,
                 all_samples=all_samples,
                 unfiltered=unfiltered,
+                dense=dense,
+                obs_names_attr=obs_names_attr,
+                var_names_attr=var_names_attr,
             ),
         )
     except Exception as e:

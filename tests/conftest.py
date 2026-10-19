@@ -739,3 +739,102 @@ def write_parse_run(
             )
             dges[(sample, which)] = dge
     return ParseRun(root, ids, names, gene_genomes, dges)
+
+
+# ---------------------------------------------------------------------------
+# Loom, as loompy 3 and velocyto write it (checked on velocyto 0.17 and
+# kallisto|bustools looms): genes x cells, chunked 64 x 64 and gzipped;
+# strings as variable-length ASCII with XML character references; booleans
+# as uint8; spec 3.0.0 keeps global attributes as datasets under /attrs,
+# spec 2.0.1 as root attributes.
+
+
+@dataclass
+class LoomTruth:
+    path: Path
+    counts: np.ndarray  # cells x genes, the main matrix
+    layers: Dict[str, np.ndarray]
+    cell_ids: List[str]
+    gene_ids: List[str]
+    gene_names: List[str]
+
+
+def _loom_strings(values: Sequence[str]) -> np.ndarray:
+    return np.array([str(v).encode("ascii", "xmlcharrefreplace") for v in values], dtype=object)
+
+
+def write_loom(
+    path: Path,
+    *,
+    n_cells: int = 30,
+    n_genes: int = 10,
+    spec: str = "3.0.0",
+    velocyto: bool = False,
+    graph: bool = True,
+    compound: bool = False,
+    seed: int = 0,
+) -> LoomTruth:
+    rng = np.random.default_rng(seed)
+    ascii_str = h5py.string_dtype(encoding="ascii")
+    counts = rng.poisson(0.7, (n_cells, n_genes)).astype(np.float32)
+    layers: Dict[str, np.ndarray] = {}
+    if velocyto:
+        for name in ("spliced", "unspliced", "ambiguous"):
+            layers[name] = rng.poisson(0.5, (n_cells, n_genes)).astype(np.uint32)
+    else:
+        layers["counts"] = counts.astype(np.int32) * 2
+    cell_ids = [f"sample:CELL{i:05d}x" for i in range(n_cells)]
+    gene_ids = [f"ENSMUSG{i:011d}" for i in range(n_genes)]
+    gene_names = [f"Gène{i % (n_genes - 1)}" for i in range(n_genes)]  # one repeat, one accent
+
+    def chunks(shape):
+        return (min(64, shape[0]), min(64, shape[1]))
+
+    with h5py.File(path, "w") as f:
+        f.create_dataset(
+            "matrix", data=counts.T, chunks=chunks(counts.T.shape),
+            compression="gzip", compression_opts=2,
+        )
+        group = f.create_group("layers")
+        for name, values in layers.items():
+            group.create_dataset(
+                name, data=values.T, chunks=chunks(values.T.shape),
+                compression="gzip", compression_opts=2,
+            )
+        col = f.create_group("col_attrs")
+        col.create_dataset("CellID", data=_loom_strings(cell_ids), dtype=ascii_str)
+        col.create_dataset("Clusters", data=np.arange(n_cells) % 3)
+        col.create_dataset("Tissue", data=_loom_strings(["cortex", "hippocampus"] * (n_cells // 2) + ["cortex"] * (n_cells % 2)), dtype=ascii_str)
+        col.create_dataset("Passed", data=(np.arange(n_cells) % 2).astype(np.uint8))
+        col.create_dataset("_X", data=rng.normal(size=n_cells).astype(np.float32))
+        col.create_dataset("embedding", data=rng.normal(size=(n_cells, 2)))
+        if compound:
+            dt = np.dtype([("Regulon_A", "f8"), ("Regulon_B", "f8")])
+            col.create_dataset("RegulonsAUC", data=np.zeros(n_cells, dtype=dt))
+        row = f.create_group("row_attrs")
+        row.create_dataset("Gene", data=_loom_strings(gene_names), dtype=ascii_str)
+        row.create_dataset("Accession", data=_loom_strings(gene_ids), dtype=ascii_str)
+        row.create_dataset("Start", data=np.arange(n_genes) * 100)
+        if velocyto:
+            row.create_dataset("Chromosome", data=_loom_strings(["chr1"] * n_genes), dtype=ascii_str)
+        cg, rgraphs = f.create_group("col_graphs"), f.create_group("row_graphs")
+        if graph:
+            g = cg.create_group("knn")
+            a = np.repeat(np.arange(n_cells), 2)
+            b = (a + np.tile([1, 2], n_cells)) % n_cells
+            order = rng.permutation(a.size)  # COO need not be sorted
+            g.create_dataset("a", data=a[order])
+            g.create_dataset("b", data=b[order])
+            g.create_dataset("w", data=np.linspace(0.1, 1, a.size)[order].astype(np.float32))
+        del rgraphs
+        global_attrs = {"LOOM_SPEC_VERSION": spec, "title": "Démo"}
+        if velocyto:
+            global_attrs["velocyto.__version__"] = "0.17.17"
+        if spec.startswith("3"):
+            attrs = f.create_group("attrs")
+            for key, value in global_attrs.items():
+                attrs.create_dataset(key, data=str(value).encode("ascii", "xmlcharrefreplace"), dtype=ascii_str)
+        else:
+            for key, value in global_attrs.items():
+                f.attrs[key] = str(value).encode("ascii", "xmlcharrefreplace")
+    return LoomTruth(path, counts, layers, cell_ids, gene_ids, gene_names)

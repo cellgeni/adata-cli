@@ -106,6 +106,8 @@ adata convert counts.h5ad -o for_cellbender.h5 --layer counts
 adata convert Solo.out/Gene/filtered -o counts.h5ad
 adata convert counts.h5ad -o counts_mtx --to 10x-mtx
 adata convert splitpipe_out -o parse.h5ad
+adata convert velocyto.loom -o velocyto.h5ad
+adata convert counts.h5ad -o counts.loom
 ```
 
 | Flag | Meaning |
@@ -126,6 +128,7 @@ adata convert splitpipe_out -o parse.h5ad
 | `cellbender` | `.h5` | CellBender `remove-background` 0.2 and later | no |
 | `10x-mtx` | a folder (`--to 10x-mtx`) | Cell Ranger 2 and 3+, STARsolo (velocyto too) | Cell Ranger 3+ layout, gzipped |
 | `parse` | a folder | Parse Biosciences split-pipe: a run, a sample or a `DGE_*` folder | no |
+| `loom` | `.loom` | loompy, velocyto, kallisto\|bustools; spec 2 and 3 | spec 3.0.0, as loompy 3 writes it |
 
 Formats other than h5ad and Zarr convert to and from AnnData only: to turn a
 10x file into another format, convert it to `.h5ad` first.
@@ -342,6 +345,58 @@ prefixes.
 Both files are read in two streaming passes, as for 10x MTX folders, so a
 run's size is not a limit: the first checks the matrix against both tables
 before any output exists, and the second writes obs and X.
+
+### loom
+
+A loom holds a dense genes x cells matrix, layers of the same shape, an
+attribute per cell (`col_attrs`) and per gene (`row_attrs`), graphs, and
+global attributes. velocyto writes its counts this way, as do loompy and
+kallisto|bustools.
+
+```bash
+adata convert velocyto.loom -o velocyto.h5ad
+adata convert velocyto.loom -o unspliced.h5ad --layer unspliced
+adata convert scope.loom -o dense.h5ad --dense --var-names gene_symbols
+adata convert counts.h5ad -o counts.loom
+```
+
+| loom | AnnData |
+|---|---|
+| `/matrix`, or `/layers/spliced` when there is one | `X`, CSR (`--dense` keeps it dense) |
+| `/layers/<name>`, and `/matrix` when X is `spliced` | `layers[<name>]`, `layers["matrix"]` |
+| `col_attrs` with one value per cell / several | obs columns / obsm |
+| `row_attrs`, the same way | var columns / varm |
+| `col_graphs`, `row_graphs` | obsp, varp |
+| global attributes | `uns["loom"]["attrs"]` |
+
+| Flag | Meaning |
+|---|---|
+| `--layer` | The loom layer that becomes X: `matrix` (the main one) or a layer name |
+| `--dense` | Keep X and the layers dense |
+| `--obs-names-attr` | The attribute naming cells (default `CellID`, else `cell_id`, `obs_names` or `barcode`) |
+| `--var-names-attr` | The attribute naming genes (default the ids: `Accession` or `gene_id`) |
+
+Reading gives what `anndata.read_loom` gives, checked against it in CI, with
+three differences: values keep their dtype (velocyto's integer counts stay
+integers, where anndata makes X float32); graphs and global attributes are
+kept, where anndata drops them; and genes are named by id (`Accession`),
+the symbols (`Gene`) staying a column, unless `--var-names gene_symbols` is
+given. Strings are read as loompy reads them, with XML references such as
+`&#233;` turned back into characters. SCope's compound attributes
+(`RegulonsAUC`) are left out with a warning; #27 will read them.
+
+The matrix is read a slab of cells at a time, a whole number of the file's
+64-cell chunks, so each chunk is decompressed once and memory is set by the
+slab, not the file.
+
+Writing produces a spec 3.0.0 loom that loompy reads and validates: X (or
+the matrix `--layer` names) as `/matrix`, every layer, obs and var as
+attributes (`CellID`; `Gene` for symbols and `Accession` for ids), 2-D obsm
+and varm, obsp and varp as graphs, and uns scalars as global attributes.
+Strings are written as loompy writes them, ASCII with XML references. A
+loom's matrices are dense by definition: the summary gives their size before
+compression, and above 10 GB a warning says it will take a while. Chunks
+holding only zeros compress to almost nothing.
 
 ## `recast`
 

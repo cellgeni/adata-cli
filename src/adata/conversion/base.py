@@ -44,6 +44,11 @@ class Options:
     all_samples: bool = False
     unfiltered: bool = False
 
+    # Reading a loom.
+    dense: bool = False
+    obs_names_attr: Optional[str] = None
+    var_names_attr: Optional[str] = None
+
 
 @dataclass
 class ConversionPlan:

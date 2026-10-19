@@ -17,7 +17,7 @@ from typing import Dict, FrozenSet, List, Optional
 
 import h5py
 
-from adata.conversion import cellbender, mtx, parse, tenx
+from adata.conversion import cellbender, loom, mtx, parse, tenx
 from adata.conversion.anndata_copy import AnnDataCopy
 from adata.conversion.base import ConversionPlan, Converter, Format, Options
 from adata.storage import has_valid_anndata_root_attrs, is_zarr_path
@@ -82,6 +82,14 @@ FORMATS: Dict[str, Format] = {
         sniff=tenx.sniff,
         importer=tenx.TenxImport(),
         exporter=tenx.TenxExport(),
+    ),
+    "loom": Format(
+        name="loom",
+        description="Loom (loompy, velocyto, kallisto|bustools; spec 2 and 3)",
+        extensions=(".loom",),
+        sniff=loom.sniff,
+        importer=loom.LoomImport(),
+        exporter=loom.LoomExport(),
     ),
     # A folder, so no extension: chosen as output with `--to 10x-mtx`.
     "10x-mtx": Format(
