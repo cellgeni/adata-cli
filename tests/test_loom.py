@@ -332,3 +332,63 @@ def test_explicit_gene_ids_are_the_accession_whatever_the_var_names(tmp_path):
     with h5py.File(out, "r") as f:
         assert [v.decode() for v in f["row_attrs/Accession"][...]] == ["E1", "E2", "E3"]
         assert [v.decode() for v in f["row_attrs/Gene"][...]] == ["S1", "S2", "S3"]
+
+
+# ---------------------------------------------------------------------------
+# looms other tools write, as found on real files
+
+
+def test_a_matrix_only_loom_is_read_by_its_name(tmp_path):
+    """Baysor writes some looms as /matrix alone, with no attribute groups;
+    these were not recognised as looms at all."""
+    path = tmp_path / "ncvs.loom"
+    values = np.arange(12, dtype=np.float32).reshape(3, 4)  # genes x cells
+    with h5py.File(path, "w") as f:
+        f.create_dataset("matrix", data=values)
+    out = tmp_path / "out.h5ad"
+    result = _ok(path, "-o", out)
+    assert "loom (spec pre-2) → h5ad, 4 cells x 3 genes" in _out(result)
+    got = _read(out)
+    assert np.array_equal(got.X.toarray(), values.T)
+    assert list(got.obs_names) == ["0", "1", "2", "3"]
+
+    renamed = tmp_path / "ncvs.h5"
+    path.rename(renamed)
+    result = _convert(renamed, "-o", tmp_path / "x.h5ad")
+    assert result.exit_code == 1, "without the name, a bare matrix is no evidence"
+
+
+def test_an_r_loomexperiment_file_reads_its_version_and_float_graphs(tmp_path):
+    """R's LoomExperiment writes LOOM_SPEC_VERSION as a one-element array
+    (shown as "['2.0.1']") and graph vertices as floats."""
+    truth = write_loom(tmp_path / "r.loom", spec="2.0.1")
+    with h5py.File(truth.path, "a") as f:
+        f.attrs["LOOM_SPEC_VERSION"] = np.array([b"2.0.1"])
+        for key in ("a", "b"):
+            values = f["col_graphs/knn"][key][...].astype(np.float64)
+            del f["col_graphs/knn"][key]
+            f["col_graphs/knn"].create_dataset(key, data=values)
+    out = tmp_path / "out.h5ad"
+    result = _ok(truth.path, "-o", out)
+    assert "loom (spec 2.0.1)" in _out(result)
+    assert _read(out).obsp["knn"].nnz == 60
+
+    with h5py.File(truth.path, "a") as f:
+        values = f["col_graphs/knn/a"][...]
+        values[0] += 0.5
+        f["col_graphs/knn/a"][...] = values
+    result = _convert(truth.path, "-o", tmp_path / "bad.h5ad")
+    assert result.exit_code == 1
+    assert "not a whole number" in _out(result)
+
+
+def test_baysor_names_genes_by_name(tmp_path):
+    truth = write_loom(tmp_path / "b.loom")
+    with h5py.File(truth.path, "a") as f:
+        names = f["row_attrs/Gene"][...]
+        del f["row_attrs/Gene"], f["row_attrs/Accession"]
+        f["row_attrs"].create_dataset("Name", data=names)
+    out = tmp_path / "out.h5ad"
+    result = _ok(truth.path, "-o", out)
+    assert "genes are named by 'Name'" in _out(result)
+    assert list(_read(out).var_names) == truth.gene_names
