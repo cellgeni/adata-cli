@@ -3,6 +3,41 @@
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
+## 0.11.0
+
+Adds loom to `adata convert`, both ways. A velocyto, loompy or
+kallisto|bustools loom converts a slab of cells at a time, with the
+matrices sparse, their dtypes kept, and the graphs and global attributes
+that `anndata.read_loom` drops; an AnnData exports to a loom that loompy
+validates.
+
+### Added
+
+- **`adata convert` reads looms** ([#26](https://github.com/cellgeni/adata-cli/issues/26)),
+  spec 2.0.1 and 3.0.0, as `anndata.read_loom` reads them:
+  - X is the `spliced` layer when there is one, with the main matrix kept as
+    `layers["matrix"]`; `--layer` picks another;
+  - attributes become obs and var columns, or obsm and varm when they have
+    several columns; graphs become obsp and varp, and global attributes
+    `uns["loom"]`;
+  - genes are named by id (`Accession`, or kallisto|bustools' `gene_id`),
+    the symbols kept as a column, unless `--var-names gene_symbols`;
+    `--obs-names-attr` and `--var-names-attr` name any other attribute;
+  - X and the layers are CSR, or dense with `--dense`, and keep their dtype:
+    velocyto's integer counts stay integers.
+
+  On a public 10k-cell velocyto loom this took 26 s at a 159 MB peak, where
+  `anndata.read_loom` took 29 s and 9.9 GB, and gave the same matrices,
+  names and columns. SCope's compound attributes are left out with a
+  warning, for #27.
+
+- **`adata convert` writes looms** ([#26](https://github.com/cellgeni/adata-cli/issues/26)):
+  spec 3.0.0 as loompy 3 writes it, which loompy's validator accepts. X (or
+  `--layer`) is the main matrix, with every layer, obs and var as attributes
+  (`CellID`, `Gene`, `Accession`), 2-D obsm and varm, obsp and varp as
+  graphs, and uns scalars as global attributes. A loom's matrices are dense:
+  the summary gives their size before compression and warns above 10 GB.
+
 ## 0.10.0
 
 Adds Parse Biosciences split-pipe output to `adata convert`, read in two
