@@ -575,9 +575,14 @@ class _Export:
     varm: List[str]
     obsp: List[str]
     varp: List[str]
-    gene: Optional[str]
+    #: Where Gene and Accession come from: a var column, "" for var_names,
+    #: None (Accession only) for nowhere.
+    gene: str
     accession: Optional[str]
     uns: List[str]
+    #: var, or raw/var when the matrix is raw/X.
+    var: str = "var"
+    varm_key: str = "varm"
 
 
 class LoomExport(Converter):
@@ -597,12 +602,22 @@ class LoomExport(Converter):
             path = f"layers/{path}"
         with open_store(source, "r", require_anndata=False) as store:
             root = store.root
+            raw = path.startswith("raw/")
+            var_path = "raw/var" if raw else "var"
+            var_group = resolve(root, var_path)
             obs_index, obs_name = resolve_index(root["obs"], "obs")
-            var_index, var_name = resolve_index(root["var"], "var")
+            var_index, var_name = resolve_index(var_group, "var")
             n_obs, n_var = element_len(obs_index), element_len(var_index)
             main = _matrix(root, path, (n_obs, n_var))
             layers = []
-            if "layers" in root:
+            if raw:
+                # raw/X has raw/var's genes; X and the layers have var's.
+                if "layers" in root and len(root["layers"]) or path != "X":
+                    warnings.append(
+                        "Not written: X and the layers -- they follow var, and "
+                        "raw/X follows raw/var."
+                    )
+            elif "layers" in root:
                 for name in root["layers"]:
                     if f"layers/{name}" == path:
                         continue
@@ -611,15 +626,16 @@ class LoomExport(Converter):
                         layers.append(name)
                     except ValueError as exc:
                         warnings.append(f"Not written: layers/{name}: {exc}")
-            if path != "X":
+            if path != "X" and not raw:
                 layers.insert(0, "X")
             obs_columns = _columns(root["obs"], obs_name, warnings, "obs")
-            var_columns = _columns(root["var"], var_name, warnings, "var")
-            gene, accession = _gene_attrs(root["var"], var_columns)
+            var_columns = _columns(var_group, var_name, warnings, var_path)
+            gene, accession = _gene_attrs(var_columns)
+            varm_key = "raw/varm" if raw else "varm"
             obsm = _arrays(root, "obsm", n_obs, warnings)
-            varm = _arrays(root, "varm", n_var, warnings)
+            varm = _arrays(root, varm_key, n_var, warnings)
             obsp = _graphs(root, "obsp", n_obs, warnings)
-            varp = _graphs(root, "varp", n_var, warnings)
+            varp = [] if raw else _graphs(root, "varp", n_var, warnings)
             uns = _uns_scalars(root, warnings)
 
         dense = n_obs * n_var * max(1, main.dtype.itemsize) * (1 + len(layers))
@@ -644,7 +660,8 @@ class LoomExport(Converter):
             detail=_Export(
                 matrix=path, layers=layers, obs_columns=obs_columns,
                 var_columns=var_columns, obsm=obsm, varm=varm, obsp=obsp, varp=varp,
-                gene=gene, accession=accession, uns=uns,
+                gene=gene, accession=accession, uns=uns, var=var_path,
+                varm_key=varm_key,
             ),
         )
 
@@ -667,30 +684,27 @@ class LoomExport(Converter):
             with console.status("[cyan]Writing the attributes...[/]"):
                 cols = out.create_group("col_attrs")
                 rows = out.create_group("row_attrs")
-                obs, var = root["obs"], root["var"]
+                obs, var = root["obs"], resolve(root, detail.var)
                 obs_index, _ = resolve_index(obs, "obs")
                 var_index, _ = resolve_index(var, "var")
                 _export_strings(cols, "CellID", obs_index, obs)
                 for name in detail.obs_columns:
                     if name != "CellID":
                         _export_column(cols, name, obs[name], obs)
-                if detail.accession == "":
-                    # var_names are the ids; the symbols are a column.
-                    _export_strings(rows, "Accession", var_index, var)
-                    _export_column(rows, "Gene", var[detail.gene], var)
-                else:
-                    _export_strings(rows, "Gene", var_index, var)
-                    if detail.accession:
-                        _export_column(rows, "Accession", var[detail.accession], var)
-                skip = {detail.gene, detail.accession, "Gene"}
-                if detail.accession is not None:
-                    skip.add("Accession")
+                for attr, where in (("Gene", detail.gene), ("Accession", detail.accession)):
+                    if where == "":
+                        _export_strings(rows, attr, var_index, var)
+                    elif where is not None:
+                        _export_column(rows, attr, var[where], var)
+                skip = {detail.gene, detail.accession, "Gene", "Accession"}
                 for name in detail.var_columns:
                     if name not in skip:
                         _export_column(rows, name, var[name], var)
-                for key, group in (("obsm", cols), ("varm", rows)):
+                for key, group, where in (
+                    ("obsm", cols, "obsm"), ("varm", rows, detail.varm_key)
+                ):
                     for name in getattr(detail, key):
-                        _export_array(root[key][name], group, name)
+                        _export_array(resolve(root, where)[name], group, name)
                 for key, kind in (("obsp", "col_graphs"), ("varp", "row_graphs")):
                     graphs = out.create_group(kind)
                     for name in getattr(detail, key):
@@ -756,18 +770,22 @@ def _columns(group: Any, index_name: str, warnings: List[str], axis: str) -> Lis
     return kept
 
 
-def _gene_attrs(var: Any, columns: List[str]) -> Tuple[Optional[str], Optional[str]]:
-    """Which var columns become Gene and Accession, loom's symbol and id.
+def _gene_attrs(columns: List[str]) -> Tuple[str, Optional[str]]:
+    """Where loom's Gene (symbol) and Accession (id) come from.
 
-    Returns (symbols column, ids column): the ids column is "" when var_names
-    are the ids themselves, None when nothing holds them.
+    Each is chosen on its own: an explicit column first (`gene_symbols`,
+    `Gene`, ... and `gene_ids`, `Accession`), and var_names ("") only for the
+    one no column holds -- ids when there is a symbols column (as `convert`
+    imports by default), symbols otherwise. Accession is None when nothing
+    can be taken for ids.
     """
-    if "gene_symbols" in columns:
-        return "gene_symbols", ""
-    for name in ("Gene", "gene_name", "gene_names"):
-        if name in columns and "gene_ids" not in columns and "Accession" not in columns:
-            return name, ""
-    return None, next((n for n in ("gene_ids", "Accession") if n in columns), None)
+    ids = next((n for n in ("gene_ids", "Accession") if n in columns), None)
+    symbols = next(
+        (n for n in ("gene_symbols", "Gene", "gene_name", "gene_names") if n in columns), None
+    )
+    if symbols is None:
+        return "", ids
+    return symbols, "" if ids is None else ids
 
 
 def _arrays(root: Any, key: str, n: int, warnings: List[str]) -> List[str]:
@@ -876,12 +894,12 @@ def _export_graph(matrix: Matrix, group: h5py.Group) -> None:
     b = group.create_dataset("b", shape=(nnz,), dtype=np.int64)
     w = group.create_dataset("w", shape=(nnz,), dtype=weight)
     indptr = np.asarray(matrix.obj["indptr"][...], dtype=np.int64)
-    majors = np.repeat(np.arange(indptr.size - 1, dtype=np.int64), np.diff(indptr))
     step = 1 << 20
     for lo in range(0, nnz, step):
         hi = min(lo + step, nnz)
         minor = np.asarray(matrix.obj["indices"][lo:hi], dtype=np.int64)
-        major = majors[lo:hi]
+        # The major index of each entry, for this block only.
+        major = np.searchsorted(indptr, np.arange(lo, hi, dtype=np.int64), side="right") - 1
         rows, cols = (major, minor) if matrix.kind == spec.CSR_MATRIX else (minor, major)
         a[lo:hi], b[lo:hi] = rows, cols
         w[lo:hi] = np.asarray(matrix.obj["data"][lo:hi]).astype(weight, copy=False)

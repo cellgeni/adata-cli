@@ -286,3 +286,49 @@ def test_a_large_export_warns_but_writes(tmp_path, monkeypatch):
     result = _ok(source, "-o", tmp_path / "out.loom")
     assert "A loom holds its matrices dense" in _out(result)
     assert (tmp_path / "out.loom").exists()
+
+
+def test_raw_x_exports_with_raw_var(tmp_path):
+    """raw/X has raw/var's genes, which filtering var leaves behind; it was
+    checked against var and refused, or written with var's names."""
+    counts = np.arange(40, dtype=np.float32).reshape(8, 5)
+    full = ad.AnnData(
+        X=sparse.csr_matrix(counts),
+        obs=pd.DataFrame(index=[f"c{i}" for i in range(8)]),
+        var=pd.DataFrame({"gene_symbols": list("ABCDE")}, index=[f"E{i}" for i in range(5)]),
+    )
+    full.raw = full
+    filtered = full[:, :3].copy()
+    filtered.layers["counts"] = filtered.X.copy()
+    source = tmp_path / "f.h5ad"
+    filtered.write_h5ad(source)
+
+    out = tmp_path / "raw.loom"
+    result = _ok(source, "-o", out, "--layer", "raw/X")
+    assert "Not written: X and the layers" in _out(result)
+    with h5py.File(out, "r") as f:
+        assert f["matrix"].shape == (5, 8)
+        assert np.array_equal(f["matrix"][...], counts.T)
+        assert [v.decode() for v in f["row_attrs/Accession"][...]] == [f"E{i}" for i in range(5)]
+        assert [v.decode() for v in f["row_attrs/Gene"][...]] == list("ABCDE")
+        assert list(f["layers"]) == []
+
+
+def test_explicit_gene_ids_are_the_accession_whatever_the_var_names(tmp_path):
+    """With gene_symbols and gene_ids both columns, var_names were taken for
+    the ids and the gene_ids column dropped."""
+    obj = ad.AnnData(
+        X=np.ones((2, 3), dtype=np.float32),
+        obs=pd.DataFrame(index=["a", "b"]),
+        var=pd.DataFrame(
+            {"gene_symbols": ["S1", "S2", "S3"], "gene_ids": ["E1", "E2", "E3"]},
+            index=["key1", "key2", "key3"],
+        ),
+    )
+    source = tmp_path / "s.h5ad"
+    obj.write_h5ad(source)
+    out = tmp_path / "s.loom"
+    _ok(source, "-o", out)
+    with h5py.File(out, "r") as f:
+        assert [v.decode() for v in f["row_attrs/Accession"][...]] == ["E1", "E2", "E3"]
+        assert [v.decode() for v in f["row_attrs/Gene"][...]] == ["S1", "S2", "S3"]
