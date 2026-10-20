@@ -3,6 +3,43 @@
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
+## 0.12.0
+
+Reads SCope looms: what pySCENIC, SCENIC+ and pycistopic write for the
+SCope viewer. Their regulons, embeddings, clusterings and metadata, which
+`anndata.read_loom` refuses and 0.11 left out, now convert with the rest
+of the loom.
+
+### Added
+
+- **`adata convert` reads SCope looms** ([#27](https://github.com/cellgeni/adata-cli/issues/27)):
+  - each regulon's AUC per cell and its target genes (or regions) as
+    dataframes with the regulons' names as columns, `obsm["RegulonsAUC"]`
+    and `varm["Regulons"]`; any other compound attribute, such as VSN's
+    cluster markers, becomes a dataframe the same way;
+  - the embeddings as `obsm["X_<name>"]` and the clusterings as categorical
+    obs columns, named and labelled from the loom's `MetaData`;
+  - `MetaData`, plain or compressed, decoded into `uns["scope"]`, with the
+    regulon thresholds as a dataframe and each embedding's and clustering's
+    SCope id and name.
+
+  Region-based looms (SCENIC+, pycistopic) are named by region. On a public
+  pySCENIC loom (Zenodo 10944066: 500 cells, 298 regulons, 5 embeddings)
+  this took 0.5 s at a 143 MB peak and matched the pySCENIC tutorial's
+  loompy recipe value for value, as CI checks on a fixture. The tables are
+  read a block of cells at a time: a 2.8 GB loom of 600,000 cells and 600
+  regulons took 6.4 s at a 294 MB peak. Writing a loom still writes a plain
+  one; SCope export is [#61](https://github.com/cellgeni/adata-cli/issues/61).
+
+### Fixed
+
+- **R's factors and logicals in looms read as R meant them**
+  ([#27](https://github.com/cellgeni/adata-cli/issues/27)). R's writers
+  store a factor as an HDF5 enum, which came out as its codes: the
+  `CellType` of SCENIC's example loom as 1 to 5. A factor is now a
+  categorical of its levels, in R's order, and a logical (FALSE, TRUE, NA)
+  a nullable boolean.
+
 ## 0.11.1
 
 Reads the looms other tools write, as found converting 29 real looms from
