@@ -247,3 +247,27 @@ def test_gzip_is_found_by_content_not_name(tmp_path):
     out = tmp_path / "out.h5ad"
     _ok(hidden, "-o", out)
     assert np.array_equal(_read(out).X.toarray(), truth.counts)
+
+
+def test_integers_beyond_float_precision_stay_exact(tmp_path):
+    """Integers of 2**53 and above parsed exactly as int64, but the dtype
+    rule took them for floats, and 2**53 + 1 was written as 2**53."""
+    path = tmp_path / "big.csv"
+    path.write_text(",a,b\nc1,9007199254740993,1\nc2,0,-9007199254740993\n")
+    out = tmp_path / "out.h5ad"
+    _ok(path, "-o", out)
+    got = _read(out).X
+    assert got.dtype == np.int64
+    assert got.toarray().tolist() == [[9007199254740993, 1], [0, -9007199254740993]]
+
+
+def test_lines_of_spaces_alone_are_blank(tmp_path):
+    """A line holding only spaces or tabs was kept, then refused as ragged
+    (or, before the data, crashed the layout detection)."""
+    path = tmp_path / "w.txt"
+    path.write_text("  \n\tg1 g2\nc1 1 2\n \t \nc2 3 4\n")
+    out = tmp_path / "out.h5ad"
+    _ok(path, "-o", out)
+    got = _read(out)
+    assert list(got.var_names) == ["g1", "g2"] and list(got.obs_names) == ["c1", "c2"]
+    assert np.array_equal(got.X.toarray(), [[1, 2], [3, 4]])

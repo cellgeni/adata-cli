@@ -132,7 +132,8 @@ def _lines(path: Path, block_bytes: int) -> Iterator[Tuple[List[int], List[bytes
             for line in block.split(b"\n"):
                 number += 1
                 line = line[:-1] if line.endswith(b"\r") else line
-                if line:
+                # Blank: empty, or spaces alone (isspace copies nothing).
+                if line and not line.isspace():
                     numbers.append(number)
                     lines.append(line)
             if block.endswith(b"\n"):
@@ -220,16 +221,24 @@ class Scan:
 
     n_rows: int
     whole: bool
-    vmin: float
-    vmax: float
+    #: Whether every block parsed as int64, so every value is exact.
+    integers: bool
+    #: The value range: ints when `integers`, else floats.
+    vmin: Any
+    vmax: Any
     #: Row names, when they are held (the genes of a transposed file).
     names: Optional[List[str]]
     #: Non-zeros per output row, for a transposed file.
     counts: Optional[np.ndarray]
 
     def dtype(self) -> np.dtype:
-        """int32 or int64 when every value is whole (and exact), else float64."""
-        if self.whole and self.n_rows and max(abs(self.vmin), abs(self.vmax)) < 2.0**53:
+        """int32 or int64 when every value is whole and exact, else float64.
+
+        Whole values that parsed as floats ("2.0") are exact only below
+        2**53; values that parsed as int64 are exact whatever their size.
+        """
+        exact = self.integers or max(abs(self.vmin), abs(self.vmax)) < 2.0**53
+        if self.whole and self.n_rows and exact:
             info = np.iinfo(np.int32)
             if info.min <= self.vmin and self.vmax <= info.max:
                 return np.dtype(np.int32)
@@ -353,20 +362,23 @@ def scan(path: Path, layout: Layout, transpose: bool) -> Scan:
     """Pass 1: every line checked, the value range, and what pass 2 needs."""
     reader = _Reader(path, layout)
     n_rows, whole = 0, True
-    vmin, vmax = np.inf, -np.inf
+    vmin: Any = None
+    vmax: Any = None
     names: Optional[List[str]] = [] if transpose else None
     counts = np.zeros(layout.width, dtype=np.int64) if transpose else None
     for block_names, values in reader.blocks():
         n_rows += values.shape[0]
         if values.size:
-            vmin, vmax = min(vmin, float(values.min())), max(vmax, float(values.max()))
+            low, high = values.min().item(), values.max().item()
+            vmin = low if vmin is None else min(vmin, low)
+            vmax = high if vmax is None else max(vmax, high)
             if whole and values.dtype.kind == "f":
                 whole = bool(np.isfinite(values).all() and np.array_equal(values, np.trunc(values)))
         if names is not None:
             names.extend(block_names or [str(i) for i in range(n_rows - values.shape[0], n_rows)])
         if counts is not None:
             counts += np.count_nonzero(values, axis=0)
-    return Scan(n_rows, whole, vmin, vmax, names, counts)
+    return Scan(n_rows, whole, not reader.floats, vmin, vmax, names, counts)
 
 
 @dataclass
