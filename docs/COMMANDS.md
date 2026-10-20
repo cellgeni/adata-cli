@@ -128,7 +128,7 @@ adata convert counts.h5ad -o counts.loom
 | `cellbender` | `.h5` | CellBender `remove-background` 0.2 and later | no |
 | `10x-mtx` | a folder (`--to 10x-mtx`) | Cell Ranger 2 and 3+, STARsolo (velocyto too) | Cell Ranger 3+ layout, gzipped |
 | `parse` | a folder | Parse Biosciences split-pipe: a run, a sample or a `DGE_*` folder | no |
-| `loom` | `.loom` | loompy, velocyto, kallisto\|bustools; spec 2 and 3 | spec 3.0.0, as loompy 3 writes it |
+| `loom` | `.loom` | loompy, velocyto, kallisto\|bustools, SCope (pySCENIC, SCENIC+, pycistopic); spec 2 and 3 | spec 3.0.0, as loompy 3 writes it |
 
 Formats other than h5ad and Zarr convert to and from AnnData only: to turn a
 10x file into another format, convert it to `.h5ad` first.
@@ -351,12 +351,14 @@ before any output exists, and the second writes obs and X.
 A loom holds a dense genes x cells matrix, layers of the same shape, an
 attribute per cell (`col_attrs`) and per gene (`row_attrs`), graphs, and
 global attributes. velocyto writes its counts this way, as do loompy and
-kallisto|bustools.
+kallisto|bustools, and pySCENIC, SCENIC+ and pycistopic their results for
+the SCope viewer.
 
 ```bash
 adata convert velocyto.loom -o velocyto.h5ad
 adata convert velocyto.loom -o unspliced.h5ad --layer unspliced
-adata convert scope.loom -o dense.h5ad --dense --var-names gene_symbols
+adata convert pyscenic_output.loom -o scenic.h5ad
+adata convert counts.loom -o dense.h5ad --dense --var-names gene_symbols
 adata convert counts.h5ad -o counts.loom
 ```
 
@@ -366,6 +368,7 @@ adata convert counts.h5ad -o counts.loom
 | `/layers/<name>`, and `/matrix` when X is `spliced` | `layers[<name>]`, `layers["matrix"]` |
 | `col_attrs` with one value per cell / several | obs columns / obsm |
 | `row_attrs`, the same way | var columns / varm |
+| compound `col_attrs` and `row_attrs`, a field per column | dataframes in obsm and varm |
 | `col_graphs`, `row_graphs` | obsp, varp |
 | global attributes | `uns["loom"]["attrs"]` |
 
@@ -382,11 +385,11 @@ integers, where anndata makes X float32); graphs and global attributes are
 kept, where anndata drops them; and genes are named by id (`Accession`),
 the symbols (`Gene`) staying a column, unless `--var-names gene_symbols` is
 given. Strings are read as loompy reads them, with XML references such as
-`&#233;` turned back into characters. SCope's compound attributes
-(`RegulonsAUC`) are left out with a warning; #27 will read them. Looms from
-other writers read too: R's LoomExperiment (graph vertices stored as
-floats), Baysor (genes in a `Name` attribute, and a `.loom` holding the
-matrix alone, which is recognised by its name).
+`&#233;` turned back into characters. Looms from other writers read too:
+R's LoomExperiment (graph vertices stored as floats), Baysor (genes in a
+`Name` attribute, and a `.loom` holding the matrix alone, which is
+recognised by its name), and R's writers' factors and logicals, which
+become categoricals and booleans rather than their codes.
 
 The matrix is read a slab of cells at a time, a whole number of the file's
 64-cell chunks, so each chunk is decompressed once and memory is set by the
@@ -400,6 +403,48 @@ Strings are written as loompy writes them, ASCII with XML references. A
 loom's matrices are dense by definition: the summary gives their size before
 compression, and above 10 GB a warning says it will take a while. Chunks
 holding only zeros compress to almost nothing.
+
+#### SCope looms
+
+pySCENIC, SCENIC+ and pycistopic (and VSN, and R's SCopeLoomR) write their
+results into the loom for the SCope viewer: each regulon's AUC per cell and
+its target genes (or regions), the embeddings and clusterings shown in the
+viewer, and a `MetaData` attribute naming them. `anndata.read_loom`
+refuses these looms, since loompy's validator rejects compound attributes.
+Here such a loom reads as `loom (SCope)`, the summary naming what was found
+(`298 regulons, 5 embeddings, 1 clustering`):
+
+| SCope loom | AnnData |
+|---|---|
+| `col_attrs/RegulonsAUC`, a field per regulon | `obsm["RegulonsAUC"]`, a dataframe of cells x regulons |
+| `row_attrs/Regulons`, a field per regulon, 0 or 1 | `varm["Regulons"]`, a dataframe of genes x regulons |
+| `col_attrs/Embeddings_X` and `Embeddings_Y`, a field per embedding id; `Embedding` | `obsm["X_<name>"]`, n x 2, named from `MetaData` (`tSNE (default)` becomes `X_tSNE_default`); `Embedding` is the default one (id -1) when the others lack it |
+| `col_attrs/Clusterings`, a field per clustering id | a categorical obs column named from `MetaData`, its categories the clusters' descriptions in cluster-id order |
+| other compound attributes (VSN's `ClusterMarkers_<i>`, SCopeLoomR's `MotifRegulonsAUC`) | dataframes in obsm or varm, under their own names |
+| global `MetaData`, JSON, plain or compressed | `uns["scope"]["metadata"]`, the JSON text |
+| `regulonThresholds` in `MetaData` | `uns["scope"]["regulon_thresholds"]`, a dataframe by regulon |
+| the embeddings and clusterings in `MetaData` | `uns["scope"]["embeddings"]` and `["clusterings"]`: each id's name, and where it went |
+
+The dataframes keep the regulons' names, `ATF3_(+)` and the like, as their
+columns, and the obs or var names as their index, which is how anndata
+expects them; `pd.DataFrame(lf.ca.RegulonsAUC, index=lf.ca.CellID)`, the
+pySCENIC tutorial's recipe, gives the same table, as CI checks. A field
+name holding `/`, which HDF5 and Zarr cannot store, has it replaced by `_`,
+with a warning. A clustering named like an obs column already there gets a
+suffix (`Tissue_1`), with a note; one `MetaData` does not name is called
+`clustering_<id>`, and an embedding `X_embedding_<id>`. A value with no
+cluster in `MetaData` is missing. `MetaData` that is neither JSON nor
+base64 of compressed JSON is kept as text, with a warning; the embeddings
+and clusterings are then named by id, and a clustering's categories are the
+ids found.
+
+Region-based looms (SCENIC+, pycistopic) hold regions (`chr1:100-200`)
+where genes go, so var is named by region, and SCENIC+'s `linkedGene` is a
+var column. The compound attributes are read a block of cells at a time,
+so memory is one block across all regulons, never the table.
+
+Writing a loom writes a plain one: an AnnData's regulons, embeddings and
+clusterings are not yet written in SCope's form (#61).
 
 ## `recast`
 

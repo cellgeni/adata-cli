@@ -31,9 +31,10 @@ separate jobs.
 | `test_cellbender.py` | CellBender 0.2 and 0.3+ output, full and filtered: each latent at its barcode, `--min-cell-probability`, `--raw` alignment, refusals |
 | `test_parse.py` | Parse split-pipe runs, as v1.6.1 writes them: run, sample and DGE folders, `--sample`, `--all-samples`, `--unfiltered`, `--genome`, refusals |
 | `test_loom.py` | loom import and export against loompy- and velocyto-shaped fixtures (spec 2 and 3): X choice, names, attributes, graphs, `--dense`, round trips |
+| `test_scope.py` | SCope looms as pySCENIC's `export2loom` writes them: regulons as dataframes, embeddings and clusterings named from `MetaData`, plain or compressed `MetaData`, region looms, R's logicals and factors, renamed fields, small blocks |
 | `test_table.py` | The streaming CSV reader against pandas: column types, quoting, row subsets, blocks, refusals |
 | `test_mtx_codec.py`, `test_csr_build.py` | The streaming Matrix Market reader and writer against scipy, and the bucket sort they and `recast` share |
-| `test_external_readers.py` | 10x conversions, HDF5 and MTX, Parse runs and looms, checked by scanpy (Parse's own recipe for Parse), anndata with loompy, and PyTables in their own uv environments (`integration`) |
+| `test_external_readers.py` | 10x conversions, HDF5 and MTX, Parse runs and looms, checked by scanpy (Parse's own recipe for Parse), anndata with loompy (the pySCENIC tutorial's recipe for SCope looms), and PyTables in their own uv environments (`integration`) |
 | `test_performance.py` | Complexity guards -- what an operation costs, not how long it takes (see below) |
 | `test_benchmark_harness.py` | That the benchmark's measurement is trustworthy |
 | `test_subset.py`, `test_export.py`, `test_import.py`, `test_info_read.py`, `test_zarr.py`, `test_query.py` | Per-feature unit tests |

@@ -1,5 +1,8 @@
 """Pytest configuration and fixtures for adata tests."""
 
+import base64
+import json
+import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -771,7 +774,6 @@ def write_loom(
     spec: str = "3.0.0",
     velocyto: bool = False,
     graph: bool = True,
-    compound: bool = False,
     seed: int = 0,
 ) -> LoomTruth:
     rng = np.random.default_rng(seed)
@@ -808,9 +810,6 @@ def write_loom(
         col.create_dataset("Passed", data=(np.arange(n_cells) % 2).astype(np.uint8))
         col.create_dataset("_X", data=rng.normal(size=n_cells).astype(np.float32))
         col.create_dataset("embedding", data=rng.normal(size=(n_cells, 2)))
-        if compound:
-            dt = np.dtype([("Regulon_A", "f8"), ("Regulon_B", "f8")])
-            col.create_dataset("RegulonsAUC", data=np.zeros(n_cells, dtype=dt))
         row = f.create_group("row_attrs")
         row.create_dataset("Gene", data=_loom_strings(gene_names), dtype=ascii_str)
         row.create_dataset("Accession", data=_loom_strings(gene_ids), dtype=ascii_str)
@@ -838,3 +837,130 @@ def write_loom(
             for key, value in global_attrs.items():
                 f.attrs[key] = str(value).encode("ascii", "xmlcharrefreplace")
     return LoomTruth(path, counts, layers, cell_ids, gene_ids, gene_names)
+
+
+# ---------------------------------------------------------------------------
+# SCope looms, as pySCENIC's export2loom writes them (checked against a public
+# one, Zenodo 10944066): a loompy loom plus compound attributes with a field
+# per regulon (RegulonsAUC per cell, float; Regulons per gene, 0/1), per
+# embedding id (Embeddings_X and _Y; Embedding holds the default, id -1,
+# again) and per clustering id (Clusterings), and a MetaData global
+# attribute: JSON, compressed as base64 of zlib. SCENIC+ and pycistopic
+# write the same, with regions instead of genes in region-based looms.
+
+
+@dataclass
+class ScopeTruth:
+    loom: LoomTruth
+    regulons: List[str]
+    auc: np.ndarray  # cells x regulons
+    membership: np.ndarray  # genes (or regions) x regulons
+    embeddings: Dict[str, np.ndarray]  # id -> cells x 2
+    clusterings: Dict[str, np.ndarray]  # id -> each cell's cluster id
+    metadata: Dict[str, Any]
+    var_names: List[str]
+
+    @property
+    def path(self) -> Path:
+        return self.loom.path
+
+
+SCOPE_REGULONS = ("ATF3_(+)", "Pax6_(-)", "SOX2 (12g)")
+
+
+def _records(columns: Dict[str, np.ndarray]) -> np.ndarray:
+    """A structured array, a field per column, as export2loom builds them."""
+    first = next(iter(columns.values()))
+    out = np.zeros(len(first), dtype=[(name, values.dtype) for name, values in columns.items()])
+    for name, values in columns.items():
+        out[name] = values
+    return out
+
+
+def write_scope_loom(
+    path: Path,
+    *,
+    n_cells: int = 30,
+    n_genes: int = 10,
+    compressed: bool = True,
+    region: bool = False,
+    default_in_extra: bool = True,
+    regulons: Sequence[str] = SCOPE_REGULONS,
+    seed: int = 0,
+) -> ScopeTruth:
+    """A pySCENIC-style SCope loom on top of `write_loom`'s.
+
+    Embeddings_X and _Y hold ids -1 (float64) and 0 (float32), as export2loom
+    writes them; with `default_in_extra=False` they hold 0 alone, and the
+    default embedding is only in `Embedding`, as in the Zenodo loom. Two
+    clusterings, the second with a cluster that has no description.
+    """
+    loom = write_loom(path, n_cells=n_cells, n_genes=n_genes, graph=False, seed=seed)
+    rng = np.random.default_rng(seed + 1)
+    regulons = list(regulons)
+    auc = rng.random((n_cells, len(regulons)))
+    membership = (rng.random((n_genes, len(regulons))) < 0.4).astype(np.int64)
+    embeddings = {
+        "-1": rng.normal(size=(n_cells, 2)),
+        "0": rng.normal(size=(n_cells, 2)).astype(np.float32),
+    }
+    clusterings = {"0": np.arange(n_cells) % 3, "1": (np.arange(n_cells) // 4) % 2}
+    extra = embeddings if default_in_extra else {"0": embeddings["0"]}
+    metadata = {
+        "embeddings": [{"id": -1, "name": "tSNE (default)"}, {"id": 0, "name": "UMAP"}],
+        "annotations": [{"name": "", "values": []}],
+        "clusterings": [
+            {
+                "id": 0, "group": "celltype", "name": "Cell Type",
+                "clusters": [
+                    {"id": 0, "description": "B cell"},
+                    {"id": 1, "description": "T cell"},
+                    {"id": 2, "description": "NK"},
+                ],
+            },
+            {
+                "id": 1, "group": "Scanpy", "name": "Leiden resolution 0.4",
+                "clusters": [{"id": 1}, {"id": 0, "description": "Leiden 0"}],
+            },
+        ],
+        "metrics": [{"name": "nGene"}],
+        "regulonThresholds": [
+            {
+                "regulon": name,
+                "defaultThresholdValue": 0.1 * (i + 1),
+                "defaultThresholdName": "gaussian_mixture_split",
+                "allThresholds": {"gaussian_mixture_split": 0.1 * (i + 1)},
+                "motifData": f"motif{i}.png",
+            }
+            for i, name in enumerate(regulons)
+        ],
+    }
+    text = json.dumps(metadata)
+    if compressed:
+        text = base64.b64encode(zlib.compress(text.encode("ascii"))).decode("ascii")
+    ascii_str = h5py.string_dtype(encoding="ascii")
+    var_names = loom.gene_ids
+    with h5py.File(path, "a") as f:
+        col, row = f["col_attrs"], f["row_attrs"]
+        col.create_dataset("RegulonsAUC", data=_records(dict(zip(regulons, auc.T))))
+        col.create_dataset("Embedding", data=_records({"_X": embeddings["-1"][:, 0], "_Y": embeddings["-1"][:, 1]}))
+        for axis, name in ((0, "Embeddings_X"), (1, "Embeddings_Y")):
+            col.create_dataset(name, data=_records({id: e[:, axis] for id, e in extra.items()}))
+        col.create_dataset("Clusterings", data=_records(clusterings))
+        col.create_dataset("ClusterID", data=clusterings["0"])
+        row.create_dataset("Regulons", data=_records(dict(zip(regulons, membership.T))))
+        if region:
+            var_names = [f"chr{1 + i % 2}:{1000 * i}-{1000 * i + 500}" for i in range(n_genes)]
+            del row["Gene"], row["Accession"]
+            row.create_dataset("Gene", data=_loom_strings(var_names), dtype=ascii_str)
+            linked = [f"Gene{i // 2}" if i % 3 else "" for i in range(n_genes)]
+            row.create_dataset("linkedGene", data=_loom_strings(linked), dtype=ascii_str)
+        attrs = f["attrs"]
+        for key, value in (
+            ("MetaData", text), ("Genome", "hg38"), ("SCopeTreeL1", "Tissue"),
+            ("SCopeTreeL2", ""), ("SCopeTreeL3", ""), ("CreationDate", "20240407T203321Z"),
+        ):
+            attrs.create_dataset(key, data=value.encode("ascii"), dtype=ascii_str)
+    return ScopeTruth(
+        loom, regulons, auc, membership, embeddings, clusterings, metadata, var_names
+    )

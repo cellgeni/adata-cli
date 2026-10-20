@@ -624,6 +624,39 @@ def test_loom_import_writes_in_blocks(tmp_path):
     assert_independent_of(measure, what="convert loom write calls", axis="n_cells")
 
 
+def test_scope_loom_import_work_grows_linearly(tmp_path, monkeypatch):
+    """Regulons, embeddings and clusterings are read a block of cells at a
+    time, each compound attribute once per block for all its fields."""
+    from adata.commands.convert import convert_store
+    from adata.conversion import loom
+    from tests.conftest import write_scope_loom
+
+    monkeypatch.setattr(loom, "STRING_STEP", 16)
+
+    def measure(n: int) -> int:
+        source = write_scope_loom(tmp_path / f"sc{n}.loom", n_cells=n).path
+        with count_io() as io:
+            convert_store(source, tmp_path / f"osc{n}.h5ad", QUIET)
+        return io.work
+
+    assert_grows_linearly(measure, what="convert SCope loom to h5ad", axis="n_cells")
+
+
+def test_scope_loom_import_writes_tables_in_blocks(tmp_path):
+    """A block of rows is written per field, not a row: the write calls do
+    not depend on the cell count."""
+    from adata.commands.convert import convert_store
+    from tests.conftest import write_scope_loom
+
+    def measure(n: int) -> int:
+        source = write_scope_loom(tmp_path / f"scw{n}.loom", n_cells=n).path
+        with count_io() as io:
+            convert_store(source, tmp_path / f"oscw{n}.h5ad", QUIET)
+        return io.h5_write_calls
+
+    assert_independent_of(measure, what="convert SCope loom write calls", axis="n_cells")
+
+
 @pytest.mark.parametrize("layout", ["csr", "csc", "dense"])
 def test_loom_export_work_grows_linearly(tmp_path, monkeypatch, layout):
     from adata.commands.convert import convert_store

@@ -191,22 +191,33 @@ def write_obs_index(root: Any, n: int, blocks: Iterable[Sequence[str]]) -> Any:
     Returns the group, for the caller to add columns to. A source that gives
     more or fewer than `n` barcodes is refused.
     """
-    obs = root.create_group("obs")
-    spec.set_encoding(obs, spec.DATAFRAME)
-    obs.attrs["_index"] = "_index"
+    return write_index_frame(root, "obs", n, blocks, noun="barcodes")
 
-    backend = "zarr" if is_zarr_group(root) else "hdf5"
-    index = create_dataset(obs, "_index", shape=(n,), dtype=string_dtype_for(backend))
+
+def write_index_frame(
+    parent: Any, name: str, n: int, blocks: Iterable[Sequence[str]], *, noun: str = "names"
+) -> Any:
+    """A `dataframe` holding only its index, written a block at a time.
+
+    Returns the group, for the caller to add columns to; `noun` names the
+    index in the refusal when the blocks give more or fewer than `n`.
+    """
+    frame = parent.create_group(name)
+    spec.set_encoding(frame, spec.DATAFRAME)
+    frame.attrs["_index"] = "_index"
+
+    backend = "zarr" if is_zarr_group(parent) else "hdf5"
+    index = create_dataset(frame, "_index", shape=(n,), dtype=string_dtype_for(backend))
     written = 0
     for block in blocks:
         if written + len(block) > n:
-            raise ValueError(f"There are more than {n:,} barcodes.")
+            raise ValueError(f"There are more than {n:,} {noun}.")
         index[written : written + len(block)] = np.asarray(block, dtype=object)
         written += len(block)
     if written != n:
-        raise ValueError(f"There are {written:,} barcodes, not {n:,}.")
+        raise ValueError(f"There are {written:,} {noun}, not {n:,}.")
     spec.set_encoding(index, spec.STRING_ARRAY)
-    return obs
+    return frame
 
 
 def write_var(root: Any, target: Target) -> None:

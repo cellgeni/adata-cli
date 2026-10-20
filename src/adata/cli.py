@@ -724,9 +724,12 @@ def convert(
     read_10x_h5 or read_10x_mtx (gex_only=False) reads it, keeping integer
     counts, and written as Cell Ranger writes it. MTX folders from Cell
     Ranger and STARsolo, velocyto's included, and Parse split-pipe output
-    are read in two streaming passes. Features are named by gene id, unique
-    but in probe-level (Flex) matrices; --var-names gene_symbols names them
-    as scanpy does.
+    are read in two streaming passes. A loom is read as anndata.read_loom
+    reads it; a SCope loom (pySCENIC, SCENIC+, pycistopic) also gives its
+    regulons as dataframes in obsm and varm, its embeddings and clusterings
+    named from its MetaData, and the MetaData in uns["scope"]. Features are
+    named by gene id, unique but in probe-level (Flex) matrices;
+    --var-names gene_symbols names them as scanpy does.
 
     Nothing is written until every check has passed, and the output is moved
     into place only once complete: a failed conversion leaves nothing
@@ -750,6 +753,7 @@ def convert(
         adata convert splitpipe_out -o parse.h5ad
         adata convert splitpipe_out -o parse.h5ad --all-samples --unfiltered
         adata convert velocyto.loom -o velocyto.h5ad
+        adata convert pyscenic_output.loom -o scenic.h5ad
         adata convert counts.h5ad -o counts.loom
     """
     entries = list(ctx.args)
