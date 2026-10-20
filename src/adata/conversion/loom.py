@@ -88,7 +88,7 @@ from adata.storage import (
     open_store,
     with_compression,
 )
-from adata.util.names import claim, count_duplicates, make_index_unique
+from adata.util.names import claim, count_duplicates, make_index_unique, storable
 
 #: Attributes that name the cells, the gene ids and the gene symbols, in the
 #: order they are looked for: loompy and velocyto's names first, then
@@ -213,10 +213,7 @@ def _table_columns(axis: _Axis, what: str, warnings: List[str]) -> None:
     hold it (`/` separates their paths) or a dataframe reserves it."""
     for name, fields in axis.tables.items():
         taken = set(spec.RESERVED_DATAFRAME_KEYS)
-        columns = [
-            claim(f.replace("/", "_") if f not in ("", ".", "..") else f"_{f}", taken)
-            for f in fields
-        ]
+        columns = [claim(storable(f), taken) for f in fields]
         renamed = [f"{f!r} as {c!r}" for f, c in zip(fields, columns) if f != c]
         if renamed:
             warnings.append(f"Renamed in {what} {name}: {', '.join(renamed)}.")

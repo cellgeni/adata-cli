@@ -43,7 +43,7 @@ from adata.elements.write import (
     write_string_array,
 )
 from adata.storage import create_dataset
-from adata.util.names import claim, make_index_unique, sanitize_label
+from adata.util.names import claim, make_index_unique, sanitize_label, storable
 
 METADATA = "MetaData"
 EMBEDDING = "Embedding"
@@ -216,7 +216,7 @@ def _clusterings(
     for id in ids:
         entry = entries.get(id, {})
         name = _name(entry)
-        wanted = (name or f"clustering_{id}").replace("/", "_")
+        wanted = storable(name or f"clustering_{id}")
         column = claim(wanted, taken)
         if column != (name or wanted):
             renamed.append(f"{name or wanted!r} as {column!r}")
@@ -230,7 +230,7 @@ def _clusterings(
     if renamed:
         warnings.append(
             f"Clusterings written under other obs names: {', '.join(renamed)} -- "
-            "the name is taken, or holds '/'."
+            "the name is taken, or HDF5 and Zarr cannot hold it."
         )
     return clusterings
 

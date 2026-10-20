@@ -163,6 +163,22 @@ def test_metadata_that_cannot_be_decoded_is_kept_with_a_warning(tmp_path):
     assert got.obs["clustering_1"].tolist() == [str(v) for v in truth.clusterings["1"]]
 
 
+def test_a_clustering_named_dot_dot_gets_a_name_a_column_can_hold(tmp_path):
+    """MetaData may name a clustering "..", which as an HDF5 or Zarr member
+    is the parent group: writing obs failed."""
+    truth = write_scope_loom(tmp_path / "scope.loom", compressed=False)
+    metadata = dict(truth.metadata)
+    metadata["clusterings"] = [dict(c, name=name) for c, name in zip(metadata["clusterings"], ("..", "a/b"))]
+    _set_metadata(truth.path, json.dumps(metadata))
+    for suffix in (".h5ad", ".zarr"):
+        out = tmp_path / f"out{suffix}"
+        result = _ok(truth.path, "-o", out)
+        assert "'..' as '_..', 'a/b' as 'a_b'" in _out(result)
+        got = _read(out)
+        assert got.obs["_.."].tolist()[:3] == ["B cell", "T cell", "NK"]
+        assert got.uns["scope"]["clusterings"].loc["0"].tolist() == ["..", "_.."]
+
+
 def test_a_field_name_holding_a_slash_is_renamed_with_a_warning(tmp_path):
     truth = write_scope_loom(tmp_path / "scope.loom", regulons=("HES1/HEY1_(+)", "_index", "TP53_(+)"))
     out = tmp_path / "out.h5ad"

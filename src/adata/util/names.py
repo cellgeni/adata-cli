@@ -35,6 +35,12 @@ def unique_names(labels: List[str]) -> Dict[str, str]:
     return mapping
 
 
+def storable(name: str) -> str:
+    """`name` as an HDF5 or Zarr member can hold it: `/` separates their
+    paths, and "", "." and ".." name the group itself or its parent."""
+    return f"_{name}" if name in ("", ".", "..") else name.replace("/", "_")
+
+
 def claim(name: str, taken: Set[str]) -> str:
     """`name`, or the first of `name_1`, `name_2`, ... not in `taken`.
 
