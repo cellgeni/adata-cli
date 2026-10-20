@@ -62,21 +62,26 @@ def create_binary(path: Path, *, gzipped: bool, level: int = 4) -> Iterator[Bina
 def iter_line_blocks(
     fh: BinaryIO, block_bytes: int = TEXT_BLOCK_BYTES
 ) -> Iterator[bytes]:
-    """Blocks of whole lines, each ending in a newline but perhaps the last."""
-    carry = b""
+    """Blocks of whole lines, each ending in a newline but perhaps the last.
+
+    A line longer than a block is gathered in pieces and joined once: adding
+    each read to the bytes before it copied them all again, which for a
+    header naming a million cells read a block at a time was quadratic.
+    """
+    carry: List[bytes] = []
     while True:
         chunk = fh.read(block_bytes)
         if not chunk:
             break
-        buffer = carry + chunk
-        cut = buffer.rfind(b"\n")
+        cut = chunk.rfind(b"\n")
         if cut < 0:
-            carry = buffer
+            carry.append(chunk)
             continue
-        yield buffer[: cut + 1]
-        carry = buffer[cut + 1 :]
+        carry.append(chunk[: cut + 1])
+        yield b"".join(carry)
+        carry = [chunk[cut + 1 :]] if cut + 1 < len(chunk) else []
     if carry:
-        yield carry
+        yield b"".join(carry)
 
 
 def _lines(block: bytes) -> List[bytes]:

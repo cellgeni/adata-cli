@@ -657,6 +657,80 @@ def test_scope_loom_import_writes_tables_in_blocks(tmp_path):
     assert_independent_of(measure, what="convert SCope loom write calls", axis="n_cells")
 
 
+@pytest.mark.parametrize("transpose", [False, True], ids=["cells-as-rows", "transposed"])
+def test_text_import_work_grows_linearly(tmp_path, monkeypatch, transpose):
+    """Blocks of lines, each parsed once; a transposed file's entries go
+    through buckets, whatever the cell count."""
+    from adata.commands.convert import convert_store
+    from adata.conversion import Options, text
+    from tests.conftest import write_text_matrix
+
+    monkeypatch.setattr(text, "BLOCK_BYTES", 256)
+    monkeypatch.setattr(text, "BUCKET_ENTRIES", 64)
+    tag = "t" if transpose else "c"
+
+    def measure(n: int) -> int:
+        source = write_text_matrix(
+            tmp_path / f"tx{tag}{n}.csv", n_cells=n, n_genes=8, transpose=transpose
+        ).path
+        with count_io() as io:
+            convert_store(
+                source, tmp_path / f"otx{tag}{n}.h5ad", QUIET,
+                options=Options(transpose=transpose),
+            )
+        return io.work
+
+    assert_grows_linearly(measure, what=f"convert text ({tag}) to h5ad", axis="n_cells")
+
+
+@pytest.mark.perf
+@pytest.mark.parametrize("transpose", [False, True], ids=["cells-as-rows", "transposed"])
+def test_text_parsing_python_work_grows_linearly(tmp_path, monkeypatch, transpose):
+    """The parse is numpy's but for a split per line, to cut off its name:
+    Python work per line, not per value and not per block seen before."""
+    from adata.commands.convert import convert_store
+    from adata.conversion import Options, text
+    from tests.conftest import write_text_matrix
+
+    monkeypatch.setattr(text, "BLOCK_BYTES", 256)
+    tag = "t" if transpose else "c"
+
+    def measure(n: int) -> int:
+        source = write_text_matrix(
+            tmp_path / f"tl{tag}{n}.csv", n_cells=n, n_genes=8, transpose=transpose
+        ).path
+        with count_lines(SOURCE_PREFIX) as lines:
+            convert_store(
+                source, tmp_path / f"otl{tag}{n}.h5ad", QUIET,
+                options=Options(transpose=transpose),
+            )
+        return lines[0]
+
+    assert_grows_linearly(measure, what=f"text ({tag}) parsing, Python lines", axis="n_cells")
+
+
+@pytest.mark.parametrize("transpose", [False, True], ids=["cells-as-rows", "transposed"])
+def test_text_import_writes_in_blocks(tmp_path, transpose):
+    from adata.commands.convert import convert_store
+    from adata.conversion import Options
+    from tests.conftest import write_text_matrix
+
+    tag = "t" if transpose else "c"
+
+    def measure(n: int) -> int:
+        source = write_text_matrix(
+            tmp_path / f"tw{tag}{n}.csv", n_cells=n, n_genes=8, transpose=transpose
+        ).path
+        with count_io() as io:
+            convert_store(
+                source, tmp_path / f"otw{tag}{n}.h5ad", QUIET,
+                options=Options(transpose=transpose),
+            )
+        return io.h5_write_calls
+
+    assert_independent_of(measure, what=f"convert text ({tag}) write calls", axis="n_cells")
+
+
 @pytest.mark.parametrize("layout", ["csr", "csc", "dense"])
 def test_loom_export_work_grows_linearly(tmp_path, monkeypatch, layout):
     from adata.commands.convert import convert_store

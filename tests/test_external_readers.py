@@ -33,6 +33,7 @@ from tests.conftest import (
     write_parse_run,
     write_scope_loom,
     write_starsolo_velocyto,
+    write_text_matrix,
 )
 from tests.reference_stores import must_build, offline, uv_available
 
@@ -687,5 +688,51 @@ ref = pd.DataFrame(meta["regulonThresholds"]).set_index("regulon")
 for column in thresholds.columns:
     if list(thresholds.index) != list(ref.index) or list(thresholds[column]) != list(ref[column]):
         problems.append(f"regulon thresholds' {column} differs")
+print("RESULT " + json.dumps(problems))
+"""
+
+
+def test_text_matrices_import_as_anndata_reads_them(tmp_path):
+    """anndata's read_csv and read_text are the reference, for every layout
+    they tell apart. They give float32 where ours keeps integers or float64,
+    so values are compared, not types; a transposed file against `.T`."""
+    cases = []
+    for i, (kw, reader, delimiter, extra) in enumerate([
+        ({"header": "corner"}, "read_csv", ",", []),
+        ({"header": "short", "gz": True}, "read_csv", ",", []),
+        ({"header": "comment", "delimiter": None}, "read_text", "", []),
+        ({"header": "none", "delimiter": "\t", "row_names": False}, "read_text", "\t", []),
+        ({"header": "corner", "transpose": True}, "read_csv", ",", ["--transpose"]),
+    ]):
+        suffix = ".txt" if reader == "read_text" else ".csv"
+        truth = write_text_matrix(tmp_path / f"m{i}{suffix}{'.gz' if kw.get('gz') else ''}", **kw)
+        out = tmp_path / f"m{i}.h5ad"
+        _convert(str(truth.path), "-o", str(out), *extra)
+        cases.append([str(truth.path), reader, delimiter, str(out), bool(extra)])
+    problems = _run(["anndata", "scipy"], _COMPARE_TEXT, json.dumps(cases))
+    assert problems == [], problems
+
+
+_COMPARE_TEXT = r"""
+import json, sys, warnings
+warnings.filterwarnings("ignore")
+import numpy as np, anndata as ad
+
+problems = []
+dense = lambda m: m.toarray() if hasattr(m, "toarray") else np.asarray(m)
+for path, reader, delimiter, out, transposed in json.loads(sys.argv[1]):
+    ref = getattr(ad.io, reader)(path, delimiter=delimiter or None)
+    if transposed:
+        ref = ref.T
+    got = ad.read_h5ad(out)
+    if ref.shape != got.shape:
+        problems.append(f"{path}: shape {ref.shape} != {got.shape}")
+        continue
+    if not np.array_equal(dense(ref.X), dense(got.X).astype(np.float32)):
+        problems.append(f"{path}: X differs")
+    if list(ref.obs_names) != list(got.obs_names):
+        problems.append(f"{path}: obs_names differ")
+    if list(ref.var_names) != list(got.var_names):
+        problems.append(f"{path}: var_names differ")
 print("RESULT " + json.dumps(problems))
 """

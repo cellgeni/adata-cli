@@ -89,8 +89,9 @@ class Case:
     #: Report the output's size against the input's, as before -> after. For
     #: cases whose point is what they do to the file's size.
     compare_size: bool = False
-    #: An auxiliary input the case needs: "csv", the CSV an import reads, or
-    #: "10x-mtx", an MTX folder of the first input's counts. Built once from
+    #: An auxiliary input the case needs: "csv", the CSV an import reads,
+    #: "10x-mtx", an MTX folder of the first input's counts, or "dense-csv",
+    #: a dense count table of its first cells. Built once from
     #: the first input and offered to CLI contenders as `{sidecar}` and to
     #: scripts as $BENCH_SIDECAR (`{sidecar_csv}` and $BENCH_SIDECAR_CSV too).
     sidecar: Optional[str] = None
@@ -487,6 +488,32 @@ CASES: List[Case] = [
             ),
         ],
         tags=["headline"],
+    ),
+    Case(
+        name="import-csv",
+        question=(
+            "Read a dense count table, a CSV of the first 10,000 cells, into an "
+            "h5ad. adata-cli reads it twice, a block of lines at a time, and "
+            "writes CSR int32; anndata's read_csv loads it as dense float32."
+        ),
+        sidecar="dense-csv",
+        contenders=[
+            Contender(
+                "adata-cli",
+                argv=[
+                    "adata", "convert", "{sidecar}", "-o", "{output}",
+                    "--compression", COMPRESSION,
+                ],
+            ),
+            Contender(
+                "anndata",
+                script=_py(
+                    "import os\n"
+                    "obj = ad.io.read_csv(os.environ['BENCH_SIDECAR'])\n"
+                    "obj.write_h5ad(OUT, compression=COMPRESSION)\n"
+                ),
+            ),
+        ],
     ),
     # -- concat, outer ------------------------------------------------------
     Case(
