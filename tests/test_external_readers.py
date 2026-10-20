@@ -31,6 +31,7 @@ from tests.conftest import (
     write_10x_v2_h5,
     write_loom,
     write_parse_run,
+    write_scope_loom,
     write_starsolo_velocyto,
 )
 from tests.reference_stores import must_build, offline, uv_available
@@ -518,7 +519,7 @@ def test_a_loom_imports_as_anndata_reads_it(tmp_path, velocyto):
     """anndata.read_loom (with loompy) is the reference: X, layers, names and
     attributes. Ours keeps dtypes where anndata casts X to float32, so values
     are compared, not types."""
-    truth = write_loom(tmp_path / "in.loom", velocyto=velocyto, compound=False)
+    truth = write_loom(tmp_path / "in.loom", velocyto=velocyto)
     out = tmp_path / "out.h5ad"
     _convert(str(truth.path), "-o", str(out), "--var-names", "gene_symbols")
     problems = _run(["anndata", "loompy", "scipy"], _COMPARE_LOOM, str(truth.path), str(out))
@@ -607,5 +608,84 @@ if list(got.var["Gene"]) != list(src.var["gene_symbols"]):
     problems.append("Gene differs from gene_symbols")
 if list(got.obs["cluster"].astype(str)) != list(src.obs["cluster"].astype(str)):
     problems.append("cluster differs")
+print("RESULT " + json.dumps(problems))
+"""
+
+
+@pytest.mark.parametrize("default_in_extra", [True, False], ids=["export2loom", "Embedding-only"])
+def test_a_scope_loom_imports_as_the_pyscenic_recipe_reads_it(tmp_path, default_in_extra):
+    """The pySCENIC tutorial reads a SCope loom with loompy: the AUC and
+    regulons as DataFrames of the compound attributes, the embeddings paired
+    by id (the default from Embedding), the clusterings labelled from
+    MetaData. Ours must hold the same, with the names to find them."""
+    truth = write_scope_loom(tmp_path / "scope.loom", default_in_extra=default_in_extra)
+    out = tmp_path / "out.h5ad"
+    _convert(str(truth.path), "-o", str(out))
+    problems = _run(["anndata", "loompy", "pandas"], _COMPARE_SCOPE, str(truth.path), str(out))
+    assert problems == [], problems
+
+
+_COMPARE_SCOPE = r"""
+import base64, json, sys, warnings, zlib
+warnings.filterwarnings("ignore")
+import numpy as np, pandas as pd, loompy as lp, anndata as ad
+
+got = ad.read_h5ad(sys.argv[2])
+problems = []
+with lp.connect(sys.argv[1], mode="r", validate=False) as lf:
+    meta = json.loads(zlib.decompress(base64.b64decode(lf.attrs.MetaData)))
+    auc = pd.DataFrame(lf.ca.RegulonsAUC, index=lf.ca.CellID)
+    regulons = pd.DataFrame(lf.ra.Regulons, index=lf.ra.Gene)
+    drx = pd.DataFrame(lf.ca.Embeddings_X, index=lf.ca.CellID)
+    dry = pd.DataFrame(lf.ca.Embeddings_Y, index=lf.ca.CellID)
+    default = pd.DataFrame(lf.ca.Embedding, index=lf.ca.CellID)
+    clusterings = pd.DataFrame(lf.ca.Clusterings, index=lf.ca.CellID)
+
+mine = got.obsm["RegulonsAUC"]
+if list(mine.columns) != list(auc.columns) or list(mine.index) != list(auc.index):
+    problems.append("RegulonsAUC is labelled differently")
+elif not np.array_equal(mine.to_numpy(), auc.to_numpy()) or list(mine.dtypes) != list(auc.dtypes):
+    problems.append("RegulonsAUC differs")
+mine = got.varm["Regulons"]
+if list(mine.columns) != list(regulons.columns):
+    problems.append("Regulons is labelled differently")
+elif not np.array_equal(mine.to_numpy(), regulons.to_numpy()):
+    problems.append("Regulons differs")
+else:
+    # Each regulon's targets, as the tutorial lists them.
+    for name in regulons.columns:
+        if list(regulons.index[regulons[name] == 1]) != list(got.var["Gene"][mine[name] == 1]):
+            problems.append(f"targets of {name} differ")
+
+where = got.uns["scope"]["embeddings"]
+for entry in meta["embeddings"]:
+    id = str(entry["id"])
+    if id in drx.columns:
+        ref = np.column_stack([drx[id], dry[id]])
+    else:
+        ref = default[["_X", "_Y"]].to_numpy()
+    if id not in where.index or where.loc[id, "name"] != entry["name"]:
+        problems.append(f"embedding {id} is not recorded")
+    elif not np.array_equal(got.obsm[where.loc[id, "obsm"]], ref):
+        problems.append(f"embedding {id} differs")
+
+where = got.uns["scope"]["clusterings"]
+for entry in meta["clusterings"]:
+    id = str(entry["id"])
+    labels = {c["id"]: c.get("description", str(c["id"])) for c in entry["clusters"]}
+    ref = [labels.get(v) for v in clusterings[id]]
+    column = got.obs[where.loc[id, "obs"]]
+    if [None if pd.isna(v) else v for v in column] != ref:
+        problems.append(f"clustering {id} differs")
+    if list(column.cat.categories) != [labels[k] for k in sorted(labels)]:
+        problems.append(f"clustering {id}'s categories differ")
+
+if json.loads(got.uns["scope"]["metadata"]) != meta:
+    problems.append("MetaData differs")
+thresholds = got.uns["scope"]["regulon_thresholds"]
+ref = pd.DataFrame(meta["regulonThresholds"]).set_index("regulon")
+for column in thresholds.columns:
+    if list(thresholds.index) != list(ref.index) or list(thresholds[column]) != list(ref[column]):
+        problems.append(f"regulon thresholds' {column} differs")
 print("RESULT " + json.dumps(problems))
 """

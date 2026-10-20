@@ -169,15 +169,6 @@ def test_a_loom_without_names_is_numbered_as_anndata_numbers_it(tmp_path):
     assert list(got.var_names) == [str(i) for i in range(10)]
 
 
-def test_scope_compound_attributes_are_skipped_with_a_pointer(tmp_path):
-    truth = write_loom(tmp_path / "scope.loom", compound=True)
-    out = tmp_path / "out.h5ad"
-    result = _ok(truth.path, "-o", out)
-    assert "Not read: col_attrs RegulonsAUC" in _out(result)
-    assert "#27" in _out(result)
-    assert "RegulonsAUC" not in _read(out).obs
-
-
 @pytest.mark.parametrize(
     "spoil,extra,message",
     [

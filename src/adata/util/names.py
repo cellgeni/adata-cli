@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from typing import Dict, Iterable, List, Sequence
+from typing import Dict, Iterable, List, Sequence, Set
 
 
 def sanitize_label(label: str) -> str:
@@ -33,6 +33,26 @@ def unique_names(labels: List[str]) -> Dict[str, str]:
         used[base] = count + 1
         mapping[label] = base if count == 0 else f"{base}_{count}"
     return mapping
+
+
+def storable(name: str) -> str:
+    """`name` as an HDF5 or Zarr member can hold it: `/` separates their
+    paths, and "", "." and ".." name the group itself or its parent."""
+    return f"_{name}" if name in ("", ".", "..") else name.replace("/", "_")
+
+
+def claim(name: str, taken: Set[str]) -> str:
+    """`name`, or the first of `name_1`, `name_2`, ... not in `taken`.
+
+    The name returned is added to `taken`, so claiming several in turn
+    gives distinct names.
+    """
+    candidate, count = name, 0
+    while candidate in taken:
+        count += 1
+        candidate = f"{name}_{count}"
+    taken.add(candidate)
+    return candidate
 
 
 def count_duplicates(names: Sequence[str]) -> int:

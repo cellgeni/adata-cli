@@ -1,11 +1,12 @@
-"""Loom files: loompy's, velocyto's, kallisto|bustools'.
+"""Loom files: loompy's, velocyto's, kallisto|bustools', and SCope's.
 
 A loom is one HDF5 file:
 
 * `/matrix`, genes x cells, dense, usually chunked 64 x 64 and gzipped, and
   `/layers/<name>` of the same shape;
 * `/col_attrs/<name>`, one value (or row) per cell, and `/row_attrs/<name>`
-  per gene;
+  per gene; SCope's are also compound, one record of named fields per cell
+  or gene;
 * `/col_graphs/<name>` and `/row_graphs/<name>`, COO graphs (`a`, `b`, `w`);
 * global attributes: datasets under `/attrs` in spec 3.0.0, root HDF5
   attributes before it.
@@ -13,13 +14,17 @@ A loom is one HDF5 file:
 Import follows `anndata.read_loom`: X is the `spliced` layer when there is
 one (with the main matrix kept as `layers["matrix"]`), else the main matrix;
 attributes with one value per cell are obs columns and those with several
-are obsm. Three things differ, on purpose:
+are obsm. Four things differ, on purpose:
 
 * values keep their dtype, where anndata casts X to float32;
 * graphs become obsp/varp, and global attributes `uns["loom"]`, where
   anndata drops them;
 * var is named by gene id when the file records one, as `convert` names
-  every other format.
+  every other format;
+* compound attributes become dataframes in obsm and varm, a column per
+  field, and SCope's embeddings, clusterings and metadata are read as
+  scope.py describes, where anndata refuses the file: loompy's validator
+  rejects compound attributes.
 
 Strings are read as loompy reads them -- XML character references such as
 `&#233;` unescaped -- and written as loompy writes them, ASCII with those
@@ -37,18 +42,20 @@ from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import h5py
 import numpy as np
 from rich.console import Console
 
+from adata.conversion import scope
 from adata.conversion.base import ConversionPlan, Converter, Options
 from adata.conversion.features import (
     STRING_STEP,
     Target,
     check_import_options,
     resolve,
+    write_index_frame,
     write_obs_index,
     write_var,
 )
@@ -61,7 +68,9 @@ from adata.elements.read import (
     read_str_chunk,
     resolve_index,
 )
+from adata.elements.strings import string_dtype_for
 from adata.elements.write import (
+    create_categorical,
     ensure_anndata_skeleton,
     set_column_order,
     write_dense,
@@ -79,7 +88,7 @@ from adata.storage import (
     open_store,
     with_compression,
 )
-from adata.util.names import count_duplicates, make_index_unique
+from adata.util.names import claim, count_duplicates, make_index_unique, storable
 
 #: Attributes that name the cells, the gene ids and the gene symbols, in the
 #: order they are looked for: loompy and velocyto's names first, then
@@ -159,16 +168,28 @@ class _Axis:
     names: Optional[str] = None
     columns: List[str] = field(default_factory=list)
     matrices: List[str] = field(default_factory=list)
+    #: Compound attributes -> the column each field becomes, in field order.
+    tables: Dict[str, List[str]] = field(default_factory=dict)
     skipped: List[str] = field(default_factory=list)
+
+
+def _field_readable(dtype: np.dtype) -> bool:
+    """A compound field a dataframe column can hold: a number or text."""
+    return dtype.names is None and dtype.shape == () and (
+        dtype.kind in "biuf" or h5py.check_string_dtype(dtype) is not None
+    )
 
 
 def _axis(group: Any, n: int, what: str) -> _Axis:
     axis = _Axis(n)
     for name, ds in group.items():
-        if not isinstance(ds, h5py.Dataset):
+        if not isinstance(ds, h5py.Dataset) or ds.ndim == 0:
             axis.skipped.append(name)
             continue
-        if ds.dtype.names is not None or ds.dtype.kind == "V" or ds.ndim == 0:
+        compound = ds.dtype.names is not None
+        if (compound and (ds.ndim != 1 or not all(
+            _field_readable(ds.dtype[f]) for f in ds.dtype.names
+        ))) or (not compound and ds.dtype.kind == "V"):
             axis.skipped.append(name)
             continue
         if ds.shape[0] != n:
@@ -176,13 +197,27 @@ def _axis(group: Any, n: int, what: str) -> _Axis:
                 f"{what} attribute {name!r} has {ds.shape[0]:,} entries, but the "
                 f"matrix has {n:,} {'cells' if what == 'Column' else 'genes'}."
             )
-        if ds.ndim == 1 or (ds.ndim == 2 and ds.shape[1] == 1):
+        if compound:
+            axis.tables[name] = list(ds.dtype.names)
+        elif ds.ndim == 1 or (ds.ndim == 2 and ds.shape[1] == 1):
             axis.columns.append(name)
         elif ds.ndim == 2 and ds.dtype.kind in "biuf":
             axis.matrices.append(name)
         else:
             axis.skipped.append(name)
     return axis
+
+
+def _table_columns(axis: _Axis, what: str, warnings: List[str]) -> None:
+    """Each compound field's column name: its own, unless HDF5 or Zarr cannot
+    hold it (`/` separates their paths) or a dataframe reserves it."""
+    for name, fields in axis.tables.items():
+        taken = set(spec.RESERVED_DATAFRAME_KEYS)
+        columns = [claim(storable(f), taken) for f in fields]
+        renamed = [f"{f!r} as {c!r}" for f, c in zip(fields, columns) if f != c]
+        if renamed:
+            warnings.append(f"Renamed in {what} {name}: {', '.join(renamed)}.")
+        axis.tables[name] = columns
 
 
 def _pick(axis: _Axis, explicit: Optional[str], candidates: Sequence[str], flag: str) -> Optional[str]:
@@ -211,6 +246,8 @@ class _Import:
     dense: bool
     compression: Optional[str]
     zarr_format: Optional[int]
+    #: What a SCope loom holds beyond a loom's; None for other looms.
+    scope: Optional[scope.Scope] = None
 
 
 class LoomImport(Converter):
@@ -295,13 +332,24 @@ class LoomImport(Converter):
                     f"No attribute names the genes; they are numbered 0..{n_genes - 1}. "
                     "Name one with --var-names-attr."
                 )
-            for axis, what in ((obs, "col_attrs"), (var, "row_attrs")):
+            for axis in (obs, var):
                 if axis.names in axis.columns:
                     axis.columns.remove(axis.names)
+            attrs = _global_attrs(handle)
+            found = None
+            if scope.is_scope(attrs, handle.get("col_attrs", empty).keys()):
+                metadata = attrs.get(scope.METADATA)
+                if metadata is not None:
+                    # One value; R's writers may store it as a one-element array.
+                    values = np.asarray(decode(metadata), dtype=object).reshape(-1)
+                    metadata = str(values[0]) if values.size else None
+                found = scope.plan(handle.get("col_attrs", empty), metadata, obs, var, warnings)
+            for axis, what in ((obs, "col_attrs"), (var, "row_attrs")):
+                _table_columns(axis, what, warnings)
                 if axis.skipped:
                     warnings.append(
-                        f"Not read: {what} {', '.join(axis.skipped)} -- compound or "
-                        "higher-dimensional values, such as SCope's regulons (#27)."
+                        f"Not read: {what} {', '.join(axis.skipped)} -- a 0-d, "
+                        "higher-dimensional or nested value, which no column holds."
                     )
 
             var_names = (
@@ -327,7 +375,7 @@ class LoomImport(Converter):
             }
             version = _version(handle)
             velocyto = any(
-                key.startswith("velocyto") for key in _global_attrs(handle)
+                key.startswith("velocyto") for key in attrs
             ) or {"spliced", "unspliced"} <= set(layers)
 
         detail = _Import(
@@ -343,12 +391,15 @@ class LoomImport(Converter):
             dense=options.dense,
             compression=options.compression or ("gzip" if backend == "hdf5" else None),
             zarr_format=(options.zarr_format or 3) if dst_format == "zarr" else None,
+            scope=found,
         )
-        kind = "velocyto" if velocyto else f"spec {version}"
+        kind = "velocyto" if velocyto else "SCope" if found is not None else f"spec {version}"
         named = f"X = {x or 'matrix'}"
         others = [p.split("/", 1)[1] for places in sources.values() for p in places if p != "X"]
         if others:
             named += f", layers: {', '.join(others)}"
+        if found is not None and found.describe():
+            named += f", {found.describe()}"
         return ConversionPlan(
             source=source,
             src_format=src_format,
@@ -370,21 +421,38 @@ class LoomImport(Converter):
             root = stack.enter_context(
                 open_store(staged[0], "w", zarr_format=detail.zarr_format)
             ).root
+            cols, rows = handle.get("col_attrs", {}), handle.get("row_attrs", {})
+            found = detail.scope
             with console.status("[cyan]Writing obs, var and the attributes...[/]"):
-                _write_obs(root, handle.get("col_attrs", {}), detail.obs)
-                _write_var(root, handle.get("row_attrs", {}), detail.var, detail.var_names)
+                _write_obs(root, cols, detail.obs, found)
+                _write_var(root, rows, detail.var, detail.var_names)
                 ensure_anndata_skeleton(root)
-                for axis, group, key in (
-                    (detail.obs, handle.get("col_attrs", {}), "obsm"),
-                    (detail.var, handle.get("row_attrs", {}), "varm"),
+
+                def var_names(step: int) -> Iterator[List[str]]:
+                    for lo in range(0, detail.n_genes, step):
+                        yield detail.var_names[lo : lo + step]
+
+                for axis, group, key, names in (
+                    (detail.obs, cols, "obsm", lambda step: _obs_names(cols, detail.obs, step)),
+                    (detail.var, rows, "varm", var_names),
                 ):
                     for name in axis.matrices:
                         _copy_rows(group[name], root[key], name)
+                    for name, columns in axis.tables.items():
+                        _write_table(group[name], root[key], name, columns, names)
+                if found is not None:
+                    sources = {name for e in found.embeddings for name in (e.x[0], e.y[0])}
+                    scope.write_embeddings(
+                        root["obsm"], cols, found, detail.n_cells,
+                        _block_rows(*(cols[name] for name in sources)),
+                    )
                 for kind, key in (("col_graphs", "obsp"), ("row_graphs", "varp")):
                     n = detail.n_cells if kind == "col_graphs" else detail.n_genes
                     for name in detail.graphs.get(kind, []):
                         _write_graph(handle[kind][name], root, key, name, n)
                 _write_uns(root, handle, detail)
+                if found is not None:
+                    scope.write_uns(root["uns"], found)
 
             for loom_name, places in detail.sources.items():
                 if not places:
@@ -405,23 +473,26 @@ def _global_attrs(handle: h5py.File) -> Dict[str, Any]:
     return found
 
 
-def _write_obs(root: Any, group: h5py.Group, axis: _Axis) -> None:
+def _obs_names(group: h5py.Group, axis: _Axis, step: int) -> Iterator[List[str]]:
+    """The cells' names, `step` at a time: the names attribute's, or numbers."""
     n = axis.n
-    if axis.names is not None:
-        names = group[axis.names]
-        blocks = (
-            [str(v) for v in decode(names[lo : lo + STRING_STEP]).reshape(-1)]
-            for lo in range(0, n, STRING_STEP)
-        )
-    else:
-        blocks = (
-            [str(i) for i in range(lo, min(lo + STRING_STEP, n))]
-            for lo in range(0, n, STRING_STEP)
-        )
-    obs = write_obs_index(root, n, blocks)
+    for lo in range(0, n, step):
+        if axis.names is None:
+            yield [str(i) for i in range(lo, min(lo + step, n))]
+        else:
+            yield [str(v) for v in decode(group[axis.names][lo : lo + step]).reshape(-1)]
+
+
+def _write_obs(root: Any, group: h5py.Group, axis: _Axis, found: Optional[scope.Scope]) -> None:
+    n = axis.n
+    obs = write_obs_index(root, n, _obs_names(group, axis, STRING_STEP))
     for name in axis.columns:
         _write_column(obs, name, group[name], n)
-    set_column_order(obs, axis.columns)
+    clusterings = []
+    if found is not None and found.clusterings:
+        step = _block_rows(group[scope.CLUSTERINGS])
+        clusterings = scope.write_clusterings(obs, group, found, n, step)
+    set_column_order(obs, axis.columns + clusterings)
 
 
 def _write_column(parent: Any, name: str, ds: h5py.Dataset, n: int) -> None:
@@ -433,19 +504,126 @@ def _write_column(parent: Any, name: str, ds: h5py.Dataset, n: int) -> None:
 
         write_text_column(parent, name, n, blocks)
         return
-    target = create_dataset(parent, name, shape=(n,), dtype=ds.dtype)
-    spec.set_encoding(target, spec.ARRAY)
+    write = _values_writer(parent, name, ds.dtype, n)
     for lo in range(0, n, STRING_STEP):
-        target[lo : lo + STRING_STEP] = np.asarray(ds[lo : lo + STRING_STEP]).reshape(-1)
+        write(lo, np.asarray(ds[lo : lo + STRING_STEP]).reshape(-1))
 
 
 def _write_var(root: Any, group: h5py.Group, axis: _Axis, var_names: List[str]) -> None:
-    columns = {}
+    columns, enums = {}, []
     for name in axis.columns:
+        if h5py.check_enum_dtype(group[name].dtype):
+            enums.append(name)
+            continue
         values = group[name][...]
         values = values.reshape(-1) if values.ndim == 2 else values
         columns[name] = decode(values) if values.dtype.kind in "SOU" else values
     write_var(root, Target(label=None, keep=None, var_names=var_names, columns=columns))
+    if enums:
+        var = root["var"]
+        for name in enums:
+            _values_writer(var, name, group[name].dtype, axis.n)(0, group[name][...].reshape(-1))
+        set_column_order(var, axis.columns)
+
+
+def _block_rows(*datasets: h5py.Dataset) -> int:
+    """Rows of compound attributes read at once: as many as `SLAB_BYTES` holds
+    across all their fields, and at most `STRING_STEP`."""
+    width = sum(ds.dtype.itemsize for ds in datasets)
+    return max(1, min(STRING_STEP, SLAB_BYTES // max(1, width)))
+
+
+def _write_table(
+    ds: h5py.Dataset,
+    parent: Any,
+    name: str,
+    columns: List[str],
+    names: Callable[[int], Iterable[List[str]]],
+) -> None:
+    """A compound attribute as a dataframe, a column per field in field order,
+    indexed by `names(step)`: read a block of rows at a time across every
+    field, so memory is one block, never the table."""
+    n = ds.shape[0]
+    step = _block_rows(ds)
+    frame = write_index_frame(parent, name, n, names(step))
+    writers = [
+        _field_writer(frame, column, ds.dtype[f], n)
+        for f, column in zip(ds.dtype.names, columns)
+    ]
+    set_column_order(frame, columns)
+    for lo in range(0, n, step):
+        block = ds[lo : lo + step]
+        for f, write in zip(ds.dtype.names, writers):
+            write(lo, block[f])
+        del block  # before the next is read: one block held, not two
+
+
+def _field_writer(
+    frame: Any, name: str, dtype: np.dtype, n: int
+) -> Callable[[int, np.ndarray], None]:
+    """Create the column for one compound field; return what writes a block of it.
+
+    Text is decoded as loompy reads it, and kept as text: anndata makes
+    categoricals of repeated text in obs and var only.
+    """
+    if h5py.check_string_dtype(dtype) is None:
+        return _values_writer(frame, name, dtype, n)
+    backend = "zarr" if is_zarr_group(frame) else "hdf5"
+    target = create_dataset(frame, name, shape=(n,), dtype=string_dtype_for(backend))
+    spec.set_encoding(target, spec.STRING_ARRAY)
+
+    def text(lo: int, values: np.ndarray) -> None:
+        target[lo : lo + values.size] = np.asarray(
+            [str(v) for v in decode(values).reshape(-1)], dtype=object
+        )
+
+    return text
+
+
+def _values_writer(
+    parent: Any, name: str, dtype: np.dtype, n: int
+) -> Callable[[int, np.ndarray], None]:
+    """Create a column of numbers; return what writes a block of it.
+
+    R's writers store a factor as an HDF5 enum, which becomes a categorical
+    of its labels, in R's level order; and a logical as an enum of FALSE,
+    TRUE and NA, which becomes a nullable boolean. (h5py itself reads an
+    enum of FALSE and TRUE alone as booleans.) Other numbers keep their
+    dtype.
+    """
+    labels = h5py.check_enum_dtype(dtype) or {}
+    if labels and set(labels) <= {"FALSE", "TRUE", "NA"}:
+        true, missing = labels.get("TRUE"), labels.get("NA")
+        group = parent.create_group(name)
+        spec.set_encoding(group, spec.NULLABLE_BOOLEAN)
+        values = create_dataset(group, "values", shape=(n,), dtype=bool)
+        mask = create_dataset(group, "mask", shape=(n,), dtype=bool)
+        for part in (values, mask):
+            spec.set_encoding(part, spec.ARRAY)
+
+        def logical(lo: int, codes: np.ndarray) -> None:
+            values[lo : lo + codes.size] = codes == true
+            mask[lo : lo + codes.size] = codes == missing
+
+        return logical
+    if labels:
+        levels = sorted(labels.items(), key=lambda item: item[1])
+        known = np.array([code for _, code in levels])
+        codes_target = create_categorical(parent, name, [label for label, _ in levels], n)
+
+        def factor(lo: int, codes: np.ndarray) -> None:
+            at = np.minimum(np.searchsorted(known, codes), known.size - 1)
+            codes_target[lo : lo + codes.size] = np.where(known[at] == codes, at, -1)
+
+        return factor
+    plain = np.dtype(dtype.str)  # without h5py's metadata
+    target = create_dataset(parent, name, shape=(n,), dtype=plain)
+    spec.set_encoding(target, spec.ARRAY)
+
+    def number(lo: int, values: np.ndarray) -> None:
+        target[lo : lo + values.size] = values.astype(plain, copy=False)
+
+    return number
 
 
 def _copy_rows(ds: h5py.Dataset, parent: Any, name: str) -> None:
@@ -502,6 +680,8 @@ def _write_uns(root: Any, handle: h5py.File, detail: _Import) -> None:
             write_scalar(meta, key, name)
     attrs = write_mapping(meta, "attrs")
     for key, value in _global_attrs(handle).items():
+        if key == scope.METADATA and detail.scope is not None:
+            continue  # uns["scope"] holds it, decoded
         value = decode(value)
         arr = np.asarray(value)
         if arr.ndim == 0:

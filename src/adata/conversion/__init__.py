@@ -85,7 +85,7 @@ FORMATS: Dict[str, Format] = {
     ),
     "loom": Format(
         name="loom",
-        description="Loom (loompy, velocyto, kallisto|bustools; spec 2 and 3)",
+        description="Loom (loompy, velocyto, kallisto|bustools, SCope; spec 2 and 3)",
         extensions=(".loom",),
         sniff=loom.sniff,
         importer=loom.LoomImport(),
