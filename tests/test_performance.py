@@ -731,6 +731,47 @@ def test_text_import_writes_in_blocks(tmp_path, transpose):
     assert_independent_of(measure, what=f"convert text ({tag}) write calls", axis="n_cells")
 
 
+@pytest.mark.parametrize("transpose", [False, True], ids=["cells-as-rows", "transposed"])
+def test_hdf5_import_work_grows_linearly(tmp_path, monkeypatch, transpose):
+    """Slabs of whole chunks: each read once, whatever the cell count."""
+    from adata.commands.convert import convert_store
+    from adata.conversion import Options, hdf5
+    from tests.conftest import write_hdf5_matrix
+
+    monkeypatch.setattr(hdf5, "SLAB_BYTES", 1)
+    tag = "t" if transpose else "c"
+    chunks = (8, 16) if transpose else (16, 8)
+
+    def measure(n: int) -> int:
+        truth = write_hdf5_matrix(
+            tmp_path / f"h{tag}{n}.hdf5", n_cells=n, n_genes=8, transpose=transpose, chunks=chunks
+        )
+        with count_io() as io:
+            convert_store(
+                truth.path, tmp_path / f"oh{tag}{n}.h5ad", QUIET,
+                options=Options(key=truth.key, transpose=transpose),
+            )
+        return io.work
+
+    assert_grows_linearly(measure, what=f"convert hdf5 ({tag}) to h5ad", axis="n_cells")
+
+
+def test_hdf5_import_writes_in_blocks(tmp_path):
+    from adata.commands.convert import convert_store
+    from adata.conversion import Options
+    from tests.conftest import write_hdf5_matrix
+
+    def measure(n: int) -> int:
+        truth = write_hdf5_matrix(tmp_path / f"hw{n}.hdf5", n_cells=n, n_genes=8)
+        with count_io() as io:
+            convert_store(
+                truth.path, tmp_path / f"ohw{n}.h5ad", QUIET, options=Options(key=truth.key)
+            )
+        return io.h5_write_calls
+
+    assert_independent_of(measure, what="convert hdf5 write calls", axis="n_cells")
+
+
 @pytest.mark.parametrize("layout", ["csr", "csc", "dense"])
 def test_loom_export_work_grows_linearly(tmp_path, monkeypatch, layout):
     from adata.commands.convert import convert_store

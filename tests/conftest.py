@@ -1028,3 +1028,51 @@ def write_text_matrix(
         data = gzip.compress(data)
     path.write_bytes(data)
     return TextTruth(path, np.asarray(counts), cells, genes)
+
+
+# ---------------------------------------------------------------------------
+# A plain HDF5 matrix, as anndata's read_hdf reads one: a 2-D dataset, with
+# its rows' and columns' names in root datasets `row_names` and `col_names`.
+
+
+@dataclass
+class Hdf5Truth:
+    path: Path
+    key: str
+    counts: np.ndarray  # cells x genes
+    cells: List[str]
+    genes: List[str]
+
+
+def write_hdf5_matrix(
+    path: Path,
+    counts: Optional[np.ndarray] = None,
+    *,
+    key: str = "data/matrix",
+    n_cells: int = 12,
+    n_genes: int = 5,
+    transpose: bool = False,
+    chunks: Optional[Tuple[int, int]] = None,
+    names: str = "root",
+    seed: int = 0,
+) -> Hdf5Truth:
+    """`counts` (cells x genes) at `key`; genes as rows with `transpose`.
+
+    `names` is "root" (read_hdf's row_names / col_names), "custom" (at
+    `names/cells` and `names/genes`) or "none".
+    """
+    if counts is None:
+        counts = np.random.default_rng(seed).poisson(0.8, (n_cells, n_genes)).astype(np.int32)
+    cells = [f"cell{i:03d}" for i in range(counts.shape[0])]
+    genes = [f"Gene{j}" for j in range(counts.shape[1])]
+    stored = counts.T if transpose else counts
+    rows, cols = (genes, cells) if transpose else (cells, genes)
+    with h5py.File(path, "w") as f:
+        f.create_dataset(key, data=stored, chunks=chunks, compression="gzip" if chunks else None)
+        if names == "root":
+            f["row_names"] = np.array(rows, dtype="S")
+            f["col_names"] = np.array(cols, dtype="S")
+        elif names == "custom":
+            f["names/cells"] = np.array(cells, dtype=object).astype(h5py.string_dtype())
+            f["names/genes"] = np.array(genes, dtype=object).astype(h5py.string_dtype())
+    return Hdf5Truth(path, key, np.asarray(counts), cells, genes)
