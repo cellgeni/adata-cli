@@ -3,6 +3,47 @@
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
+## 0.13.0
+
+Adds the last of scanpy's core readers to `adata convert`: dense matrices
+in delimited text, as `read_csv` and `read_text` read them, and one dataset
+of a plain HDF5 file, as `read_hdf` does. Both are streamed, so memory is
+set by a block of the file rather than by the matrix, and X is CSR by
+default where anndata gives a dense float32 array.
+
+### Added
+
+- **`adata convert` reads text matrices** ([#25](https://github.com/cellgeni/adata-cli/issues/25)):
+  `.csv`, `.tsv`, `.tab`, `.txt` and `.data`, gzipped or not.
+  - The layout is found as anndata finds it: a header with a corner cell
+    (pandas) or one field short (R's `write.table`), column names in the
+    last `#` comment line, or no header; row names or none.
+    `--delimiter` and `--first-column-names` / `--no-first-column-names`
+    override the detection.
+  - `--transpose` reads genes as rows, as count tables often store them.
+  - Integers stay integers (int32 or int64, exact past 2**53); other
+    values are float64.
+  - A ragged line, or a value that is not a number, is refused by line and
+    column before any output exists.
+
+  A 400 MB CSV of 100,000 cells x 2,000 genes took 14 s at a 159 MB peak.
+  `anndata.read_csv` plus `write_h5ad` took 12.6 s at 1.3 GB. A public GEO
+  table (GSE75748, 1,018 cells x 19,097 genes, gzipped, genes as rows)
+  matched `read_csv(...).T`. It took 7.5 s at 222 MB, against 2.9 s at
+  315 MB: small tables are slower read twice.
+
+- **`adata convert` reads one dataset of a plain HDF5 file** ([#25](https://github.com/cellgeni/adata-cli/issues/25)):
+  - `--key` names it. Without it, the refusal lists the 2-D numeric
+    datasets and the 1-D ones that could name their rows and columns.
+  - Names come from `read_hdf`'s `row_names` and `col_names`, or from
+    `--obs-names-key` and `--var-names-key`.
+  - `--transpose` reads genes as rows.
+  - The dataset is read a slab of whole chunks at a time, and keeps its
+    dtype, complex included.
+  - `.hdf5`, `.he5` and `.hdf` files are recognised by name. A plain `.h5`
+    that is not a 10x matrix needs `--from hdf5`, and `convert` now says
+    so.
+
 ## 0.12.0
 
 Reads SCope looms: what pySCENIC, SCENIC+ and pycistopic write for the
