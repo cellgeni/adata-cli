@@ -44,7 +44,8 @@ _LISTED = 20
 
 
 def _numeric_2d(obj: Any) -> bool:
-    return isinstance(obj, h5py.Dataset) and obj.ndim == 2 and obj.dtype.kind in "biuf"
+    # Complex too: anndata stores complex arrays, and read_hdf reads them.
+    return isinstance(obj, h5py.Dataset) and obj.ndim == 2 and obj.dtype.kind in "biufc"
 
 
 def _names_like(obj: Any) -> bool:

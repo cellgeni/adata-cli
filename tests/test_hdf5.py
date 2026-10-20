@@ -177,3 +177,16 @@ def test_repeated_gene_names_warn_or_are_made_unique(tmp_path):
     assert "1 var names repeat an earlier one" in _out(result)
     _ok(truth.path, "-o", tmp_path / "u.h5ad", "--key", truth.key, "--make-unique")
     assert list(_read(tmp_path / "u.h5ad").var_names)[:2] == ["Gene0", "Gene0-1"]
+
+
+@pytest.mark.parametrize("dense", [False, True], ids=["csr", "dense"])
+def test_a_complex_matrix_keeps_its_dtype(tmp_path, dense):
+    """Complex datasets were refused as not numeric, though anndata stores
+    them and read_hdf reads them."""
+    values = (np.arange(12).reshape(4, 3) * (1 - 1j)).astype(np.complex64)
+    truth = write_hdf5_matrix(tmp_path / "c.hdf5", values)
+    out = tmp_path / "out.h5ad"
+    _ok(truth.path, "-o", out, "--key", truth.key, *(["--dense"] if dense else []))
+    got = _read(out).X
+    assert got.dtype == np.complex64
+    assert np.array_equal(_dense(got), values)
