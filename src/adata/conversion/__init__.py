@@ -17,7 +17,7 @@ from typing import Dict, FrozenSet, List, Optional
 
 import h5py
 
-from adata.conversion import cellbender, loom, mtx, parse, tenx, text
+from adata.conversion import cellbender, hdf5, loom, mtx, parse, tenx, text
 from adata.conversion.anndata_copy import AnnDataCopy
 from adata.conversion.base import ConversionPlan, Converter, Format, Options
 from adata.storage import has_valid_anndata_root_attrs, is_zarr_path
@@ -100,6 +100,14 @@ FORMATS: Dict[str, Format] = {
         ),
         importer=text.TextImport(),
     ),
+    # No content sniff: any HDF5 file would pass one, h5ad files among them.
+    # A plain `.h5` is read with `--from hdf5`.
+    "hdf5": Format(
+        name="hdf5",
+        description="One 2-D dataset of a plain HDF5 file, as anndata's read_hdf reads it",
+        extensions=hdf5.EXTENSIONS,
+        importer=hdf5.Hdf5Import(),
+    ),
     # A folder, so no extension: chosen as output with `--to 10x-mtx`.
     "10x-mtx": Format(
         name="10x-mtx",
@@ -159,6 +167,11 @@ def detect_format(path: Path) -> str:
             f"'{path.name}' is a single Matrix Market file, which `convert` "
             "does not read on its own: give the folder holding it with its "
             "barcodes and features, or use `adata import sparse`."
+        )
+    if path.is_file() and h5py.is_hdf5(path):
+        raise ValueError(
+            f"'{path.name}' is HDF5, but no format this reads: pass --from hdf5 "
+            "with --key to read one of its datasets as X."
         )
     raise ValueError(
         f"Cannot tell what format '{path}' is. Pass --from, one of: {_names()}."

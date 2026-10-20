@@ -204,7 +204,8 @@ def test_an_unrecognised_input_needs_from(tmp_path):
 
     result = runner.invoke(app, ["convert", str(plain), "-o", str(tmp_path / "o.h5ad")])
     assert result.exit_code == 1
-    assert "Cannot tell what format" in _out(result) and "--from" in _out(result)
+    assert "is HDF5, but no format this reads" in _out(result)
+    assert "--from hdf5" in _out(result)
 
     # Named as a 10x file would be, it is still not one: content decides.
     result = runner.invoke(

@@ -109,6 +109,7 @@ adata convert splitpipe_out -o parse.h5ad
 adata convert velocyto.loom -o velocyto.h5ad
 adata convert counts.h5ad -o counts.loom
 adata convert GSE123_counts.txt.gz -o counts.h5ad --transpose
+adata convert matrix.hdf5 -o matrix.h5ad --key data/counts
 ```
 
 | Flag | Meaning |
@@ -131,6 +132,7 @@ adata convert GSE123_counts.txt.gz -o counts.h5ad --transpose
 | `parse` | a folder | Parse Biosciences split-pipe: a run, a sample or a `DGE_*` folder | no |
 | `loom` | `.loom` | loompy, velocyto, kallisto\|bustools, SCope (pySCENIC, SCENIC+, pycistopic); spec 2 and 3 | spec 3.0.0, as loompy 3 writes it |
 | `text` | `.csv`, `.tsv`, `.tab`, `.txt`, `.data`, each also `.gz` | a dense matrix, as anndata's `read_csv` and `read_text` read it | no |
+| `hdf5` | `.hdf5`, `.he5`, `.hdf`; a plain `.h5` with `--from hdf5` | one 2-D dataset, as anndata's `read_hdf` reads it | no |
 
 Formats other than h5ad and Zarr convert to and from AnnData only: to turn a
 10x file into another format, convert it to `.h5ad` first.
@@ -494,6 +496,42 @@ numpy, so memory is set by the block rather than by the file: once to find
 the layout, check every line and pick the dtype, and once to write X. A
 transposed file's entries are sorted into cells through on-disk buckets.
 Gzip is found by content, whatever the name.
+
+### HDF5 matrices
+
+One 2-D numeric dataset of a plain HDF5 file, as anndata's `read_hdf`
+reads it. `--key` names it; without `--key` nothing is written, and the
+refusal lists the file's 2-D numeric datasets with their shapes and
+dtypes, and the 1-D ones that could name their rows and columns.
+
+```bash
+adata convert matrix.hdf5 -o matrix.h5ad
+adata convert matrix.hdf5 -o matrix.h5ad --key data/counts
+adata convert export.h5 -o export.h5ad --from hdf5 --key exprs --transpose
+adata convert matrix.hdf5 -o matrix.h5ad --key counts --obs-names-key barcodes --var-names-key genes
+```
+
+| HDF5 file | AnnData |
+|---|---|
+| the dataset `--key` names (its rows are cells; genes with `--transpose`) | X, CSR (`--dense` keeps it dense), its dtype kept |
+| `row_names` and `col_names` at the root, naming the dataset's rows and columns | obs and var names |
+| the key and the names' datasets | `uns["hdf5"]` |
+
+| Flag | Meaning |
+|---|---|
+| `--key` | The 2-D dataset that becomes X |
+| `--transpose` | The dataset holds genes as rows and cells as columns |
+| `--obs-names-key`, `--var-names-key` | The 1-D datasets naming the cells and the genes, in place of `row_names` and `col_names` |
+| `--dense` | Keep X dense (default: CSR) |
+| `--make-unique` | Suffix repeated var names, as `var_names_make_unique` does |
+
+A plain `.h5` is claimed by 10x Genomics files, so one that is no 10x
+matrix needs `--from hdf5`; `convert` says so. A `row_names` or `col_names`
+whose length does not fit is left out with a warning, and that axis is
+numbered. The dataset is read a slab of cells at a time, a whole number of
+its chunks along the cell axis (columns, with `--transpose`), as a loom's
+matrix is, so each chunk is decompressed once and memory is set by the
+slab.
 
 ## `recast`
 

@@ -50,6 +50,7 @@ from rich.console import Console
 
 from adata.conversion import scope
 from adata.conversion.base import ConversionPlan, Converter, Options
+from adata.conversion.dense import slab_size, write_dense_matrix
 from adata.conversion.features import (
     STRING_STEP,
     Target,
@@ -86,7 +87,6 @@ from adata.storage import (
     is_group,
     is_zarr_group,
     open_store,
-    with_compression,
 )
 from adata.util.names import claim, count_duplicates, make_index_unique, storable
 
@@ -696,54 +696,19 @@ def _write_uns(root: Any, handle: h5py.File, detail: _Import) -> None:
 
 def slab_cells(n_genes: int, itemsize: int, chunk_width: int) -> int:
     """Cells per slab: as many whole chunk columns as `SLAB_BYTES` holds, one at least."""
-    per_cell = max(1, n_genes * itemsize)
-    fit = max(1, SLAB_BYTES // per_cell)
-    return max(chunk_width, fit // chunk_width * chunk_width)
+    return slab_size(n_genes, itemsize, chunk_width, SLAB_BYTES)
 
 
 def _write_matrix(ds: h5py.Dataset, root: Any, places: List[str], detail: _Import) -> None:
     """One loom matrix, read once, written to every place that holds it."""
-    n_genes, n_cells = ds.shape
-    width = ds.chunks[1] if ds.chunks else _CHUNK
-    slab = slab_cells(n_genes, ds.dtype.itemsize, width)
     parents = [
         (root, "X") if place == "X" else (root["layers"], place.split("/", 1)[1])
         for place in places
     ]
-    backend = "zarr" if is_zarr_group(root) else "hdf5"
-    if detail.dense:
-        targets = []
-        for parent, name in parents:
-            kw: Dict[str, Any] = {"chunks": (min(max(n_cells, 1), slab), max(n_genes, 1))}
-            if detail.compression is not None:
-                kw = with_compression(
-                    kw, detail.compression, shape=(n_cells, n_genes), dtype=ds.dtype,
-                    backend=backend, zarr_format=detail.zarr_format,
-                )
-            target = create_dataset(parent, name, shape=(n_cells, n_genes), dtype=ds.dtype, **kw)
-            spec.set_encoding(target, spec.ARRAY)
-            targets.append(target)
-        for lo in range(0, n_cells, slab):
-            block = np.asarray(ds[:, lo : lo + slab]).T
-            for target in targets:
-                target[lo : lo + block.shape[0]] = block
-        return
-
-    appenders = [
-        CsrAppender(
-            parent, name, shape=(n_cells, n_genes), data_dtype=ds.dtype,
-            compression=detail.compression,
-        )
-        for parent, name in parents
-    ]
-    for lo in range(0, n_cells, slab):
-        block = np.asarray(ds[:, lo : lo + slab]).T
-        rows, cols = np.nonzero(block)
-        values = block[rows, cols]
-        for appender in appenders:
-            appender.append(rows + lo, cols, values)
-    for appender in appenders:
-        appender.finish()
+    write_dense_matrix(
+        ds, parents, cells_axis=1, dense=detail.dense, compression=detail.compression,
+        zarr_format=detail.zarr_format, slab_bytes=SLAB_BYTES,
+    )
 
 
 # ---------------------------------------------------------------------------

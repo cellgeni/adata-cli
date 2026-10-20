@@ -49,10 +49,15 @@ class Options:
     obs_names_attr: Optional[str] = None
     var_names_attr: Optional[str] = None
 
-    # Reading a text matrix.
+    # Reading a text matrix (and, --transpose, a plain HDF5 one).
     delimiter: Optional[str] = None
     transpose: bool = False
     first_column_names: Optional[bool] = None
+
+    # Reading a plain HDF5 matrix.
+    key: Optional[str] = None
+    obs_names_key: Optional[str] = None
+    var_names_key: Optional[str] = None
 
 
 @dataclass

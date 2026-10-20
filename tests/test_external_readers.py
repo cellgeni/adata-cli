@@ -27,6 +27,7 @@ from adata.cli import app
 from tests.conftest import (
     write_10x_h5,
     write_cellbender_h5,
+    write_hdf5_matrix,
     write_10x_mtx,
     write_10x_v2_h5,
     write_loom,
@@ -734,5 +735,46 @@ for path, reader, delimiter, out, transposed in json.loads(sys.argv[1]):
         problems.append(f"{path}: obs_names differ")
     if list(ref.var_names) != list(got.var_names):
         problems.append(f"{path}: var_names differ")
+print("RESULT " + json.dumps(problems))
+"""
+
+
+@pytest.mark.parametrize("transpose", [False, True], ids=["cells-as-rows", "transposed"])
+def test_an_hdf5_matrix_imports_as_anndata_reads_it(tmp_path, transpose):
+    """anndata's read_hdf is the reference, its names from row_names and
+    col_names; a transposed dataset against `.T`."""
+    truth = write_hdf5_matrix(tmp_path / "m.hdf5", transpose=transpose, chunks=(4, 4))
+    out = tmp_path / "out.h5ad"
+    _convert(str(truth.path), "-o", str(out), "--key", truth.key,
+             *(["--transpose"] if transpose else []))
+    problems = _run(
+        ["anndata", "scipy"], _COMPARE_HDF5, str(truth.path), truth.key, str(out), str(transpose)
+    )
+    assert problems == [], problems
+
+
+_COMPARE_HDF5 = r"""
+import json, sys, warnings
+warnings.filterwarnings("ignore")
+import numpy as np, anndata as ad
+
+ref = ad.io.read_hdf(sys.argv[1], sys.argv[2])
+if sys.argv[4] == "True":
+    ref = ref.T
+got = ad.read_h5ad(sys.argv[3])
+dense = lambda m: m.toarray() if hasattr(m, "toarray") else np.asarray(m)
+problems = []
+if ref.shape != got.shape:
+    problems.append(f"shape {ref.shape} != {got.shape}")
+else:
+    if not np.array_equal(dense(ref.X), dense(got.X)):
+        problems.append("X differs")
+    if dense(ref.X).dtype != got.X.dtype:
+        problems.append(f"dtype {dense(ref.X).dtype} != {got.X.dtype}")
+    for axis in ("obs_names", "var_names"):
+        mine = [str(v) for v in getattr(got, axis)]
+        theirs = [v.decode() if isinstance(v, bytes) else str(v) for v in getattr(ref, axis)]
+        if mine != theirs:
+            problems.append(f"{axis} differ")
 print("RESULT " + json.dumps(problems))
 """

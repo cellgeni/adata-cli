@@ -533,6 +533,9 @@ _CONVERT_FLAGS = {
     "delimiter": "--delimiter",
     "transpose": "--transpose",
     "first_column_names": "--first-column-names",
+    "key": "--key",
+    "obs_names_key": "--obs-names-key",
+    "var_names_key": "--var-names-key",
 }
 
 #: Flags that only make sense for format conversion; with recast's flags,
@@ -692,7 +695,7 @@ def convert(
     dense: bool = typer.Option(
         False,
         "--dense",
-        help="loom or text input: keep X (and the layers) dense (default: sparse CSR)",
+        help="loom, text or HDF5 input: keep X (and the layers) dense (default: sparse CSR)",
     ),
     obs_names_attr: Optional[str] = typer.Option(
         None,
@@ -714,13 +717,31 @@ def convert(
     transpose: bool = typer.Option(
         False,
         "--transpose",
-        help="text input: the file holds genes as rows and cells as columns",
+        help="text or HDF5 input: the matrix holds genes as rows and cells as columns",
     ),
     first_column_names: Optional[bool] = typer.Option(
         None,
         "--first-column-names/--no-first-column-names",
         help="text input: whether the first column names the rows (default: "
         "detected, as anndata detects it)",
+    ),
+    key: Optional[str] = typer.Option(
+        None,
+        "--key",
+        help="HDF5 input: the 2-D dataset that becomes X (without it, the "
+        "candidates are listed)",
+    ),
+    obs_names_key: Optional[str] = typer.Option(
+        None,
+        "--obs-names-key",
+        help="HDF5 input: the dataset naming the cells (default row_names, "
+        "col_names with --transpose)",
+    ),
+    var_names_key: Optional[str] = typer.Option(
+        None,
+        "--var-names-key",
+        help="HDF5 input: the dataset naming the genes (default col_names, "
+        "row_names with --transpose)",
     ),
     # Deprecated: recast's flags, so `convert` keeps working as it did until
     # 1.0.0. Hidden from --help; the old matrix paths arrive in ctx.args.
@@ -745,7 +766,8 @@ def convert(
     counts, and written as Cell Ranger writes it. MTX folders from Cell
     Ranger and STARsolo, velocyto's included, and Parse split-pipe output
     are read in two streaming passes, as are text tables (.csv, .tsv, .txt,
-    gzipped too), read as anndata's read_csv and read_text read them. A loom
+    gzipped too), read as anndata's read_csv and read_text read them; a plain
+    HDF5 dataset is read as read_hdf reads it (--key names it). A loom
     is read as anndata.read_loom reads it; a SCope loom (pySCENIC, SCENIC+,
     pycistopic) also gives its regulons as dataframes in obsm and varm, its
     embeddings and clusterings named from its MetaData, and the MetaData in
@@ -777,6 +799,7 @@ def convert(
         adata convert pyscenic_output.loom -o scenic.h5ad
         adata convert counts.h5ad -o counts.loom
         adata convert GSE123_counts.txt.gz -o counts.h5ad --transpose
+        adata convert matrix.hdf5 -o matrix.h5ad --key data/counts
     """
     entries = list(ctx.args)
     recast_flags = _given(ctx, _RECAST_FLAGS)
@@ -871,6 +894,9 @@ def convert(
                 delimiter=delimiter,
                 transpose=transpose,
                 first_column_names=first_column_names,
+                key=key,
+                obs_names_key=obs_names_key,
+                var_names_key=var_names_key,
             ),
         )
     except Exception as e:
