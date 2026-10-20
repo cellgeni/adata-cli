@@ -185,6 +185,8 @@ def _build_sidecar(case: Case, inputs: List[Path], workdir: Path) -> Optional[Pa
     """
     if case.sidecar == "10x-mtx":
         return _build_mtx_sidecar(case, inputs, workdir)
+    if case.sidecar == "dense-csv":
+        return _build_dense_csv_sidecar(case, inputs, workdir)
     if case.sidecar != "csv":
         return None
     # Named for its input too: a work directory reused across tiers must not
@@ -197,6 +199,49 @@ def _build_sidecar(case: Case, inputs: List[Path], workdir: Path) -> Optional[Pa
 
     with h5py.File(inputs[0], "r") as handle:
         read_elem(handle["obs"]).to_csv(path)
+    return path
+
+
+#: Cells in the dense-CSV sidecar: a dense table of every cell of a large
+#: tier would run to terabytes, and anndata's read_csv holds it all.
+DENSE_CSV_CELLS = 10_000
+
+
+def _build_dense_csv_sidecar(case: Case, inputs: List[Path], workdir: Path) -> Path:
+    """The first input's first cells as a dense CSV, as pandas' to_csv writes
+    one: a header with a corner cell, then a named row per cell. The
+    fixture's counts are whole floats, so they are written as integers."""
+    import h5py
+    import numpy as np
+
+    from adata.elements.read import element_len, read_str_all, read_str_chunk, resolve_index
+    from adata.formats.textio import format_int_rows
+
+    path = workdir / f"{case.name}-{inputs[0].stem}-sidecar.csv"
+    if path.exists():
+        return path
+    partial = path.with_suffix(".partial")
+    with h5py.File(inputs[0], "r") as handle, open(partial, "wb") as out:
+        X, obs, var = handle["X"], handle["obs"], handle["var"]
+        obs_index, _ = resolve_index(obs, "obs")
+        n = min(DENSE_CSV_CELLS, element_len(obs_index))
+        cells = read_str_chunk(obs_index, 0, n, {}, parent_group=obs)
+        genes = read_str_all(resolve_index(var, "var")[0], parent_group=var)
+        out.write((",".join(["", *genes]) + "\n").encode())
+        indptr = X["indptr"][: len(cells) + 1]
+        step = 1000
+        for lo in range(0, len(cells), step):
+            hi = min(lo + step, len(cells))
+            block = np.zeros((hi - lo, len(genes)), dtype=np.int64)
+            start, end = int(indptr[lo]), int(indptr[hi])
+            rows = np.repeat(np.arange(hi - lo), np.diff(indptr[lo : hi + 1]))
+            block[rows, X["indices"][start:end]] = X["data"][start:end]
+            lines = format_int_rows(list(block.T), sep=b",").split(b"\n")[:-1]
+            out.write(b"".join(
+                cell.encode() + b"," + line + b"\n" for cell, line in zip(cells[lo:hi], lines)
+            ))
+    # Renamed only when whole: a failed build must not be reused as a sidecar.
+    partial.rename(path)
     return path
 
 

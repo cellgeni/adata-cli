@@ -17,7 +17,7 @@ from typing import Dict, FrozenSet, List, Optional
 
 import h5py
 
-from adata.conversion import cellbender, loom, mtx, parse, tenx
+from adata.conversion import cellbender, loom, mtx, parse, tenx, text
 from adata.conversion.anndata_copy import AnnDataCopy
 from adata.conversion.base import ConversionPlan, Converter, Format, Options
 from adata.storage import has_valid_anndata_root_attrs, is_zarr_path
@@ -91,6 +91,15 @@ FORMATS: Dict[str, Format] = {
         importer=loom.LoomImport(),
         exporter=loom.LoomExport(),
     ),
+    # No content sniff: text has no signature, so the extension decides.
+    "text": Format(
+        name="text",
+        description="Delimited text matrix (.csv, .tsv, .txt; gzipped too), as anndata's read_csv reads it",
+        extensions=tuple(
+            ext + gz for ext in text.EXTENSIONS for gz in ("", ".gz")
+        ),
+        importer=text.TextImport(),
+    ),
     # A folder, so no extension: chosen as output with `--to 10x-mtx`.
     "10x-mtx": Format(
         name="10x-mtx",
@@ -137,8 +146,13 @@ def detect_format(path: Path) -> str:
         if fmt.anndata and fmt.sniff is not None and fmt.sniff(path):
             return fmt.name
     suffix = path.suffix.lower()
+    name = path.name.lower()
     for fmt in FORMATS.values():
-        if (fmt.anndata or fmt.sniff is None) and suffix in fmt.extensions:
+        if (fmt.anndata or fmt.sniff is None) and (
+            suffix in fmt.extensions
+            # A compound extension: `.csv.gz`.
+            or any(ext.count(".") > 1 and name.endswith(ext) for ext in fmt.extensions)
+        ):
             return fmt.name
     if suffix in (".mtx", ".gz") and path.name.lower().endswith((".mtx", ".mtx.gz")):
         raise ValueError(

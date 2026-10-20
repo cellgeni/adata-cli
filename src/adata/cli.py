@@ -530,6 +530,9 @@ _CONVERT_FLAGS = {
     "dense": "--dense",
     "obs_names_attr": "--obs-names-attr",
     "var_names_attr": "--var-names-attr",
+    "delimiter": "--delimiter",
+    "transpose": "--transpose",
+    "first_column_names": "--first-column-names",
 }
 
 #: Flags that only make sense for format conversion; with recast's flags,
@@ -689,7 +692,7 @@ def convert(
     dense: bool = typer.Option(
         False,
         "--dense",
-        help="loom input: keep X and the layers dense (default: sparse CSR)",
+        help="loom or text input: keep X (and the layers) dense (default: sparse CSR)",
     ),
     obs_names_attr: Optional[str] = typer.Option(
         None,
@@ -701,6 +704,23 @@ def convert(
         "--var-names-attr",
         help="loom input: the row attribute naming genes (default Accession, "
         "or Gene with --var-names gene_symbols)",
+    ),
+    delimiter: Optional[str] = typer.Option(
+        None,
+        "--delimiter",
+        help="text input: the delimiter: a character, tab or whitespace "
+        "(default from the extension: , for .csv, tab for .tsv, whitespace for .txt)",
+    ),
+    transpose: bool = typer.Option(
+        False,
+        "--transpose",
+        help="text input: the file holds genes as rows and cells as columns",
+    ),
+    first_column_names: Optional[bool] = typer.Option(
+        None,
+        "--first-column-names/--no-first-column-names",
+        help="text input: whether the first column names the rows (default: "
+        "detected, as anndata detects it)",
     ),
     # Deprecated: recast's flags, so `convert` keeps working as it did until
     # 1.0.0. Hidden from --help; the old matrix paths arrive in ctx.args.
@@ -724,12 +744,13 @@ def convert(
     read_10x_h5 or read_10x_mtx (gex_only=False) reads it, keeping integer
     counts, and written as Cell Ranger writes it. MTX folders from Cell
     Ranger and STARsolo, velocyto's included, and Parse split-pipe output
-    are read in two streaming passes. A loom is read as anndata.read_loom
-    reads it; a SCope loom (pySCENIC, SCENIC+, pycistopic) also gives its
-    regulons as dataframes in obsm and varm, its embeddings and clusterings
-    named from its MetaData, and the MetaData in uns["scope"]. Features are
-    named by gene id, unique but in probe-level (Flex) matrices;
-    --var-names gene_symbols names them as scanpy does.
+    are read in two streaming passes, as are text tables (.csv, .tsv, .txt,
+    gzipped too), read as anndata's read_csv and read_text read them. A loom
+    is read as anndata.read_loom reads it; a SCope loom (pySCENIC, SCENIC+,
+    pycistopic) also gives its regulons as dataframes in obsm and varm, its
+    embeddings and clusterings named from its MetaData, and the MetaData in
+    uns["scope"]. Features are named by gene id, unique but in probe-level
+    (Flex) matrices; --var-names gene_symbols names them as scanpy does.
 
     Nothing is written until every check has passed, and the output is moved
     into place only once complete: a failed conversion leaves nothing
@@ -755,6 +776,7 @@ def convert(
         adata convert velocyto.loom -o velocyto.h5ad
         adata convert pyscenic_output.loom -o scenic.h5ad
         adata convert counts.h5ad -o counts.loom
+        adata convert GSE123_counts.txt.gz -o counts.h5ad --transpose
     """
     entries = list(ctx.args)
     recast_flags = _given(ctx, _RECAST_FLAGS)
@@ -846,6 +868,9 @@ def convert(
                 dense=dense,
                 obs_names_attr=obs_names_attr,
                 var_names_attr=var_names_attr,
+                delimiter=delimiter,
+                transpose=transpose,
+                first_column_names=first_column_names,
             ),
         )
     except Exception as e:

@@ -49,6 +49,11 @@ class Options:
     obs_names_attr: Optional[str] = None
     var_names_attr: Optional[str] = None
 
+    # Reading a text matrix.
+    delimiter: Optional[str] = None
+    transpose: bool = False
+    first_column_names: Optional[bool] = None
+
 
 @dataclass
 class ConversionPlan:

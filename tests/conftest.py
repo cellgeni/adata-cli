@@ -964,3 +964,67 @@ def write_scope_loom(
     return ScopeTruth(
         loom, regulons, auc, membership, embeddings, clusterings, metadata, var_names
     )
+
+
+# ---------------------------------------------------------------------------
+# Text matrices, in the layouts anndata's read_csv / read_text tell apart:
+# a header with a corner cell over the row names (pandas' to_csv), a header
+# one field short (R's write.table), column names in the last comment line,
+# or no header at all.
+
+
+@dataclass
+class TextTruth:
+    path: Path
+    counts: np.ndarray  # cells x genes
+    cells: List[str]
+    genes: List[str]
+
+
+def write_text_matrix(
+    path: Path,
+    counts: Optional[np.ndarray] = None,
+    *,
+    n_cells: int = 12,
+    n_genes: int = 5,
+    delimiter: Optional[str] = ",",
+    header: str = "corner",
+    row_names: bool = True,
+    transpose: bool = False,
+    gz: bool = False,
+    quote: bool = False,
+    seed: int = 0,
+) -> TextTruth:
+    """`counts` (cells x genes) as text; genes as rows with `transpose`.
+
+    `delimiter=None` separates fields with runs of spaces, as read_text
+    reads them. `header` is "corner", "short", "comment" or "none".
+    """
+    import gzip
+
+    if counts is None:
+        counts = np.random.default_rng(seed).poisson(0.8, (n_cells, n_genes))
+    cells = [f"cell{i:03d}" for i in range(counts.shape[0])]
+    genes = [f"Gene{j}" for j in range(counts.shape[1])]
+    table, rows, columns = (counts.T, genes, cells) if transpose else (counts, cells, genes)
+    sep = "  " if delimiter is None else delimiter
+    named = (lambda s: f'"{s}"') if quote else (lambda s: s)
+
+    def value(v) -> str:
+        return str(int(v)) if float(v).is_integer() else repr(float(v))
+
+    lines = []
+    if header == "comment":
+        lines += ["# written by a test", "# " + " ".join(columns)]
+    elif header == "corner":
+        lines.append(sep.join([named("") if quote else "", *map(named, columns)]))
+    elif header == "short":
+        lines.append(sep.join(map(named, columns)))
+    for name, row in zip(rows, table):
+        fields = [value(v) for v in row]
+        lines.append(sep.join(([named(name)] if row_names else []) + fields))
+    data = ("\n".join(lines) + "\n").encode()
+    if gz:
+        data = gzip.compress(data)
+    path.write_bytes(data)
+    return TextTruth(path, np.asarray(counts), cells, genes)
