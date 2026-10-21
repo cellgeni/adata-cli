@@ -872,3 +872,26 @@ def test_a_pandas_15_cistopic_pickle_imports_as_pycistopic_holds_it(tmp_path):
     _convert(str(path), "-o", str(out))
     problems = _run(_PYCISTOPIC_ENV, _COMPARE_CISTOPIC, str(path), str(out), python="3.11")
     assert problems == [], problems
+
+
+_CONVERT_HERE = r"""
+import json, sys
+from pathlib import Path
+import pandas as pd
+from rich.console import Console
+from adata.commands.convert import convert_store
+convert_store(Path(sys.argv[1]), Path(sys.argv[2]), Console(quiet=True))
+print("RESULT " + json.dumps(pd.__version__))
+"""
+
+
+def test_a_pandas_15_cistopic_pickle_converts_under_pandas_2_too(tmp_path):
+    """The extra allows pandas 2 as well as 3; this environment has 3, so
+    the conversion itself also runs under pandas 2.2, with this checkout."""
+    path, out = tmp_path / "cistopic_obj.pkl", tmp_path / "out.h5ad"
+    _run(_PYCISTOPIC_ENV, _WRITE_CISTOPIC, str(path), python="3.11")
+    root = str(Path(__file__).resolve().parent.parent)
+    version = _run([root, "pandas==2.2.3", "scipy"], _CONVERT_HERE, str(path), str(out))
+    assert version.startswith("2.2")
+    problems = _run(_PYCISTOPIC_ENV, _COMPARE_CISTOPIC, str(path), str(out), python="3.11")
+    assert problems == [], problems
