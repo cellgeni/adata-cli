@@ -35,6 +35,7 @@ separate jobs.
 | `test_hdf5.py` | One dataset of a plain HDF5 file: the listing without `--key`, `read_hdf`'s `row_names` / `col_names` and other names, `--transpose` CSR and dense, slabs of chunks, `--from hdf5` on `.h5` |
 | `test_cistopic.py` | pycisTopic pickles read through the allowlist: a CistopicObject's matrices, frames, model and projections, an imputed-features pickle, a pickle naming `os.system` refused unrun, the missing-extra hint |
 | `test_pandas_frame.py` | Each pandas dtype written as anndata writes it, on every backend |
+| `test_concat_axis_elements.py` | `concat` on obsm dataframes and varm, against `anndata.concat` for each join and merge strategy |
 | `test_scope.py` | SCope looms as pySCENIC's `export2loom` writes them: regulons as dataframes, embeddings and clusterings named from `MetaData`, plain or compressed `MetaData`, region looms, R's logicals and factors, renamed fields, small blocks |
 | `test_table.py` | The streaming CSV reader against pandas: column types, quoting, row subsets, blocks, refusals |
 | `test_mtx_codec.py`, `test_csr_build.py` | The streaming Matrix Market reader and writer against scipy, and the bucket sort they and `recast` share |

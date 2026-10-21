@@ -90,6 +90,7 @@ def _store(
     n_categories: int = 0,
     obs_kind: Optional[str] = None,
     shared_var: bool = True,
+    frames: bool = False,
 ) -> Path:
     """One input store. Every argument is an axis a guard can scale."""
     obs = pd.DataFrame(index=[f"{name}c{i}" for i in range(n_obs)])
@@ -124,6 +125,15 @@ def _store(
         var=var,
     )
     obj.obsm["X_pca"] = np.zeros((n_obs, 3), dtype="float32")
+    if frames:
+        # What a SCope import leaves: dataframes in obsm and varm, and an array in varm.
+        obj.obsm["RegulonsAUC"] = pd.DataFrame(
+            {"r0": np.arange(n_obs, dtype="float64"), "r1": np.zeros(n_obs)}, index=obs.index
+        )
+        obj.varm["Regulons"] = pd.DataFrame(
+            {"r0": np.arange(n_var) % 2, "r1": np.ones(n_var, dtype="int64")}, index=var.index
+        )
+        obj.varm["topic_region"] = np.ones((n_var, 3))
     obj.write_h5ad(path)
     return path
 
@@ -205,6 +215,30 @@ def test_concat_reads_grow_linearly_in_var_count(tmp_path, merge):
         return io.reads
 
     assert_grows_linearly(measure, what=f"concat --merge {merge}", axis="n_var")
+
+
+@pytest.mark.parametrize("merge", ["same", "unique", "first", "only"])
+def test_concat_varm_reads_grow_linearly_in_var_count(tmp_path, merge):
+    """varm is merged as var's columns are: read once per input, not per gene."""
+
+    def measure(n: int) -> int:
+        files = _inputs(tmp_path, f"varm{merge}{n}", n_var=n, frames=True)
+        with count_io() as io:
+            concat_on_disk(files, tmp_path / f"om{merge}{n}.h5ad", QUIET, merge=merge)
+        return io.reads
+
+    assert_grows_linearly(measure, what=f"concat varm --merge {merge}", axis="n_var")
+
+
+@pytest.mark.parametrize("join", ["inner", "outer"])
+def test_concat_obsm_frames_grow_linearly_in_obs_count(tmp_path, join):
+    def measure(n: int) -> int:
+        files = _inputs(tmp_path, f"obsmf{join}{n}", n_obs=n, n_var=4, frames=True)
+        with count_io() as io:
+            concat_on_disk(files, tmp_path / f"of{join}{n}.h5ad", QUIET, join=join)
+        return io.reads
+
+    assert_grows_linearly(measure, what=f"concat obsm dataframes ({join})", axis="n_obs")
 
 
 @pytest.mark.parametrize("join", ["inner", "outer"])

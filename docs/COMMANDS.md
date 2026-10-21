@@ -678,6 +678,13 @@ obs columns keep their dtypes: categoricals union their category sets, nullable
 columns keep their masks, and a column missing from one input is padded rather
 than dropped.
 
+obsm entries present in every input are stacked: arrays as they are, and
+dataframes (a SCope import's `RegulonsAUC`) as obs is, their columns
+following `--join`. var's columns and varm (a SCope import's `Regulons`,
+pycisTopic's `topic_region`) follow `--merge`, compared on the output's
+genes: an input lacking some of them, as in an outer join, counts as not
+having the entry. Without `--merge`, varm is dropped with a note.
+
 `obsp`, `varp` and `raw` are **not** carried over — a pairwise value has no
 meaning between cells from different inputs. anndata's own `concat_on_disk`
 refuses these too.
