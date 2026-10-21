@@ -131,7 +131,7 @@ adata convert cistopic_obj.pkl -o atac.h5ad
 | `cellbender` | `.h5` | CellBender `remove-background` 0.2 and later | no |
 | `10x-mtx` | a folder (`--to 10x-mtx`) | Cell Ranger 2 and 3+, STARsolo (velocyto too) | Cell Ranger 3+ layout, gzipped |
 | `parse` | a folder | Parse Biosciences split-pipe: a run, a sample or a `DGE_*` folder | no |
-| `loom` | `.loom` | loompy, velocyto, kallisto\|bustools, SCope (pySCENIC, SCENIC+, pycistopic); spec 2 and 3 | spec 3.0.0, as loompy 3 writes it |
+| `loom` | `.loom` | loompy, velocyto, kallisto\|bustools, SCope (pySCENIC, SCENIC+, pycistopic); spec 2 and 3 | spec 3.0.0, as loompy 3 writes it; a SCope loom with `--scope` |
 | `text` | `.csv`, `.tsv`, `.tab`, `.txt`, `.data`, each also `.gz` | a dense matrix, as anndata's `read_csv` and `read_text` read it | no |
 | `hdf5` | `.hdf5`, `.he5`, `.hdf`; a plain `.h5` with `--from hdf5` | one 2-D dataset, as anndata's `read_hdf` reads it | no |
 | `cistopic` | `.pkl`, `.pickle`, gzipped too | a pycisTopic `CistopicObject` or `CistopicImputedFeatures`, without pycisTopic (needs `pyadata-cli[pickle]`) | no |
@@ -449,8 +449,49 @@ where genes go, so var is named by region, and SCENIC+'s `linkedGene` is a
 var column. The compound attributes are read a block of cells at a time,
 so memory is one block across all regulons, never the table.
 
-Writing a loom writes a plain one: an AnnData's regulons, embeddings and
-clusterings are not yet written in SCope's form (#61).
+#### Writing SCope looms
+
+`--scope` writes a loom the SCope viewer reads: an AnnData's regulons,
+embeddings and clusterings in SCope's form, with a `MetaData` naming them.
+Without it a loom export is plain, and one of an AnnData that came from a
+SCope loom says that `--scope` would keep its regulons.
+
+```bash
+adata convert scenic.h5ad -o scenic.loom --scope
+adata convert scenic.h5ad -o scenic.loom --scope --clusterings leiden,cell_type
+adata convert scenic.h5ad -o scenic.loom --scope --default-embedding X_umap
+```
+
+| AnnData | SCope loom |
+|---|---|
+| a dataframe in obsm or varm (`RegulonsAUC`, `Regulons`, `ClusterMarkers_<id>`) | a compound `col_attrs` or `row_attrs` of its numeric columns |
+| `obsm` arrays of two columns | `Embeddings_X` and `Embeddings_Y`, a field per id; the default (id -1) as `Embedding` too |
+| the categorical obs columns a SCope import recorded, and those `--clusterings` names | `Clusterings`, int codes per clustering, with `ClusterID` for the first; their clusters described in `MetaData` |
+| other obs columns | plain attributes, as ever, listed in `MetaData` as metrics (numbers) and annotations (up to 245 values) |
+| `uns["scope"]` | `MetaData`'s regulon thresholds, and the recorded ids and names |
+
+| Flag | Meaning |
+|---|---|
+| `--scope` | Write a SCope loom |
+| `--clusterings` | Categorical obs columns to write as clusterings, comma separated |
+| `--default-embedding` | The obsm key SCope shows first (default: the recorded default, else `X_umap`, else `X_tsne`, else the first) |
+
+An AnnData that came from a SCope loom keeps its embeddings' and
+clusterings' ids and names, recorded in `uns["scope"]`, so a SCope loom
+converts to h5ad and back with the same attributes. As SCope expects,
+clusterings and their clusters are numbered 0..n-1 in order, regulon names
+lose their spaces (`TP53 (5g)` becomes `TP53_(5g)`, alike in the AUC and
+the Regulons, with a warning), and cluster markers are written only with
+their metrics (`ClusterMarkers_<id>_avg_logFC` and the like, or those a
+SCope import recorded). `MetaData` is plain JSON, which SCope reads as it
+reads compressed. A clustering that is not categorical is refused, as is a
+table with more columns than HDF5 can hold in one compound attribute (its
+type must fit 64 KiB, a limit pySCENIC's own export shares), before any
+output exists. Attributes are written a block of cells at a time.
+
+SCope opens looms without loompy's validation, which rejects compound
+attributes; so do `loompy.connect(..., validate=False)` and the pySCENIC
+tutorial's recipe, which CI uses to read our SCope looms back.
 
 ### Text tables
 

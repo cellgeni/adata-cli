@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import zlib
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
@@ -395,3 +396,330 @@ def _write_thresholds(parent: Any, entries: Any) -> None:
         else:
             columns[key] = ["" if row.get(key) is None else str(row[key]) for row in rows]
     _write_frame(parent, "regulon_thresholds", [str(row["regulon"]) for row in rows], columns)
+
+
+# ---------------------------------------------------------------------------
+# export: an AnnData as a SCope loom (`adata convert ... -o x.loom --scope`)
+#
+# What SCope's server reads, and must find consistent, decides the rules:
+# compound attributes with numeric fields; embedding ids as field names, -1
+# the default; clusterings as int codes with every cluster described in
+# MetaData, clustering and cluster ids 0..n-1 in list order; regulon names
+# without spaces, alike in the AUC and the Regulons attributes; markers only
+# with their metrics described. An AnnData that came from a SCope loom keeps
+# its ids and names, recorded in uns["scope"] on import.
+
+#: Categories an obs column may have to be offered as a SCope annotation, the
+#: length of SCope's colour list.
+MAX_ANNOTATION_VALUES = 245
+
+_MARKERS = re.compile(r"ClusterMarkers_(\d+)(?:_(.+))?$")
+
+
+@dataclass
+class ExportTable:
+    #: "col" or "row": which attribute group it goes to.
+    axis: str
+    key: str
+    #: The obsm or varm entry it comes from, and its numeric columns.
+    source: str
+    columns: List[str]
+    fields: List[str]
+    dtype: np.dtype
+
+
+@dataclass
+class ExportEmbedding:
+    id: int
+    name: str
+    key: str
+
+
+@dataclass
+class ExportClustering:
+    id: int
+    column: str
+    entry: Dict[str, Any]
+
+
+@dataclass
+class ScopeExport:
+    tables: List[ExportTable]
+    embeddings: List[ExportEmbedding]
+    clusterings: List[ExportClustering]
+    metadata: Dict[str, Any]
+    cluster_id: bool
+    regulons: int
+
+    def describe(self) -> str:
+        counts = ((self.regulons, "regulon"), (len(self.embeddings), "embedding"),
+                  (len(self.clusterings), "clustering"))
+        return ", ".join(f"{n:,} {noun}{'' if n == 1 else 's'}" for n, noun in counts if n)
+
+
+def compound_fits(dtype: np.dtype) -> bool:
+    """Whether HDF5 can hold `dtype`: a compound type must fit one object
+    header message, 64 KiB, so a few hundred to a thousand fields."""
+    import io
+
+    with h5py.File(io.BytesIO(), "w") as handle:
+        try:
+            handle.create_dataset("probe", shape=(1,), dtype=dtype)
+        except ValueError:
+            return False
+    return True
+
+
+def _frame_rows(group: Any) -> Dict[str, Dict[str, str]]:
+    """A small text dataframe (uns["scope"]["embeddings"]) as {index: {column: value}}."""
+    from adata.elements.read import dataframe_columns, read_str_all, resolve_index
+
+    index, name = resolve_index(group)
+    labels = read_str_all(index)
+    rows: Dict[str, Dict[str, str]] = {label: {} for label in labels}
+    for column in dataframe_columns(group, name):
+        for label, value in zip(labels, read_str_all(group[column], parent_group=group)):
+            rows[label][column] = value
+    return rows
+
+
+def _recorded(root: Any) -> Tuple[Dict[str, Any], Dict[str, Tuple[int, str]], Dict[str, Tuple[int, str]]]:
+    """What a SCope import recorded: MetaData's JSON, and the obsm keys and obs
+    columns of its embeddings and clusterings, each with its id and name."""
+    uns = root["uns"] if "uns" in root else {}
+    group = uns["scope"] if "scope" in uns else None
+    parsed: Dict[str, Any] = {}
+    embeddings: Dict[str, Tuple[int, str]] = {}
+    clusterings: Dict[str, Tuple[int, str]] = {}
+    if group is None:
+        return parsed, embeddings, clusterings
+    if "metadata" in group:
+        decoded, _ = read_metadata(_scalar_text(group["metadata"]))
+        parsed = decoded or {}
+    for key, target, slot in (("embeddings", embeddings, "obsm"), ("clusterings", clusterings, "obs")):
+        if key in group:
+            for id, row in _frame_rows(group[key]).items():
+                number = _number(id)
+                if number is not None and row.get(slot):
+                    target[row[slot]] = (int(number), row.get("name", ""))
+    return parsed, embeddings, clusterings
+
+
+def _scalar_text(ds: Any) -> str:
+    value = ds[()]
+    return value.decode("utf-8") if isinstance(value, bytes) else str(value)
+
+
+def plan_export(
+    root: Any,
+    *,
+    obs_columns: Sequence[str],
+    varm_key: str,
+    clusterings: Optional[str],
+    default_embedding: Optional[str],
+    warnings: List[str],
+) -> ScopeExport:
+    """Everything a SCope loom needs, worked out and checked before writing."""
+    from adata.elements.read import dataframe_columns, read_categories, read_str_all, resolve_index
+    from adata.util.names import natural_sorted
+
+    parsed, recorded_embeddings, recorded_clusterings = _recorded(root)
+
+    # Compound tables: every dataframe in obsm and varm.
+    tables: List[ExportTable] = []
+    for axis, where in (("col", "obsm"), ("row", varm_key)):
+        group = _resolve(root, where)
+        for key in (group if group is not None else []):
+            obj = group[key]
+            if spec.encoding_type(obj) != spec.DATAFRAME:
+                continue
+            numeric, other = [], []
+            for column in dataframe_columns(obj, resolve_index(obj)[1]):
+                member = obj[column]
+                ok = (spec.encoding_type(member) in (None, spec.ARRAY) and getattr(member, "ndim", 0) == 1
+                      and member.dtype.kind in "biuf")
+                (numeric if ok else other).append(column)
+            if other:
+                warnings.append(f"Not written in {where}/{key}: {', '.join(other)} -- a SCope "
+                                "table holds numbers only.")
+            if not numeric:
+                continue
+            regulons = key.endswith("Regulons") or key.endswith("RegulonsAUC")
+            taken: Set[str] = set()
+            fields = [claim(c.replace(" ", "_") if regulons else c, taken) for c in numeric]
+            renamed = [f"{c!r} as {f!r}" for c, f in zip(numeric, fields) if c != f]
+            if renamed:
+                warnings.append(f"Renamed in {key}: {', '.join(renamed)} -- SCope's regulon names hold no spaces.")
+            dtype = np.dtype([(f, np.dtype(obj[c].dtype.str)) for f, c in zip(fields, numeric)])
+            if not compound_fits(dtype):
+                raise ValueError(
+                    f"{where}/{key} has {len(fields):,} columns, more than HDF5 can hold "
+                    "as one compound attribute (its type must fit 64 KiB); pySCENIC's own "
+                    "export stops at the same limit. Keep fewer columns first."
+                )
+            tables.append(ExportTable(axis, key, f"{where}/{key}", numeric, fields, dtype))
+
+    # Embeddings: obsm arrays of two numeric columns.
+    obsm = root["obsm"] if "obsm" in root else {}
+    candidates = [
+        key for key in obsm
+        if spec.encoding_type(obsm[key]) in (None, spec.ARRAY) and getattr(obsm[key], "ndim", 0) == 2
+        and obsm[key].shape[1] == 2 and obsm[key].dtype.kind in "biuf"
+    ]
+    if default_embedding is not None and default_embedding not in candidates:
+        raise ValueError(
+            f"--default-embedding {default_embedding}: not an obsm array of two columns; "
+            f"there are {', '.join(candidates) or 'none'}."
+        )
+    default = default_embedding or next(
+        (k for k in candidates if recorded_embeddings.get(k, (None,))[0] == -1), None
+    ) or next((k for k in ("X_umap", "X_UMAP", "X_tsne", "X_tSNE") if k in candidates), None) or (
+        candidates[0] if candidates else None
+    )
+    used = {-1}
+    ids: Dict[str, int] = {}
+    for key in candidates:
+        recorded = recorded_embeddings.get(key, (None,))[0]
+        if key != default and recorded is not None and recorded not in used:
+            ids[key] = recorded
+            used.add(recorded)
+    next_id = 0
+    embeddings: List[ExportEmbedding] = []
+    for key in candidates:
+        if key == default:
+            id = -1
+        elif key in ids:
+            id = ids[key]
+        else:
+            while next_id in used:
+                next_id += 1
+            id = next_id
+            used.add(id)
+        name = recorded_embeddings.get(key, (None, ""))[1] or (key[2:] if key.startswith("X_") else key)
+        embeddings.append(ExportEmbedding(id, name, key))
+    embeddings.sort(key=lambda e: e.id)
+
+    # Clusterings: the recorded ones, and those --clusterings names.
+    obs = root["obs"]
+    wanted = [c for c in recorded_clusterings if c in obs]
+    for column in (clusterings or "").split(","):
+        column = column.strip()
+        if column and column not in wanted:
+            wanted.append(column)
+    entries = {str(e.get("id")): e for e in parsed.get("clusterings", []) if isinstance(e, dict)}
+    found: List[ExportClustering] = []
+    renumbered: Dict[int, int] = {}
+    for position, column in enumerate(wanted):
+        if column not in obs:
+            raise ValueError(f"--clusterings {column}: no such obs column.")
+        if spec.encoding_type(obs[column]) != spec.CATEGORICAL:
+            raise ValueError(
+                f"--clusterings {column}: not a categorical obs column, which SCope's "
+                "clusterings need (cluster ids with descriptions)."
+            )
+        old, name = recorded_clusterings.get(column, (None, column))
+        recorded = entries.get(str(old), {}) if old is not None else {}
+        if old is not None:
+            renumbered[old] = position
+        categories = [str(c) for c in read_categories(obs[column], parent_group=obs)]
+        entry = {
+            "id": position,
+            "group": recorded.get("group", ""),
+            "name": name or column,
+            "clusters": [{"id": i, "description": c} for i, c in enumerate(categories)],
+        }
+        if recorded.get("clusterMarkerMetrics"):
+            entry["clusterMarkerMetrics"] = recorded["clusterMarkerMetrics"]
+        found.append(ExportClustering(position, column, entry))
+
+    # Cluster markers: only for a clustering written, and with its metrics.
+    markers = [t for t in tables if t.axis == "row" and _MARKERS.match(t.key)]
+    keep: List[ExportTable] = [t for t in tables if t not in markers]
+    by_old: Dict[int, List[ExportTable]] = {}
+    for table in markers:
+        by_old.setdefault(int(_MARKERS.match(table.key).group(1)), []).append(table)
+    for old, group_tables in sorted(by_old.items()):
+        new = renumbered.get(old)
+        if new is None:
+            warnings.append(f"Not written: ClusterMarkers_{old} -- no clustering written has id {old}.")
+            continue
+        entry = found[new].entry
+        accessors = [m.group(2) for t in group_tables if (m := _MARKERS.match(t.key)).group(2)]
+        if not entry.get("clusterMarkerMetrics"):
+            if not accessors:
+                warnings.append(
+                    f"Not written: ClusterMarkers_{old} -- without metrics (_avg_logFC, "
+                    "_pval, ...) SCope cannot show markers."
+                )
+                continue
+            entry["clusterMarkerMetrics"] = [
+                {"accessor": a, "name": a, "description": ""} for a in accessors
+            ]
+        for table in group_tables:
+            accessor = _MARKERS.match(table.key).group(2)
+            table.key = f"ClusterMarkers_{new}" + (f"_{accessor}" if accessor else "")
+            keep.append(table)
+    tables = keep
+
+    # Metrics and annotations: the obs columns written.
+    metrics, annotations = [], []
+    for column in obs_columns:
+        member = obs[column]
+        enc = spec.encoding_type(member)
+        if enc == spec.CATEGORICAL:
+            values = [str(c) for c in read_categories(member, parent_group=obs)]
+        elif enc in (None, spec.ARRAY, spec.STRING_ARRAY) and getattr(member, "ndim", 0) == 1 \
+                and member.dtype.kind in "biuf":
+            metrics.append({"name": column})
+            continue
+        elif enc in (spec.STRING_ARRAY, spec.NULLABLE_STRING_ARRAY) or (
+            getattr(member, "dtype", None) is not None and member.dtype.kind in "OSUT"
+        ):
+            values = natural_sorted(set(read_str_all(member, parent_group=obs)))
+        elif enc in (spec.NULLABLE_INTEGER, spec.NULLABLE_BOOLEAN):
+            metrics.append({"name": column})
+            continue
+        else:
+            continue
+        if len(values) <= MAX_ANNOTATION_VALUES:
+            annotations.append({"name": column, "values": values})
+
+    # Regulon thresholds, for the regulons written.
+    auc_fields = {f for t in tables if t.axis == "col" and t.key.endswith("RegulonsAUC") for f in t.fields}
+    thresholds = []
+    for entry in parsed.get("regulonThresholds", []) or []:
+        if isinstance(entry, dict) and str(entry.get("regulon", "")).replace(" ", "_") in auc_fields:
+            thresholds.append(dict(entry, regulon=str(entry["regulon"]).replace(" ", "_")))
+    if not thresholds and "uns" in root and "scope" in root["uns"] and "regulon_thresholds" in root["uns"]["scope"]:
+        for regulon, row in _frame_rows(root["uns"]["scope"]["regulon_thresholds"]).items():
+            name = regulon.replace(" ", "_")
+            if name in auc_fields:
+                entry = {"regulon": name}
+                for key, value in row.items():
+                    entry[key] = _float(value) if key == "defaultThresholdValue" else value
+                thresholds.append(entry)
+
+    metadata = dict(parsed)
+    metadata.update(
+        embeddings=[{"id": e.id, "name": e.name} for e in embeddings],
+        clusterings=[c.entry for c in found],
+        annotations=annotations,
+        metrics=metrics,
+        regulonThresholds=thresholds,
+    )
+    regulons = sum(len(t.fields) for t in tables if t.axis == "col" and t.key.endswith("RegulonsAUC")) or sum(
+        len(t.fields) for t in tables if t.axis == "row" and t.key.endswith("Regulons")
+    )
+    return ScopeExport(
+        tables, embeddings, found, metadata,
+        cluster_id=bool(found) and "ClusterID" not in obs_columns, regulons=regulons,
+    )
+
+
+def _resolve(root: Any, path: str) -> Any:
+    node = root
+    for part in path.split("/"):
+        if part not in node:
+            return None
+        node = node[part]
+    return node

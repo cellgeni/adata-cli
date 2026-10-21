@@ -38,6 +38,7 @@ is set by the slab, not the file.
 from __future__ import annotations
 
 import html
+import json
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -741,10 +742,12 @@ class _Export:
     #: var, or raw/var when the matrix is raw/X.
     var: str = "var"
     varm_key: str = "varm"
+    #: SCope's parts, with --scope.
+    scope: Optional[scope.ScopeExport] = None
 
 
 class LoomExport(Converter):
-    options = frozenset({"--layer"})
+    options = frozenset({"--layer", "--scope", "--clusterings", "--default-embedding"})
 
     def plan(
         self,
@@ -755,6 +758,9 @@ class LoomExport(Converter):
         options: Options,
     ) -> ConversionPlan:
         warnings: List[str] = []
+        for flag in ("--clusterings", "--default-embedding"):
+            if flag in options.given and not options.scope:
+                raise ValueError(f"{flag} shapes a SCope loom: pass --scope too.")
         path = options.layer or "X"
         if path not in ("X", "raw/X") and not path.startswith("layers/"):
             path = f"layers/{path}"
@@ -790,16 +796,34 @@ class LoomExport(Converter):
             var_columns = _columns(var_group, var_name, warnings, var_path)
             gene, accession = _gene_attrs(var_columns)
             varm_key = "raw/varm" if raw else "varm"
-            obsm = _arrays(root, "obsm", n_obs, warnings)
-            varm = _arrays(root, varm_key, n_var, warnings)
+            obsm = _arrays(root, "obsm", n_obs, warnings, frames=options.scope)
+            varm = _arrays(root, varm_key, n_var, warnings, frames=options.scope)
             obsp = _graphs(root, "obsp", n_obs, warnings)
             varp = [] if raw else _graphs(root, "varp", n_var, warnings)
             uns = _uns_scalars(root, warnings)
+            found = None
+            if options.scope:
+                found = scope.plan_export(
+                    root, obs_columns=[c for c in obs_columns if c != "CellID"],
+                    varm_key=varm_key, clusterings=options.clusterings,
+                    default_embedding=options.default_embedding, warnings=warnings,
+                )
+                # Embeddings go out as SCope's, not again as plain attributes.
+                embedded = {e.key for e in found.embeddings}
+                obsm = [name for name in obsm if name not in embedded]
+            elif "uns" in root and "scope" in root["uns"]:
+                warnings.append(
+                    "This came from a SCope loom: pass --scope to write its regulons, "
+                    "embeddings and clusterings as SCope reads them; a plain loom "
+                    "leaves them out."
+                )
 
         dense = n_obs * n_var * max(1, main.dtype.itemsize) * (1 + len(layers))
         summary = (
-            f"{src_format} → loom 3.0.0, {n_var:,} genes x {n_obs:,} cells from "
-            f"{path}{', layers: ' + ', '.join(layers) if layers else ''}; "
+            f"{src_format} → loom 3.0.0{' (SCope)' if found is not None else ''}, "
+            f"{n_var:,} genes x {n_obs:,} cells from "
+            f"{path}{', layers: ' + ', '.join(layers) if layers else ''}"
+            f"{', ' + found.describe() if found is not None and found.describe() else ''}; "
             f"dense {_size(dense)} before compression"
         )
         if dense > LARGE_DENSE:
@@ -819,7 +843,7 @@ class LoomExport(Converter):
                 matrix=path, layers=layers, obs_columns=obs_columns,
                 var_columns=var_columns, obsm=obsm, varm=varm, obsp=obsp, varp=varp,
                 gene=gene, accession=accession, uns=uns, var=var_path,
-                varm_key=varm_key,
+                varm_key=varm_key, scope=found,
             ),
         )
 
@@ -870,10 +894,74 @@ class LoomExport(Converter):
                 attrs = out.create_group("attrs")
                 _attr(attrs, "LOOM_SPEC_VERSION", "3.0.0")
                 _attr(attrs, "CreationDate", datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ"))
+                if detail.scope is not None:
+                    _export_scope(root, cols, rows, detail.scope, detail.varm_key)
+                    # Before uns's own attributes, which a stale MetaData among
+                    # them must not replace.
+                    _attr(attrs, scope.METADATA, json.dumps(detail.scope.metadata))
                 for name in detail.uns:
                     value = _uns_value(root, name)
                     if name not in ("LOOM_SPEC_VERSION", "CreationDate"):
                         _attr(attrs, name, value)
+
+
+def _export_scope(
+    root: Any, cols: h5py.Group, rows: h5py.Group, found: scope.ScopeExport, varm_key: str
+) -> None:
+    """SCope's compound attributes, a block of rows at a time across their
+    fields: the dataframes, the embeddings, the clusterings."""
+    n_obs = element_len(resolve_index(root["obs"], "obs")[0])
+    for table in found.tables:
+        source = resolve(root, table.source)
+        target = cols if table.axis == "col" else rows
+        n = element_len(resolve_index(source)[0])
+        _write_records(target, table.key, n, table.dtype, [
+            (field, (lambda lo, hi, c=column: np.asarray(source[c][lo:hi])))
+            for field, column in zip(table.fields, table.columns)
+        ])
+    obsm = root["obsm"] if "obsm" in root else {}
+    if found.embeddings:
+        default = found.embeddings[0]
+        for axis, attr in ((0, "Embeddings_X"), (1, "Embeddings_Y")):
+            dtype = np.dtype([(str(e.id), np.dtype(obsm[e.key].dtype.str)) for e in found.embeddings])
+            _write_records(cols, attr, n_obs, dtype, [
+                (str(e.id), (lambda lo, hi, k=e.key, a=axis: np.asarray(obsm[k][lo:hi, a])))
+                for e in found.embeddings
+            ])
+        if default.id == -1:
+            dtype = np.dtype([(f, np.dtype(obsm[default.key].dtype.str)) for f in ("_X", "_Y")])
+            _write_records(cols, "Embedding", n_obs, dtype, [
+                (f, (lambda lo, hi, a=axis: np.asarray(obsm[default.key][lo:hi, a])))
+                for axis, f in enumerate(("_X", "_Y"))
+            ])
+    if found.clusterings:
+        obs = root["obs"]
+        dtype = np.dtype([(str(c.id), np.int64) for c in found.clusterings])
+        codes = [
+            (str(c.id), (lambda lo, hi, col=c.column: np.asarray(obs[col]["codes"][lo:hi], dtype=np.int64)))
+            for c in found.clusterings
+        ]
+        _write_records(cols, "Clusterings", n_obs, dtype, codes)
+        if found.cluster_id:
+            first = codes[0][1]
+            target = cols.create_dataset("ClusterID", shape=(n_obs,), dtype=np.int64)
+            for lo in range(0, n_obs, STRING_STEP):
+                target[lo : lo + STRING_STEP] = first(lo, lo + STRING_STEP)
+
+
+def _write_records(
+    group: h5py.Group, name: str, n: int, dtype: np.dtype,
+    fields: Sequence[Tuple[str, Callable[[int, int], np.ndarray]]],
+) -> None:
+    """A compound attribute of `n` records, each field read a block at a time."""
+    target = group.create_dataset(name, shape=(n,), dtype=dtype)
+    step = max(1, min(STRING_STEP, SLAB_BYTES // max(1, dtype.itemsize)))
+    for lo in range(0, n, step):
+        hi = min(lo + step, n)
+        block = np.empty(hi - lo, dtype=dtype)
+        for field, read in fields:
+            block[field] = read(lo, hi)
+        target[lo:hi] = block
 
 
 def _size(n: int) -> str:
@@ -946,13 +1034,15 @@ def _gene_attrs(columns: List[str]) -> Tuple[str, Optional[str]]:
     return symbols, "" if ids is None else ids
 
 
-def _arrays(root: Any, key: str, n: int, warnings: List[str]) -> List[str]:
+def _arrays(root: Any, key: str, n: int, warnings: List[str], *, frames: bool = False) -> List[str]:
+    """The numeric 2-D arrays a loom attribute can hold; with `frames`, the
+    dataframes are not reported, since a SCope loom writes them."""
     kept, dropped = [], []
     for name in (root[key] if key in root else []):
         obj = root[key][name]
         if is_dataset(obj) and obj.ndim == 2 and obj.dtype.kind in "biuf" and obj.shape[0] == n:
             kept.append(name)
-        else:
+        elif not (frames and spec.encoding_type(obj) == spec.DATAFRAME):
             dropped.append(name)
     if dropped:
         warnings.append(f"Not written: {key} {', '.join(dropped)} -- only numeric 2-D arrays fit a loom.")

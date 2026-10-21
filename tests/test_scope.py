@@ -37,6 +37,10 @@ def _read(path: Path):
     return ad.read_zarr(path) if path.suffix == ".zarr" else ad.read_h5ad(path)
 
 
+def _convert(*args):
+    return runner.invoke(app, ["convert", *map(str, args)])
+
+
 def _ok(*args):
     result = runner.invoke(app, ["convert", *map(str, args)])
     assert result.exit_code == 0, _out(result)
@@ -311,3 +315,209 @@ def test_a_two_dimensional_compound_attribute_is_left_out_with_a_warning(tmp_pat
     result = _ok(truth.path, "-o", out)
     assert "Not read: col_attrs Pairs" in _out(result)
     assert "Pairs" not in _read(out).obsm
+
+
+# ---------------------------------------------------------------------------
+# export: --scope
+
+
+def _scope_loom(path: Path) -> dict:
+    """A SCope loom's parts, read as SCope's server reads them."""
+    with h5py.File(path, "r") as f:
+        cols, rows = f["col_attrs"], f["row_attrs"]
+        meta = json.loads(f["attrs/MetaData"][()])
+        return {
+            "meta": meta,
+            "cols": {k: cols[k][...] for k in cols},
+            "rows": {k: rows[k][...] for k in rows},
+        }
+
+
+def test_a_scope_loom_round_trips_through_h5ad(tmp_path):
+    truth = write_scope_loom(tmp_path / "scope.loom")
+    first, back, again = tmp_path / "a.h5ad", tmp_path / "back.loom", tmp_path / "b.h5ad"
+    _ok(truth.path, "-o", first)
+    result = _ok(first, "-o", back, "--scope")
+    # write_loom's 2-column `embedding` attribute is an embedding too.
+    assert "loom 3.0.0 (SCope)" in _out(result) and "3 regulons, 3 embeddings, 2 clusterings" in _out(result)
+    _ok(back, "-o", again)
+    a, b = _read(first), _read(again)
+    # SCope's regulon names hold no spaces: "SOX2 (12g)" comes back as "SOX2_(12g)".
+    unspaced = lambda frame: frame.rename(columns=lambda c: c.replace(" ", "_"))  # noqa: E731
+    pd.testing.assert_frame_equal(unspaced(a.obsm["RegulonsAUC"]), b.obsm["RegulonsAUC"])
+    pd.testing.assert_frame_equal(unspaced(a.varm["Regulons"]), b.varm["Regulons"])
+    for key in ("X_tSNE_default", "X_UMAP"):
+        assert np.array_equal(a.obsm[key], b.obsm[key])
+    assert a.obs["Cell Type"].tolist() == b.obs["Cell Type"].tolist()
+    assert a.obs["Leiden resolution 0.4"].tolist() == b.obs["Leiden resolution 0.4"].tolist()
+    assert list(b.uns["scope"]["embeddings"]["name"]) == ["tSNE (default)", "UMAP", "embedding"]
+    thresholds = a.uns["scope"]["regulon_thresholds"].rename(index=lambda r: r.replace(" ", "_"))
+    pd.testing.assert_frame_equal(thresholds, b.uns["scope"]["regulon_thresholds"])
+
+    loom = _scope_loom(back)
+    assert loom["meta"]["embeddings"] == [
+        {"id": -1, "name": "tSNE (default)"}, {"id": 0, "name": "UMAP"}, {"id": 1, "name": "embedding"},
+    ], "recorded ids and names kept, a new one numbered after them"
+    assert [c["id"] for c in loom["meta"]["clusterings"]] == [0, 1], "ids are list positions"
+    assert loom["cols"]["Embeddings_X"].dtype.names == ("-1", "0", "1")
+    assert set(loom["cols"]["Embedding"].dtype.names) == {"_X", "_Y"}
+    assert "X_UMAP" not in loom["cols"], "an embedding is not written twice"
+
+
+def test_a_plain_anndata_becomes_a_scope_loom(tmp_path):
+    rng = np.random.default_rng(0)
+    n = 30
+    obj = ad.AnnData(
+        X=rng.poisson(1, (n, 6)).astype(np.float32),
+        obs=pd.DataFrame({"leiden": pd.Categorical([str(i % 3) for i in range(n)]),
+                          "n_counts": rng.random(n), "batch": pd.Categorical(["a", "b"] * 15)},
+                         index=[f"c{i}" for i in range(n)]),
+        var=pd.DataFrame(index=[f"G{j}" for j in range(6)]),
+    )
+    obj.obs.loc["c0", "leiden"] = np.nan
+    obj.obsm["X_pca"] = rng.normal(size=(n, 5))
+    obj.obsm["X_umap"] = rng.normal(size=(n, 2))
+    obj.obsm["X_draw"] = rng.normal(size=(n, 2))
+    obj.obsm["RegulonsAUC"] = pd.DataFrame(rng.random((n, 2)), index=obj.obs_names, columns=["TP53 (5g)", "MYC (9g)"])
+    obj.varm["Regulons"] = pd.DataFrame({"TP53 (5g)": [1, 0, 1, 0, 0, 1], "MYC (9g)": [0] * 6}, index=obj.var_names)
+    source = tmp_path / "plain.h5ad"
+    obj.write_h5ad(source)
+    out = tmp_path / "out.loom"
+    result = _ok(source, "-o", out, "--scope", "--clusterings", "leiden")
+    assert "'TP53 (5g)' as 'TP53_(5g)'" in _out(result), "SCope's names hold no spaces"
+    loom = _scope_loom(out)
+    meta = loom["meta"]
+    assert meta["embeddings"] == [{"id": -1, "name": "umap"}, {"id": 0, "name": "draw"}]
+    assert np.array_equal(loom["cols"]["Embedding"]["_X"], obj.obsm["X_umap"][:, 0])
+    assert np.array_equal(loom["cols"]["Embeddings_Y"]["0"], obj.obsm["X_draw"][:, 1])
+    assert loom["cols"]["X_pca"].shape == (n, 5), "other obsm arrays stay plain"
+    assert meta["clusterings"] == [{"id": 0, "group": "", "name": "leiden",
+                                    "clusters": [{"id": 0, "description": "0"}, {"id": 1, "description": "1"},
+                                                 {"id": 2, "description": "2"}]}]
+    codes = loom["cols"]["Clusterings"]["0"]
+    assert codes[0] == -1 and codes[1:4].tolist() == [1, 2, 0]
+    assert loom["cols"]["ClusterID"].tolist() == codes.tolist()
+    assert loom["cols"]["RegulonsAUC"].dtype.names == ("TP53_(5g)", "MYC_(9g)")
+    assert loom["rows"]["Regulons"].dtype.names == ("TP53_(5g)", "MYC_(9g)")
+    assert {m["name"] for m in meta["metrics"]} == {"n_counts"}
+    assert {a["name"]: a["values"] for a in meta["annotations"]}["batch"] == ["a", "b"]
+
+    result = _convert(source, "-o", tmp_path / "x.loom", "--scope", "--default-embedding", "X_draw")
+    assert result.exit_code == 0
+    assert _scope_loom(tmp_path / "x.loom")["meta"]["embeddings"][0] == {"id": -1, "name": "draw"}
+
+
+@pytest.mark.parametrize(
+    "extra,message",
+    [
+        (["--scope", "--clusterings", "n_counts"], "--clusterings n_counts: not a categorical obs column"),
+        (["--scope", "--clusterings", "nope"], "--clusterings nope: no such obs column"),
+        (["--scope", "--default-embedding", "X_pca"], "--default-embedding X_pca: not an obsm array of two columns"),
+        (["--clusterings", "leiden"], "--clusterings shapes a SCope loom: pass --scope too"),
+    ],
+)
+def test_scope_export_refusals_leave_nothing(tmp_path, extra, message):
+    obj = ad.AnnData(
+        X=np.ones((4, 2), dtype=np.float32),
+        obs=pd.DataFrame({"leiden": pd.Categorical(["a", "b", "a", "b"]), "n_counts": np.arange(4.0)},
+                         index=list("wxyz")),
+        var=pd.DataFrame(index=["g1", "g2"]),
+    )
+    obj.obsm["X_pca"] = np.zeros((4, 3))
+    source = tmp_path / "s.h5ad"
+    obj.write_h5ad(source)
+    out = tmp_path / "out.loom"
+    result = _convert(source, "-o", out, *extra)
+    assert result.exit_code == 1 and message in _out(result)
+    assert not out.exists()
+
+
+def test_too_many_regulons_for_hdf5_are_refused_before_writing(tmp_path):
+    n = 4
+    names = [f"REGULON_NUMBER_{i:05d}_(+)" for i in range(2500)]
+    obj = ad.AnnData(X=np.ones((n, 2), dtype=np.float32), obs=pd.DataFrame(index=list("wxyz")),
+                     var=pd.DataFrame(index=["g1", "g2"]))
+    obj.obsm["RegulonsAUC"] = pd.DataFrame(np.zeros((n, len(names))), index=obj.obs_names, columns=names)
+    source = tmp_path / "s.h5ad"
+    obj.write_h5ad(source)
+    out = tmp_path / "out.loom"
+    result = _convert(source, "-o", out, "--scope")
+    assert result.exit_code == 1
+    assert "obsm/RegulonsAUC has 2,500 columns, more than HDF5 can hold" in _out(result)
+    assert not out.exists()
+
+
+def test_cluster_markers_need_their_metrics(tmp_path):
+    """SCope crashes on ClusterMarkers_<id> when its clustering lists no
+    clusterMarkerMetrics: such markers are left out, those with their
+    _<accessor> tables get metrics named after them."""
+    truth = write_scope_loom(tmp_path / "scope.loom")
+    with h5py.File(truth.path, "a") as f:
+        rows = f["row_attrs"]
+        marks = np.zeros(10, dtype=[("0", "i8"), ("1", "i8"), ("2", "i8")])
+        marks["0"][:3] = 1
+        rows.create_dataset("ClusterMarkers_0", data=marks)
+        rows.create_dataset("ClusterMarkers_0_avg_logFC", data=np.zeros(10, dtype=[("0", "f4"), ("1", "f4"), ("2", "f4")]))
+        rows.create_dataset("ClusterMarkers_1", data=np.zeros(10, dtype=[("0", "i8"), ("1", "i8")]))
+    first, back = tmp_path / "a.h5ad", tmp_path / "back.loom"
+    _ok(truth.path, "-o", first)
+    result = _ok(first, "-o", back, "--scope")
+    assert "Not written: ClusterMarkers_1 -- without metrics" in _out(result)
+    loom = _scope_loom(back)
+    assert "ClusterMarkers_0" in loom["rows"] and "ClusterMarkers_0_avg_logFC" in loom["rows"]
+    assert "ClusterMarkers_1" not in loom["rows"]
+    assert loom["meta"]["clusterings"][0]["clusterMarkerMetrics"] == [
+        {"accessor": "avg_logFC", "name": "avg_logFC", "description": ""}
+    ]
+
+
+def test_a_plain_export_of_a_scope_anndata_points_to_scope(tmp_path):
+    truth = write_scope_loom(tmp_path / "scope.loom")
+    first = tmp_path / "a.h5ad"
+    _ok(truth.path, "-o", first)
+    result = _ok(first, "-o", tmp_path / "plain.loom")
+    assert "This came from a SCope loom: pass --scope" in _out(result)
+    with h5py.File(tmp_path / "plain.loom", "r") as f:
+        assert "RegulonsAUC" not in f["col_attrs"]
+
+
+def test_scope_export_writes_in_small_blocks_the_same(tmp_path, monkeypatch):
+    from adata.conversion import loom
+
+    monkeypatch.setattr(loom, "STRING_STEP", 7)
+    truth = write_scope_loom(tmp_path / "scope.loom", n_cells=50)
+    first, back = tmp_path / "a.h5ad", tmp_path / "back.loom"
+    _ok(truth.path, "-o", first)
+    _ok(first, "-o", back, "--scope")
+    loom_parts = _scope_loom(back)
+    got = np.column_stack([loom_parts["cols"]["RegulonsAUC"][r.replace(" ", "_")] for r in truth.regulons])
+    assert np.array_equal(got, truth.auc)
+    assert np.array_equal(loom_parts["cols"]["Embeddings_X"]["0"], truth.embeddings["0"][:, 0])
+    assert loom_parts["cols"]["Clusterings"]["1"].tolist() == truth.clusterings["1"].tolist()
+
+
+def test_metadata_from_columns_and_a_thresholds_table(tmp_path):
+    """Text and nullable obs columns are annotations and metrics too; with no
+    recorded MetaData, regulon thresholds come from uns["scope"]'s table."""
+    n = 6
+    obj = ad.AnnData(
+        X=np.ones((n, 2), dtype=np.float32),
+        obs=pd.DataFrame({"donor": ["d1", "d2", "d3", "d4", "d5", "d6"],
+                          "n_genes": pd.array([1, None, 3, 4, 5, 6], dtype="Int64")},
+                         index=[f"c{i}" for i in range(n)]),
+        var=pd.DataFrame(index=["g1", "g2"]),
+    )
+    obj.obsm["RegulonsAUC"] = pd.DataFrame(np.zeros((n, 2)), index=obj.obs_names, columns=["A_(+)", "B (2g)"])
+    obj.uns["scope"] = {"regulon_thresholds": pd.DataFrame(
+        {"defaultThresholdValue": [0.5, 0.25], "motifData": ["a.png", "b.png"]}, index=["A_(+)", "B (2g)"])}
+    source = tmp_path / "s.h5ad"
+    obj.write_h5ad(source)
+    out = tmp_path / "out.loom"
+    _ok(source, "-o", out, "--scope")
+    meta = _scope_loom(out)["meta"]
+    assert {"name": "donor", "values": ["d1", "d2", "d3", "d4", "d5", "d6"]} in meta["annotations"]
+    assert {"name": "n_genes"} in meta["metrics"]
+    assert meta["regulonThresholds"] == [
+        {"regulon": "A_(+)", "defaultThresholdValue": 0.5, "motifData": "a.png"},
+        {"regulon": "B_(2g)", "defaultThresholdValue": 0.25, "motifData": "b.png"},
+    ]
