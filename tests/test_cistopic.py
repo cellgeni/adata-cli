@@ -216,3 +216,50 @@ def test_a_csc_fragment_matrix_reads_the_same(tmp_path):
 
     result = _convert(truth.path, "-o", tmp_path / "x.zarr", "--compression", "lzf")
     assert result.exit_code == 1 and "not available for zarr" in _out(result)
+
+
+@pytest.mark.parametrize("suffix", [".h5ad", ".zarr"])
+def test_a_csc_matrix_is_compressed_as_asked(tmp_path, suffix):
+    """A CSC fragment matrix took a shortcut that wrote its arrays without
+    the compression asked for."""
+    import h5py
+    import zarr
+
+    truth = write_cistopic_pickle(tmp_path / "obj.pkl", model=False, projections=False)
+    truth.obj.fragment_matrix = truth.obj.fragment_matrix.tocsc()
+    truth.path.write_bytes(pickle.dumps(truth.obj, protocol=4))
+    out = tmp_path / f"out{suffix}"
+    _ok(truth.path, "-o", out, "--compression", "gzip")
+    if suffix == ".h5ad":
+        with h5py.File(out, "r") as f:
+            assert f["X/data"].compression == "gzip"
+    else:
+        codecs = zarr.open_group(out, mode="r")["X/data"].compressors
+        assert any("gzip" in type(c).__name__.lower() for c in codecs)
+    assert np.array_equal(_read(out).X.toarray(), truth.obj.fragment_matrix.T.toarray())
+
+
+def test_repeated_column_labels_keep_the_first_with_a_warning(tmp_path):
+    """A frame with a repeated column label made the column lookup return a
+    frame, and the conversion failed."""
+    truth = write_cistopic_pickle(tmp_path / "obj.pkl", model=False, projections=False)
+    cell_data = truth.obj.cell_data
+    truth.obj.cell_data = pd.concat([cell_data, cell_data[["TSS_enrichment"]] * 2], axis=1)
+    truth.path.write_bytes(pickle.dumps(truth.obj, protocol=4))
+    out = tmp_path / "out.h5ad"
+    result = _ok(truth.path, "-o", out)
+    assert "Not written: obs column 'TSS_enrichment', a name a dataframe reserves or repeats" in _out(result)
+    got = _read(out)
+    expected = cell_data.loc[truth.obj.cell_names, "TSS_enrichment"]
+    assert np.array_equal(got.obs["TSS_enrichment"], expected), "the first one is kept"
+
+
+@pytest.mark.parametrize("protocol", [0, 1])
+def test_old_protocols_are_recognised_and_read(tmp_path, protocol):
+    """Protocols 0 and 1 name copy_reg._reconstructor before the object's
+    class, and the sniff stopped at it: such a .pkl was not recognised."""
+    truth = write_cistopic_pickle(tmp_path / "obj.pkl", model=False, projections=False)
+    truth.path.write_bytes(pickle.dumps(truth.obj, protocol=protocol))
+    out = tmp_path / "out.h5ad"
+    _ok(truth.path, "-o", out)
+    assert np.array_equal(_read(out).X.toarray(), truth.obj.fragment_matrix.T.toarray())

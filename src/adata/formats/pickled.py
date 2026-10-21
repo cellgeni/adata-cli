@@ -36,6 +36,13 @@ PYCISTOPIC = "pycisTopic."
 #: the outermost one, so its class is named within the first few.
 SNIFF_OPCODES = 64
 
+#: Globals an object's reconstruction names before its class, in protocols
+#: 0 and 1: `copy_reg._reconstructor(cls, object, state)`.
+_HELPERS = frozenset({
+    ("copy_reg", "_reconstructor"), ("copyreg", "_reconstructor"),
+    ("__builtin__", "object"), ("builtins", "object"),
+})
+
 _NUMPY = {
     "_reconstruct", "scalar", "_frombuffer", "ndarray", "dtype",
 }
@@ -201,11 +208,15 @@ def pickled_class(path: Path) -> Optional[str]:
                     return None
                 if op.name in ("SHORT_BINUNICODE", "BINUNICODE", "UNICODE", "BINUNICODE8"):
                     strings.append(arg)
-                elif op.name == "STACK_GLOBAL" and len(strings) >= 2:
-                    module, name = strings[-2], strings[-1]
-                    return name if module.startswith(PYCISTOPIC) else None
-                elif op.name == "GLOBAL":
-                    module, _, name = str(arg).partition(" ")
+                elif op.name in ("STACK_GLOBAL", "GLOBAL"):
+                    if op.name == "GLOBAL":
+                        module, _, name = str(arg).partition(" ")
+                    elif len(strings) >= 2:
+                        module, name = strings[-2], strings[-1]
+                    else:
+                        return None
+                    if (module, name) in _HELPERS:
+                        continue  # the class itself comes next
                     return name if module.startswith(PYCISTOPIC) else None
     except Exception:  # not a pickle, or a truncated one: not this format
         return None

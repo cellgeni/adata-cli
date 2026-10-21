@@ -47,6 +47,7 @@ from adata.elements.write import (
     write_dense,
     write_mapping,
     write_scalar,
+    set_shape_attr,
     write_sparse,
     write_string_array,
 )
@@ -316,7 +317,7 @@ def _write_fragments(parent: Any, name: str, matrix: Any, detail: _Import) -> No
     shape = (detail.n_obs, detail.n_var)
     if matrix.format == "csc":
         # regions x cells CSC is cells x regions CSR already.
-        write_sparse(parent, name, matrix.data, matrix.indices, matrix.indptr, shape)
+        _write_csr(parent, name, matrix, shape, detail)
         return
     if matrix.format != "csr":
         matrix = matrix.tocsr()
@@ -329,6 +330,24 @@ def _write_fragments(parent: Any, name: str, matrix: Any, detail: _Import) -> No
             describe(scratch["csc"]), parent, name, data_dtype=matrix.dtype,
             index_dtype=index_dtype, compression=detail.compression,
         )
+
+
+def _write_csr(parent: Any, name: str, matrix: Any, shape: Tuple[int, int], detail: _Import) -> None:
+    """A CSR group from the matrix's three arrays, compressed as asked."""
+    group = parent.create_group(name)
+    spec.set_encoding(group, spec.CSR_MATRIX)
+    set_shape_attr(group, shape)
+    backend = "zarr" if is_zarr_group(parent) else "hdf5"
+    for key in ("data", "indices", "indptr"):
+        values = np.asarray(getattr(matrix, key))
+        kw: Dict[str, Any] = {}
+        if detail.compression is not None and values.size:
+            kw = with_compression(
+                {"chunks": (min(values.size, 1 << 20),)}, detail.compression,
+                shape=values.shape, dtype=values.dtype, backend=backend,
+                zarr_format=detail.zarr_format,
+            )
+        create_dataset(group, key, data=values, **kw)
 
 
 def _write_imputed(root: Any, detail: _Import) -> None:

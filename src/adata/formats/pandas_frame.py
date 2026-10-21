@@ -56,13 +56,14 @@ def write_frame(
     labels = [str(v) for v in (df.index if index is None else index)]
     group = write_dataframe_header(parent, name, labels, [])
     written = []
-    for column in df.columns:
+    for position, column in enumerate(df.columns):
         key = str(column)
         if key in spec.RESERVED_DATAFRAME_KEYS or key in written:
             warnings.append(f"Not written: {what or name} column {key!r}, a name a dataframe reserves or repeats.")
             continue
-        if write_column(group, key, df[column], categorize=categorize, warnings=warnings,
-                        what=f"{what or name}[{key!r}]"):
+        # By position: a repeated label selects every column it names.
+        if write_column(group, key, df.iloc[:, position], categorize=categorize,
+                        warnings=warnings, what=f"{what or name}[{key!r}]"):
             written.append(key)
     set_column_order(group, written)
     return group
