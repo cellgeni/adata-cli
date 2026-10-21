@@ -3,6 +3,62 @@
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
+## 0.15.0
+
+Writes SCope looms, so results from pySCENIC, SCENIC+ or pycistopic can go
+back to the SCope viewer after editing as AnnData. A SCope loom now
+converts to h5ad and back with its regulons, embeddings and clusterings.
+`concat` keeps what those imports leave in obsm and varm.
+
+### Added
+
+- **`adata convert ... -o x.loom --scope` writes a SCope loom** ([#61](https://github.com/cellgeni/adata-cli/issues/61)):
+  - obsm and varm dataframes (`RegulonsAUC`, `Regulons`,
+    `ClusterMarkers_<id>`) become compound attributes;
+  - two-column embeddings become `Embeddings_X`/`_Y`, the default also as
+    `Embedding`;
+  - the clusterings a SCope import recorded, plus those `--clusterings`
+    names, become `Clusterings`;
+  - `MetaData` describes the embeddings, clusterings, regulon thresholds,
+    metrics and annotations. Ids and names recorded on import are kept.
+
+  The rules SCope's server reads by are kept:
+  - clustering and cluster ids are 0..n-1 in order;
+  - regulon names have no spaces, in both the AUC and the Regulons
+    attributes;
+  - cluster markers are written only with their metrics, since SCope
+    crashes on them otherwise.
+
+  A loom round trip keeps what was edited in between: `ClusterID` comes
+  from the first clustering, the thresholds from the `regulon_thresholds`
+  table, the marker metrics from the marker tables written. A
+  non-categorical clustering, or embeddings, clusterings or a table too
+  many for one HDF5 compound attribute, are refused before writing. On the public pySCENIC loom
+  (Zenodo 10944066), loom → h5ad → SCope loom gives back the same AUC,
+  regulons, embeddings, clusterings and thresholds through the pySCENIC
+  tutorial's recipe.
+
+### Fixed
+
+- **`concat` stacks dataframes in obsm and merges varm**
+  ([#61](https://github.com/cellgeni/adata-cli/issues/61)). It skipped
+  obsm dataframes (a SCope import's `RegulonsAUC`) as "not a dense array",
+  and never wrote varm, though `--merge` was meant to cover it, as in
+  anndata.
+  - obsm dataframes are now stacked as obs is, their columns following
+    `--join`.
+  - varm is merged as var's columns are, on the output's genes, compared
+    and copied a `--chunk` of genes at a time, its chunking and
+    compression kept.
+
+  Both match `anndata.concat` for each join and merge strategy.
+- **A loom export no longer stops half written when two elements ask for
+  one attribute name.** An obs column and an obsm entry of one name (or a
+  var column named like an attribute loom writes itself) were both written
+  to the same `col_attrs`/`row_attrs` name, and the second write failed.
+  The first now keeps the name, and the others are left out with a
+  warning, decided before anything is written.
+
 ## 0.14.0
 
 Reads pycisTopic's pickles, the only way pycisTopic saves its objects,
