@@ -3,6 +3,50 @@
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
+## 0.14.0
+
+Reads pycisTopic's pickles, the only way pycisTopic saves its objects,
+without pycisTopic and without running anything from the file. pandas and
+scipy, which rebuild the pickle's tables and matrices, come with a new
+optional extra: `pip install 'pyadata-cli[pickle]'`. The Docker image
+includes the extra.
+
+### Added
+
+- **`adata convert` reads pycisTopic pickles** ([#28](https://github.com/cellgeni/adata-cli/issues/28)),
+  for pycisTopic's `CistopicObject` and its `CistopicImputedFeatures`.
+  - **CistopicObject:**
+    - `fragment_matrix` becomes X, CSR cells x regions with its dtype kept,
+      and `binary_matrix` becomes a layer;
+    - `cell_data` and `region_data` become obs and var, column dtypes kept
+      (categoricals, nullable integers and booleans);
+    - the selected model's topics become `obsm["X_topic"]` and
+      `varm["topic_region"]`;
+    - projections become `obsm["X_<name>"]`;
+    - the project, fragment files and the model's tables go into
+      `uns["pycistopic"]`.
+  - **CistopicImputedFeatures** (imputed accessibility, gene activity)
+    becomes its own AnnData, CSR or `--dense`.
+
+  The file is read by an unpickler that resolves only the names such an
+  object holds: numpy, scipy.sparse, pandas and a few builtins. Any other
+  name is refused, so a pickle that names `os.system` is not run.
+  pycisTopic pins pandas 1.5, and its pickles read with pandas 2 and 3, as
+  CI checks.
+
+  A public GEO pickle (GSE292438, 5,027 cells x 124,083 regions, 15
+  topics; 76 MB gzipped, 328 MB unpacked) converted in 8.8 s at a 842 MB
+  peak, the pickle being held whole. Every matrix, column and topic table
+  equalled what `pickle.load` gives under pycisTopic's pandas 1.5.
+
+### Fixed
+
+- **Error messages keep their square brackets**
+  ([#28](https://github.com/cellgeni/adata-cli/issues/28)). Errors and
+  warnings were printed as Rich markup, so a bracketed word that read as a
+  tag vanished: the install hint `'pyadata-cli[pickle]'` printed as
+  `'pyadata-cli'`.
+
 ## 0.13.0
 
 Adds the last of scanpy's core readers to `adata convert`: dense matrices
