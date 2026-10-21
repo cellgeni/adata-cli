@@ -8,7 +8,9 @@ and writes the on-disk format with h5py and zarr directly. It does not depend on
 anndata: anndata appears only in tests and benchmarks, as the reference. The
 point of the tool is that memory is set by `--chunk`, not by the size of the
 input, so code that loads a whole matrix or column is a regression unless it is
-behind an explicit `--in-memory`.
+behind an explicit `--in-memory`. pandas and scipy are not dependencies either:
+they come only with the `pickle` extra, for pycisTopic pickles
+(`conversion/cistopic.py`), and are imported there alone.
 
 Naming:
 - The PyPI distribution is `pyadata-cli`.

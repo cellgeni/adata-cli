@@ -53,7 +53,15 @@ Issues = "https://github.com/cellgeni/adata-cli/issues"
 Changelog = "https://github.com/cellgeni/adata-cli/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
+# Reading pycisTopic's pickles: pandas and scipy rebuild their tables and
+# matrices. Imported only by that converter.
+pickle = [
+    "pandas>=2.2",
+    "scipy>=1.13",
+]
 dev = [
+    "pandas>=2.2",
+    "scipy>=1.13",
     "pytest>=8.3.4",
     "pytest-cov>=6.0.0",
     # Turns a hang into a failure with a traceback. Without it a stuck test

@@ -44,13 +44,13 @@ runner = CliRunner()
 PYTHON = f"{sys.version_info.major}.{sys.version_info.minor}"
 
 
-def _run(packages: List[str], script: str, *args: str):
+def _run(packages: List[str], script: str, *args: str, python: str = PYTHON):
     """Run `script` with `packages` installed; return what it printed after RESULT."""
     if not uv_available() or offline():
         if must_build():
             pytest.fail("uv and the network are required for these tests in CI")
         pytest.skip("needs uv and the network")
-    cmd = ["uv", "run", "--no-project", "--python", PYTHON]
+    cmd = ["uv", "run", "--no-project", "--python", python]
     for package in packages:
         cmd += ["--with", package]
     cmd += ["python", "-c", script, *args]
@@ -778,3 +778,97 @@ else:
             problems.append(f"{axis} differ")
 print("RESULT " + json.dumps(problems))
 """
+
+
+# pycisTopic pins pandas 1.5, so its pickles hold pandas 1.5's internals:
+# written there, read here with pandas 2 or 3, compared there again.
+_PYCISTOPIC_ENV = ["pandas==1.5.3", "numpy<2", "scipy<1.14", "h5py<3.12", "anndata==0.10.9"]
+
+_CISTOPIC_STAND_INS = r"""
+import sys, types
+package = types.ModuleType("pycisTopic"); package.__path__ = []; sys.modules["pycisTopic"] = package
+for module, name in (("cistopic_class", "CistopicObject"), ("lda_models", "CistopicLDAModel")):
+    mod = types.ModuleType(f"pycisTopic.{module}")
+    setattr(mod, name, type(name, (), {"__module__": f"pycisTopic.{module}"}))
+    sys.modules[f"pycisTopic.{module}"] = mod
+    setattr(package, module, mod)
+from pycisTopic.cistopic_class import CistopicObject
+from pycisTopic.lda_models import CistopicLDAModel
+"""
+
+_WRITE_CISTOPIC = _CISTOPIC_STAND_INS + r"""
+import json, pickle
+import numpy as np, pandas as pd, scipy.sparse as sp
+rng = np.random.default_rng(0)
+cells = [f"AAAC{i:04d}-1___s{i % 2}" for i in range(40)]
+regions = [f"chr1:{100 * i}-{100 * i + 50}" for i in range(25)]
+counts = rng.poisson(0.7, (25, 40)).astype(np.int32)
+obj = CistopicObject()
+obj.fragment_matrix = sp.csr_matrix(counts)
+obj.binary_matrix = sp.csr_matrix((counts > 0).astype(np.int32))
+obj.cell_names, obj.region_names = cells, regions
+obj.cell_data = pd.DataFrame({
+    "sample_id": pd.Categorical([f"s{i % 2}" for i in range(40)]),
+    "cisTopic_nr_frag": counts.sum(0).astype(object),
+    "FRIP": rng.random(40),
+    "leiden": [str(i % 3) for i in range(40)],
+}, index=cells).iloc[::-1]
+obj.region_data = pd.DataFrame({"Chromosome": ["chr1"] * 25, "Start": np.arange(25, dtype=np.int32) * 100}, index=regions)
+obj.project, obj.path_to_fragments = "demo", {"s0": "/f0.tsv.gz"}
+model = CistopicLDAModel()
+model.cell_topic = pd.DataFrame(rng.random((5, 40)), index=[f"Topic{t + 1}" for t in range(5)], columns=cells)
+model.topic_region = model.region_topic = pd.DataFrame(rng.random((25, 5)), index=regions, columns=model.cell_topic.index)
+model.parameters = pd.DataFrame({"Parameter": ["lda", 5, True]}, index=["package", "n_topics", "alpha_by_topic"])
+model.n_topic = 5
+obj.selected_model = model
+obj.projections = {"cell": {"UMAP": pd.DataFrame(rng.normal(size=(40, 2)), index=cells, columns=["UMAP_1", "UMAP_2"])}, "region": {}}
+with open(sys.argv[1], "wb") as fh:
+    pickle.dump(obj, fh)
+print("RESULT " + json.dumps(pd.__version__))
+"""
+
+_COMPARE_CISTOPIC = _CISTOPIC_STAND_INS + r"""
+import json, pickle, warnings
+warnings.filterwarnings("ignore")
+import numpy as np, pandas as pd, anndata as ad
+with open(sys.argv[1], "rb") as fh:
+    obj = pickle.load(fh)
+got = ad.read_h5ad(sys.argv[2])
+problems = []
+if (got.X != obj.fragment_matrix.T.tocsr()).nnz or got.X.dtype != np.int32:
+    problems.append("X differs")
+if (got.layers["binary"] != obj.binary_matrix.T.tocsr()).nnz:
+    problems.append("binary differs")
+if list(got.obs_names) != obj.cell_names or list(got.var_names) != obj.region_names:
+    problems.append("names differ")
+cd = obj.cell_data.loc[obj.cell_names]
+if list(got.obs["sample_id"].astype(str)) != list(cd["sample_id"].astype(str)):
+    problems.append("sample_id differs")
+if list(got.obs["cisTopic_nr_frag"]) != list(cd["cisTopic_nr_frag"]):
+    problems.append("cisTopic_nr_frag differs")
+if not np.array_equal(got.obs["FRIP"], cd["FRIP"]) or list(got.obs["leiden"].astype(str)) != list(cd["leiden"]):
+    problems.append("obs columns differ")
+if list(got.var["Start"]) != list(obj.region_data["Start"]):
+    problems.append("var differs")
+model = obj.selected_model
+if not np.array_equal(got.obsm["X_topic"], model.cell_topic[obj.cell_names].to_numpy().T):
+    problems.append("X_topic differs")
+if not np.array_equal(got.varm["topic_region"], model.region_topic.to_numpy()):
+    problems.append("topic_region differs")
+if not np.array_equal(got.obsm["X_UMAP"], obj.projections["cell"]["UMAP"].to_numpy()):
+    problems.append("X_UMAP differs")
+if got.uns["pycistopic"]["model"]["n_topic"] != 5 or got.uns["pycistopic"]["project"] != "demo":
+    problems.append("uns differs")
+print("RESULT " + json.dumps(problems))
+"""
+
+
+def test_a_pandas_15_cistopic_pickle_imports_as_pycistopic_holds_it(tmp_path):
+    """pycisTopic pins pandas 1.5: a pickle written there is read here, with
+    this environment's pandas, and compared there with the objects it holds."""
+    path, out = tmp_path / "cistopic_obj.pkl", tmp_path / "out.h5ad"
+    version = _run(_PYCISTOPIC_ENV, _WRITE_CISTOPIC, str(path), python="3.11")
+    assert version.startswith("1.5")
+    _convert(str(path), "-o", str(out))
+    problems = _run(_PYCISTOPIC_ENV, _COMPARE_CISTOPIC, str(path), str(out), python="3.11")
+    assert problems == [], problems

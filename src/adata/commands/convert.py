@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from rich.console import Console
+from rich.markup import escape
 
 from adata.conversion import (
     Options,
@@ -61,7 +62,7 @@ def convert_store(
 
     console.print(f"[cyan]Converting[/] {file}: {plan.summary}")
     for warning in plan.warnings:
-        console.print(f"[yellow]Warning:[/] {warning}")
+        console.print(f"[yellow]Warning:[/] {escape(warning)}")
 
     with staged_outputs(plan.outputs) as staged:
         converter.write(plan, staged, console)
