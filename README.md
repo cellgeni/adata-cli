@@ -17,6 +17,7 @@ A command-line tool for exploring huge AnnData stores (`.h5ad` and `.zarr`) with
 
 ```bash
 pip install pyadata-cli
+pip install 'pyadata-cli[pickle]'   # also read pycisTopic pickles (adds pandas, scipy)
 ```
 
 The command is `adata`. The distribution is named `pyadata-cli` because

@@ -5,6 +5,7 @@ from typing import Optional, Sequence, List
 
 from rich.console import Console
 import typer
+from rich.markup import escape
 
 from adata.conversion import FORMATS, Options
 from adata.core.recast import LAYOUTS
@@ -117,7 +118,7 @@ def view(
             out_console=out_console,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {e}")
+        console.print(f"[bold red]Error:[/] {escape(str(e))}")
         raise typer.Exit(code=1)
 
 
@@ -213,7 +214,7 @@ def create(
             force=force,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {e}")
+        console.print(f"[bold red]Error:[/] {escape(str(e))}")
         raise typer.Exit(code=1)
 
 
@@ -265,7 +266,7 @@ def ls(
             plain=plain,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {e}")
+        console.print(f"[bold red]Error:[/] {escape(str(e))}")
         raise typer.Exit(code=1)
 
 
@@ -379,7 +380,7 @@ def subset(
             zarr_format=zarr_format,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {e}")
+        console.print(f"[bold red]Error:[/] {escape(str(e))}")
         raise typer.Exit(code=1)
 
 
@@ -486,7 +487,7 @@ def concat(
             zarr_format=zarr_format,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {e}")
+        console.print(f"[bold red]Error:[/] {escape(str(e))}")
         raise typer.Exit(code=1)
 
 
@@ -767,7 +768,8 @@ def convert(
     Ranger and STARsolo, velocyto's included, and Parse split-pipe output
     are read in two streaming passes, as are text tables (.csv, .tsv, .txt,
     gzipped too), read as anndata's read_csv and read_text read them; a plain
-    HDF5 dataset is read as read_hdf reads it (--key names it). A loom
+    HDF5 dataset is read as read_hdf reads it (--key names it); a pycisTopic
+    pickle without pycisTopic (needs pyadata-cli[pickle]). A loom
     is read as anndata.read_loom reads it; a SCope loom (pySCENIC, SCENIC+,
     pycistopic) also gives its regulons as dataframes in obsm and varm, its
     embeddings and clusterings named from its MetaData, and the MetaData in
@@ -800,6 +802,7 @@ def convert(
         adata convert counts.h5ad -o counts.loom
         adata convert GSE123_counts.txt.gz -o counts.h5ad --transpose
         adata convert matrix.hdf5 -o matrix.h5ad --key data/counts
+        adata convert cistopic_obj.pkl -o atac.h5ad
     """
     entries = list(ctx.args)
     recast_flags = _given(ctx, _RECAST_FLAGS)
@@ -900,7 +903,7 @@ def convert(
             ),
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {e}")
+        console.print(f"[bold red]Error:[/] {escape(str(e))}")
         raise typer.Exit(code=1)
 
 
@@ -1030,7 +1033,7 @@ def recast(
             zarr_format=zarr_format,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {e}")
+        console.print(f"[bold red]Error:[/] {escape(str(e))}")
         raise typer.Exit(code=1)
 
 
@@ -1112,7 +1115,7 @@ def split(
             zarr_format=zarr_format,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {e}")
+        console.print(f"[bold red]Error:[/] {escape(str(e))}")
         raise typer.Exit(code=1)
 
 
@@ -1180,7 +1183,7 @@ def export_dataframe(
             console=console,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {e}")
+        console.print(f"[bold red]Error:[/] {escape(str(e))}")
         raise typer.Exit(code=1)
 
 
@@ -1232,7 +1235,7 @@ def export_array(
             console=console,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {e}")
+        console.print(f"[bold red]Error:[/] {escape(str(e))}")
         raise typer.Exit(code=1)
 
 
@@ -1292,7 +1295,7 @@ def export_sparse(
             console=console,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {e}")
+        console.print(f"[bold red]Error:[/] {escape(str(e))}")
         raise typer.Exit(code=1)
 
 
@@ -1341,7 +1344,7 @@ def export_dict(
             console=console,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {e}")
+        console.print(f"[bold red]Error:[/] {escape(str(e))}")
         raise typer.Exit(code=1)
 
 
@@ -1372,7 +1375,7 @@ def export_image(
     try:
         export_image_cmd(file=file, obj=entry, out=output, console=console)
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {e}")
+        console.print(f"[bold red]Error:[/] {escape(str(e))}")
         raise typer.Exit(code=1)
 
 
@@ -1470,7 +1473,7 @@ def import_dataframe(
             auto_categorical=auto_categorical,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {e}")
+        console.print(f"[bold red]Error:[/] {escape(str(e))}")
         raise typer.Exit(code=1)
 
 
@@ -1526,7 +1529,7 @@ def import_array(
         target = _get_target_file(file, output, inplace)
         _import_npy(target, entry, input_file, console)
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {e}")
+        console.print(f"[bold red]Error:[/] {escape(str(e))}")
         raise typer.Exit(code=1)
 
 
@@ -1582,7 +1585,7 @@ def import_sparse(
         target = _get_target_file(file, output, inplace)
         _import_mtx(target, obj, input_file, console)
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {e}")
+        console.print(f"[bold red]Error:[/] {escape(str(e))}")
         raise typer.Exit(code=1)
 
 
@@ -1636,7 +1639,7 @@ def import_dict(
         target = _get_target_file(file, output, inplace)
         _import_json(target, obj, input_file, console)
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {e}")
+        console.print(f"[bold red]Error:[/] {escape(str(e))}")
         raise typer.Exit(code=1)
 
 
@@ -1687,7 +1690,7 @@ def import_image_cmd(
         target = _get_target_file(file, output, inplace)
         _import_image(target, entry, input_file, console)
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {e}")
+        console.print(f"[bold red]Error:[/] {escape(str(e))}")
         raise typer.Exit(code=1)
 
 

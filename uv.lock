@@ -500,9 +500,15 @@ dependencies = [
 [package.optional-dependencies]
 dev = [
     { name = "anndata" },
+    { name = "pandas" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-timeout" },
+    { name = "scipy" },
+]
+pickle = [
+    { name = "pandas" },
+    { name = "scipy" },
 ]
 
 [package.metadata]
@@ -510,15 +516,19 @@ requires-dist = [
     { name = "anndata", marker = "extra == 'dev'", specifier = ">=0.13" },
     { name = "h5py", specifier = ">=3.15.1" },
     { name = "numpy", specifier = ">=2.3.5" },
+    { name = "pandas", marker = "extra == 'dev'", specifier = ">=2.2" },
+    { name = "pandas", marker = "extra == 'pickle'", specifier = ">=2.2" },
     { name = "pillow", specifier = ">=12.1.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.4" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0.0" },
     { name = "pytest-timeout", marker = "extra == 'dev'", specifier = ">=2.3.0" },
     { name = "rich", specifier = ">=14.2.0" },
+    { name = "scipy", marker = "extra == 'dev'", specifier = ">=1.13" },
+    { name = "scipy", marker = "extra == 'pickle'", specifier = ">=1.13" },
     { name = "typer", specifier = ">=0.20.0" },
     { name = "zarr", specifier = ">=3.1.5" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["pickle", "dev"]
 
 [[package]]
 name = "pydantic"

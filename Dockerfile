@@ -60,7 +60,10 @@ COPY . .
 # same layer because a later `rm` would mask the files without reclaiming
 # them; that reclaims about 9 MB, the cache being mostly hardlinks into the
 # venv rather than separate copies.
-RUN uv sync --locked \
+#
+# The `pickle` extra (pandas, scipy) is in: a pipeline cannot add it to the
+# image later, and without it pycisTopic pickles do not convert.
+RUN uv sync --locked --extra pickle \
     && rm -rf /tmp/.cache /tmp/uv-*.lock \
     && mkdir -p /tmp/.cache \
     && chmod 1777 /tmp/.cache

@@ -1076,3 +1076,143 @@ def write_hdf5_matrix(
             f["names/cells"] = np.array(cells, dtype=object).astype(h5py.string_dtype())
             f["names/genes"] = np.array(genes, dtype=object).astype(h5py.string_dtype())
     return Hdf5Truth(path, key, np.asarray(counts), cells, genes)
+
+
+# ---------------------------------------------------------------------------
+# pycisTopic pickles, as pycisTopic writes them: `pickle.dump` of its own
+# classes holding pandas frames and scipy matrices. pycisTopic is not
+# installed here, so stand-ins are made under its module names, which is all
+# a pickle records of a class.
+
+
+@dataclass
+class CistopicTruth:
+    path: Path
+    obj: Any
+
+
+def _pycistopic_classes() -> Dict[str, type]:
+    import sys
+    import types
+
+    classes = {}
+    package = sys.modules.setdefault("pycisTopic", types.ModuleType("pycisTopic"))
+    package.__path__ = []  # a package, so its submodules import
+    for module, name in (
+        ("pycisTopic.cistopic_class", "CistopicObject"),
+        ("pycisTopic.lda_models", "CistopicLDAModel"),
+        ("pycisTopic.diff_features", "CistopicImputedFeatures"),
+    ):
+        mod = sys.modules.setdefault(module, types.ModuleType(module))
+        setattr(package, module.split(".")[1], mod)
+        cls = getattr(mod, name, None)
+        if cls is None:
+            cls = type(name, (), {"__module__": module})
+            setattr(mod, name, cls)
+        classes[name] = cls
+    return classes
+
+
+def write_cistopic_pickle(
+    path: Path,
+    *,
+    n_cells: int = 20,
+    n_regions: int = 30,
+    n_topics: int = 4,
+    model: bool = True,
+    projections: bool = True,
+    harmony: bool = False,
+    shuffled: bool = True,
+    gz: bool = False,
+    seed: int = 0,
+) -> CistopicTruth:
+    """A CistopicObject: fragment and binary matrices (regions x cells),
+    cell_data with numeric, Categorical, nullable and object columns,
+    region_data, a selected LDA model, and a UMAP. `shuffled` puts
+    cell_data and cell_topic in another order than cell_names, as
+    add_cell_data can leave them."""
+    import gzip
+    import pickle
+
+    import pandas as pd
+    import scipy.sparse as sp
+
+    classes = _pycistopic_classes()
+    rng = np.random.default_rng(seed)
+    cells = [f"AAAC{i:04d}-1___sample{i % 2}" for i in range(n_cells)]
+    regions = [f"chr{1 + i % 3}:{1000 * i}-{1000 * i + 500}" for i in range(n_regions)]
+    counts = rng.poisson(0.6, (n_regions, n_cells)).astype(np.int32)
+    obj = classes["CistopicObject"]()
+    obj.fragment_matrix = sp.csr_matrix(counts)
+    obj.binary_matrix = sp.csr_matrix((counts > 0).astype(np.int32))
+    obj.cell_names, obj.region_names = list(cells), list(regions)
+    order = rng.permutation(n_cells) if shuffled else np.arange(n_cells)
+    cell_data = pd.DataFrame(
+        {
+            "cisTopic_nr_frag": np.asarray(counts.sum(0), dtype=object),  # numbers held as object
+            "sample_id": pd.Categorical([f"sample{i % 2}" for i in range(n_cells)]),
+            "TSS_enrichment": rng.random(n_cells),
+            "doublet": pd.array([True, False, None] * (n_cells // 3) + [True] * (n_cells % 3), dtype="boolean"),
+            "n_peaks": pd.array(list(range(n_cells - 1)) + [None], dtype="Int64"),
+            "celltype": [f"type{i % 3}" for i in range(n_cells)],
+            "note": [f"cell {i}" for i in range(n_cells)],
+        },
+        index=cells,
+    ).iloc[order]
+    obj.cell_data = cell_data
+    obj.region_data = pd.DataFrame(
+        {
+            "Chromosome": [r.split(":")[0] for r in regions],
+            "Start": np.array([1000 * i for i in range(n_regions)], dtype=np.int32),
+            "End": np.array([1000 * i + 500 for i in range(n_regions)], dtype=np.int32),
+        },
+        index=regions,
+    )
+    obj.project = "demo"
+    obj.path_to_fragments = {"sample0": "/data/s0/fragments.tsv.gz", "sample1": "/data/s1/fragments.tsv.gz"}
+    obj.selected_model = []
+    obj.projections = {"cell": {}, "region": {}}
+    topics = [f"Topic{t + 1}" for t in range(n_topics)]
+    cell_topic = rng.random((n_topics, n_cells))
+    region_topic = rng.random((n_regions, n_topics))
+    if model:
+        m = classes["CistopicLDAModel"]()
+        m.metrics = pd.DataFrame([[0.1, 0.2, -1.3, -4e6]], index=["Metric"],
+                                 columns=["Arun_2010", "Cao_Juan_2009", "Mimno_2011", "loglikelihood"])
+        m.coherence = pd.DataFrame({"Topic": range(1, n_topics + 1), "Mimno_2011": rng.random(n_topics)})
+        m.marg_topic = pd.DataFrame({"Topic": range(1, n_topics + 1), "Marg_Topic": rng.random(n_topics)})
+        m.topic_ass = pd.DataFrame({"Topic": range(1, n_topics + 1), "Assignments": rng.integers(0, 99, n_topics)})
+        m.cell_topic = pd.DataFrame(cell_topic, index=topics, columns=cells).iloc[:, order]
+        m.cell_topic_harmony = (
+            pd.DataFrame(cell_topic * 2, index=topics, columns=cells) if harmony else []
+        )
+        m.topic_region = pd.DataFrame(region_topic, index=regions, columns=topics)
+        m.region_topic = m.topic_region
+        m.parameters = pd.DataFrame(
+            {"Parameter": ["lda", n_topics, 500, 555, 50, True, 0.1]},
+            index=["package", "n_topics", "n_iter", "random_state", "alpha", "alpha_by_topic", "eta"],
+        )
+        m.n_cells, m.n_regions, m.n_topic = n_cells, n_regions, n_topics
+        obj.selected_model = m
+    if projections:
+        obj.projections["cell"]["UMAP"] = pd.DataFrame(
+            rng.normal(size=(n_cells, 2)), index=cells, columns=["UMAP_1", "UMAP_2"]
+        ).iloc[order]
+    data = pickle.dumps(obj, protocol=4)
+    path.write_bytes(gzip.compress(data) if gz else data)
+    return CistopicTruth(path, obj)
+
+
+def write_imputed_pickle(path: Path, *, n_cells: int = 15, n_features: int = 8, seed: int = 0) -> CistopicTruth:
+    """A CistopicImputedFeatures: a dense features x cells `mtx`."""
+    import pickle
+
+    classes = _pycistopic_classes()
+    rng = np.random.default_rng(seed)
+    obj = classes["CistopicImputedFeatures"]()
+    obj.mtx = (rng.random((n_features, n_cells)) * (rng.random((n_features, n_cells)) > 0.5)).astype(np.float32)
+    obj.feature_names = [f"Gene{j}" for j in range(n_features)]
+    obj.cell_names = [f"AAAC{i:04d}-1___demo" for i in range(n_cells)]
+    obj.project = "demo"
+    path.write_bytes(pickle.dumps(obj, protocol=4))
+    return CistopicTruth(path, obj)

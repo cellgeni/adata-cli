@@ -17,7 +17,8 @@ from typing import Dict, FrozenSet, List, Optional
 
 import h5py
 
-from adata.conversion import cellbender, hdf5, loom, mtx, parse, tenx, text
+from adata.conversion import cellbender, cistopic, hdf5, loom, mtx, parse, tenx, text
+from adata.formats import pickled
 from adata.conversion.anndata_copy import AnnDataCopy
 from adata.conversion.base import ConversionPlan, Converter, Format, Options
 from adata.storage import has_valid_anndata_root_attrs, is_zarr_path
@@ -107,6 +108,14 @@ FORMATS: Dict[str, Format] = {
         description="One 2-D dataset of a plain HDF5 file, as anndata's read_hdf reads it",
         extensions=hdf5.EXTENSIONS,
         importer=hdf5.Hdf5Import(),
+    ),
+    # Content sniffed without unpickling: pickletools reads the opcodes only.
+    "cistopic": Format(
+        name="cistopic",
+        description="A pycisTopic pickle: a CistopicObject or CistopicImputedFeatures",
+        extensions=cistopic.EXTENSIONS,
+        sniff=pickled.sniff,
+        importer=cistopic.CistopicImport(),
     ),
     # A folder, so no extension: chosen as output with `--to 10x-mtx`.
     "10x-mtx": Format(

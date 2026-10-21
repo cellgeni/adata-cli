@@ -33,10 +33,12 @@ separate jobs.
 | `test_loom.py` | loom import and export against loompy- and velocyto-shaped fixtures (spec 2 and 3): X choice, names, attributes, graphs, `--dense`, round trips |
 | `test_text.py` | Text matrices in every layout anndata's `read_text` tells apart (corner, short and comment headers, no header, no row names), each delimiter, gzip, `--transpose` CSR and dense, dtypes, refusals by line, small blocks |
 | `test_hdf5.py` | One dataset of a plain HDF5 file: the listing without `--key`, `read_hdf`'s `row_names` / `col_names` and other names, `--transpose` CSR and dense, slabs of chunks, `--from hdf5` on `.h5` |
+| `test_cistopic.py` | pycisTopic pickles read through the allowlist: a CistopicObject's matrices, frames, model and projections, an imputed-features pickle, a pickle naming `os.system` refused unrun, the missing-extra hint |
+| `test_pandas_frame.py` | Each pandas dtype written as anndata writes it, on every backend |
 | `test_scope.py` | SCope looms as pySCENIC's `export2loom` writes them: regulons as dataframes, embeddings and clusterings named from `MetaData`, plain or compressed `MetaData`, region looms, R's logicals and factors, renamed fields, small blocks |
 | `test_table.py` | The streaming CSV reader against pandas: column types, quoting, row subsets, blocks, refusals |
 | `test_mtx_codec.py`, `test_csr_build.py` | The streaming Matrix Market reader and writer against scipy, and the bucket sort they and `recast` share |
-| `test_external_readers.py` | 10x conversions, HDF5 and MTX, Parse runs and looms, checked by scanpy (Parse's own recipe for Parse), anndata with loompy (the pySCENIC tutorial's recipe for SCope looms), anndata's `read_csv`, `read_text` and `read_hdf`, and PyTables in their own uv environments (`integration`) |
+| `test_external_readers.py` | 10x conversions, HDF5 and MTX, Parse runs and looms, checked by scanpy (Parse's own recipe for Parse), anndata with loompy (the pySCENIC tutorial's recipe for SCope looms), anndata's `read_csv`, `read_text` and `read_hdf`, a pandas 1.5 pycisTopic pickle read back there, and PyTables in their own uv environments (`integration`) |
 | `test_performance.py` | Complexity guards -- what an operation costs, not how long it takes (see below) |
 | `test_benchmark_harness.py` | That the benchmark's measurement is trustworthy |
 | `test_subset.py`, `test_export.py`, `test_import.py`, `test_info_read.py`, `test_zarr.py`, `test_query.py` | Per-feature unit tests |
