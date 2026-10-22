@@ -626,6 +626,9 @@ def plan_export(
     entries = {str(e.get("id")): e for e in parsed.get("clusterings", []) if isinstance(e, dict)}
     found: List[ExportClustering] = []
     renumbered: Dict[int, int] = {}
+    #: Per clustering written, its recorded cluster ids (as marker fields
+    #: name them) to the new ones, its categories' positions.
+    cluster_fields: Dict[int, Dict[str, str]] = {}
     for position, column in enumerate(wanted):
         if column not in obs:
             raise ValueError(f"--clusterings {column}: no such obs column.")
@@ -639,6 +642,15 @@ def plan_export(
         if old is not None:
             renumbered[old] = position
         categories = [str(c) for c in read_categories(obs[column], parent_group=obs)]
+        if old is not None:
+            # The import labelled the categories by description, in id order.
+            clusters = _clusters(recorded.get("clusters"))
+            labels = make_index_unique([label for _, label in clusters])
+            position_of = {c: i for i, c in enumerate(categories)}
+            cluster_fields[position] = {
+                _label(number): str(position_of[label])
+                for (number, _), label in zip(clusters, labels) if label in position_of
+            }
         entry = {
             "id": position,
             "group": recorded.get("group", ""),
@@ -648,6 +660,10 @@ def plan_export(
         if recorded.get("clusterMarkerMetrics"):
             entry["clusterMarkerMetrics"] = recorded["clusterMarkerMetrics"]
         found.append(ExportClustering(position, column, entry))
+    # A clustering no import recorded owns the marker tables of its new id.
+    for clustering in found:
+        if clustering.id not in cluster_fields:
+            renumbered.setdefault(clustering.id, clustering.id)
 
     # Cluster markers: only for a clustering written, and with its metrics.
     markers = [t for t in tables if t.axis == "row" and _MARKERS.match(t.key)]
@@ -672,9 +688,23 @@ def plan_export(
             entry["clusterMarkerMetrics"] = [
                 {"accessor": a, "name": a, "description": ""} for a in accessors
             ]
+        fields_map = cluster_fields.get(new)
         for table in group_tables:
             accessor = _MARKERS.match(table.key).group(2)
             table.key = f"ClusterMarkers_{new}" + (f"_{accessor}" if accessor else "")
+            if fields_map is not None:
+                # Fields are cluster ids, renumbered with the clusters.
+                gone = [f for f in table.fields if f not in fields_map]
+                if gone:
+                    warnings.append(f"Not written in {table.source}: {', '.join(gone)} -- no "
+                                    f"cluster of {found[new].column!r} has that id.")
+                kept = [(fields_map[f], c, table.dtype[f])
+                        for f, c in zip(table.fields, table.columns) if f in fields_map]
+                table.fields = [f for f, _, _ in kept]
+                table.columns = [c for _, c, _ in kept]
+                table.dtype = np.dtype([(f, t) for f, _, t in kept])
+                if not table.fields:
+                    continue
             keep.append(table)
     tables = keep
 
@@ -686,6 +716,8 @@ def plan_export(
         member = obs[column]
         enc = spec.encoding_type(member)
         if enc == spec.CATEGORICAL:
+            if "categories" in member and len(member["categories"]) > MAX_ANNOTATION_VALUES:
+                continue  # too many to list, and not read to find that out
             values = [str(c) for c in read_categories(member, parent_group=obs)]
         elif enc in (None, spec.ARRAY, spec.STRING_ARRAY) and getattr(member, "ndim", 0) == 1 \
                 and member.dtype.kind in "biuf":

@@ -594,3 +594,81 @@ def test_a_text_column_with_too_many_values_is_no_annotation_and_is_not_read_who
         assert scope._distinct_text(f["obs/barcode"], f["obs"], scope.MAX_ANNOTATION_VALUES) is None
         assert sum(rows) == 250, "stops at the first block past 245 values"
         assert scope._distinct_text(f["obs/sample"], f["obs"], scope.MAX_ANNOTATION_VALUES) == ["s1", "s2"]
+
+
+def test_marker_fields_are_renumbered_with_their_clusters(tmp_path):
+    """Clusters numbered 2, 5 and 9 were renumbered 0, 1 and 2 in MetaData,
+    but the marker tables kept fields 2, 5 and 9: SCope matched no marker
+    to any cluster."""
+    truth = write_scope_loom(tmp_path / "scope.loom", compressed=False)
+    meta = json.loads(json.dumps(truth.metadata))
+    ids = {0: 2, 1: 5, 2: 9}
+    for cluster in meta["clusterings"][0]["clusters"]:
+        cluster["id"] = ids[cluster["id"]]
+    meta["clusterings"][0]["clusterMarkerMetrics"] = [{"accessor": "avg_logFC", "name": "logFC", "description": ""}]
+    _set_metadata(truth.path, json.dumps(meta))
+    with h5py.File(truth.path, "a") as f:
+        cols, rows = f["col_attrs"], f["row_attrs"]
+        clusterings = cols["Clusterings"][...]
+        clusterings["0"] = np.vectorize(ids.get)(clusterings["0"])
+        del cols["Clusterings"]
+        cols.create_dataset("Clusterings", data=clusterings)
+        marks = np.zeros(10, dtype=[("2", "i8"), ("5", "i8"), ("9", "i8")])
+        logfc = np.zeros(10, dtype=[("2", "f4"), ("5", "f4"), ("9", "f4")])
+        for k, field in enumerate(("2", "5", "9")):
+            marks[field][k] = 1
+            logfc[field][k] = k + 0.5
+        rows.create_dataset("ClusterMarkers_0", data=marks)
+        rows.create_dataset("ClusterMarkers_0_avg_logFC", data=logfc)
+    first, back = tmp_path / "a.h5ad", tmp_path / "back.loom"
+    _ok(truth.path, "-o", first)
+    _ok(first, "-o", back, "--scope")
+    loom = _scope_loom(back)
+    clusters = loom["meta"]["clusterings"][0]["clusters"]
+    assert [c["description"] for c in clusters] == ["B cell", "T cell", "NK"]
+    marks, logfc = loom["rows"]["ClusterMarkers_0"], loom["rows"]["ClusterMarkers_0_avg_logFC"]
+    assert marks.dtype.names == logfc.dtype.names == ("0", "1", "2")
+    for k in range(3):
+        assert list(np.flatnonzero(marks[str(k)])) == [k]
+        assert logfc[str(k)][k] == k + 0.5
+
+
+def test_a_clustering_named_with_clusterings_keeps_its_marker_tables(tmp_path):
+    """Marker tables were kept only for a clustering an import recorded, so
+    a plain AnnData's lost theirs."""
+    obj = _small_anndata(tmp_path)
+    marks = pd.DataFrame({str(k): [int(g == k) for g in range(4)] for k in range(3)}, index=obj.var_names)
+    obj.varm["ClusterMarkers_0"] = marks
+    obj.varm["ClusterMarkers_0_avg_logFC"] = marks.astype(np.float32) * 2
+    source, out = tmp_path / "in.h5ad", tmp_path / "out.loom"
+    obj.write_h5ad(source)
+    _ok(source, "-o", out, "--scope", "--clusterings", "leiden")
+    loom = _scope_loom(out)
+    assert loom["rows"]["ClusterMarkers_0"].dtype.names == ("0", "1", "2")
+    assert "ClusterMarkers_0_avg_logFC" in loom["rows"]
+    assert loom["meta"]["clusterings"][0]["clusterMarkerMetrics"][0]["accessor"] == "avg_logFC"
+
+
+def test_a_categorical_with_too_many_categories_is_no_annotation_and_its_categories_are_not_read(
+    tmp_path, monkeypatch
+):
+    import adata.elements.read as read
+
+    n = 300
+    obj = _small_anndata(tmp_path, n=n, barcode=pd.Categorical([f"b{i}" for i in range(n)]))
+    source, out = tmp_path / "in.h5ad", tmp_path / "out.loom"
+    obj.write_h5ad(source)
+    real, seen = read.read_categories, []
+
+    def counted(column, *args, **kwargs):
+        seen.append(column.name)
+        return real(column, *args, **kwargs)
+
+    monkeypatch.setattr(read, "read_categories", counted)
+    from adata.conversion import scope
+
+    with h5py.File(source) as f:
+        found = scope.plan_export(f, obs_columns=["barcode", "leiden"], varm_key="varm", clusterings=None,
+                                  default_embedding=None, warnings=[])
+    assert [a["name"] for a in found.metadata["annotations"]] == ["leiden"]
+    assert "/obs/barcode" not in seen
