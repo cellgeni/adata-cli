@@ -701,24 +701,12 @@ def plan_export(
                 and not any(t.key == base for t in named):
             warnings.append(f"Not written: the rest of {base} -- its table of markers is left out.")
             continue
-        group_tables = named
-        accessors = [m.group(2) for t in group_tables if (m := _MARKERS.match(t.key)).group(2)]
-        # The metrics of the tables written: those recorded, named as they
-        # were, then any table added since, named after its accessor.
-        metrics = [m for m in recorded_metrics.get(new, []) if m["accessor"] in accessors]
-        listed = {m["accessor"] for m in metrics}
-        metrics += [{"accessor": a, "name": a, "description": ""} for a in accessors if a not in listed]
-        if not metrics:
-            warnings.append(
-                f"Not written: ClusterMarkers_{old} -- without metrics (_avg_logFC, "
-                "_pval, ...) SCope cannot show markers."
-            )
-            continue
-        entry["clusterMarkerMetrics"] = metrics
+        # Fields are cluster ids, renumbered with the clusters; a table left
+        # with none is not written, so the metrics are worked out after.
         fields_map = cluster_fields.get(new)
-        for table in group_tables:
+        group_tables = []
+        for table in named:
             if fields_map is not None:
-                # Fields are cluster ids, renumbered with the clusters.
                 gone = [f for f in table.fields if f not in fields_map]
                 if gone:
                     warnings.append(f"Not written in {table.source}: {', '.join(gone)} -- no "
@@ -728,9 +716,22 @@ def plan_export(
                 table.fields = [f for f, _, _ in kept]
                 table.columns = [c for _, c, _ in kept]
                 table.dtype = np.dtype([(f, t) for f, _, t in kept])
-                if not table.fields:
-                    continue
-            keep.append(table)
+            if table.fields:
+                group_tables.append(table)
+        accessors = [m.group(2) for t in group_tables if (m := _MARKERS.match(t.key)).group(2)]
+        # The metrics of the tables written: those recorded, named as they
+        # were, then any table added since, named after its accessor.
+        metrics = [m for m in recorded_metrics.get(new, []) if m["accessor"] in accessors]
+        listed = {m["accessor"] for m in metrics}
+        metrics += [{"accessor": a, "name": a, "description": ""} for a in accessors if a not in listed]
+        if not metrics or not any(t.key == base for t in group_tables) and any(t.key == base for t in named):
+            warnings.append(
+                f"Not written: ClusterMarkers_{old} -- without metrics (_avg_logFC, "
+                "_pval, ...) or markers, SCope cannot show them."
+            )
+            continue
+        entry["clusterMarkerMetrics"] = metrics
+        keep.extend(group_tables)
     tables = keep
 
     # Metrics and annotations: the obs columns written; clusterings are SCope's own.

@@ -864,3 +864,28 @@ def test_an_auc_table_that_loses_its_name_takes_its_regulon_metadata_with_it(tmp
     loom = _scope_loom(back)
     assert loom["cols"]["RegulonsAUC"].dtype.names is None
     assert loom["meta"]["regulonThresholds"] == []
+
+
+def test_a_marker_table_left_with_no_cluster_is_not_listed_as_a_metric(tmp_path):
+    """A metric table whose fields named no cluster any more was dropped
+    after clusterMarkerMetrics had listed it."""
+    truth = write_scope_loom(tmp_path / "scope.loom", compressed=False)
+    meta = json.loads(json.dumps(truth.metadata))
+    meta["clusterings"][0]["clusterMarkerMetrics"] = [
+        {"accessor": "avg_logFC", "name": "logFC", "description": ""},
+        {"accessor": "pval", "name": "p", "description": ""},
+    ]
+    _set_metadata(truth.path, json.dumps(meta))
+    fields = [("0", "f4"), ("1", "f4"), ("2", "f4")]
+    with h5py.File(truth.path, "a") as f:
+        rows = f["row_attrs"]
+        rows.create_dataset("ClusterMarkers_0", data=np.zeros(10, dtype=[(n, "i8") for n, _ in fields]))
+        rows.create_dataset("ClusterMarkers_0_avg_logFC", data=np.zeros(10, dtype=fields))
+        rows.create_dataset("ClusterMarkers_0_pval", data=np.zeros(10, dtype=[("7", "f4")]))
+    first, back = tmp_path / "a.h5ad", tmp_path / "back.loom"
+    _ok(truth.path, "-o", first)
+    result = _ok(first, "-o", back, "--scope")
+    assert "Not written in varm/ClusterMarkers_0_pval: 7" in _out(result)
+    loom = _scope_loom(back)
+    assert "ClusterMarkers_0_pval" not in loom["rows"]
+    assert [m["accessor"] for m in loom["meta"]["clusterings"][0]["clusterMarkerMetrics"]] == ["avg_logFC"]
