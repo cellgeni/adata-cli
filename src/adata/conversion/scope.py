@@ -510,6 +510,15 @@ def _scalar_text(ds: Any) -> str:
     return value.decode("utf-8") if isinstance(value, bytes) else str(value)
 
 
+def _check_fits(fields: Sequence[Tuple[str, Any]], what: str, advice: str) -> None:
+    """Refuse, in the plan, a compound attribute HDF5 could not create."""
+    if fields and not compound_fits(np.dtype(list(fields))):
+        raise ValueError(
+            f"{what} are more than HDF5 can hold as one compound attribute "
+            f"(its type must fit 64 KiB). {advice}"
+        )
+
+
 def clustering_columns(root: Any, clusterings: Optional[str]) -> List[str]:
     """The obs columns to write as clusterings: those a SCope import
     recorded, then those `--clusterings` names (checked by the plan)."""
@@ -561,7 +570,7 @@ def plan_export(
                 warnings.append(f"Not written in {where}/{key}: {', '.join(other)} -- a SCope "
                                 "table holds numbers only.")
             # Marker tables claim their names once renumbered, below.
-            if numeric and (_MARKERS.match(key) or claim_attr(
+            if numeric and (axis == "row" and _MARKERS.match(key) or claim_attr(
                 owners, "col_attrs" if axis == "col" else "row_attrs", key, f"{where}/{key}", warnings
             )):
                 frames.append((axis, where, key, obj, numeric))
@@ -637,6 +646,8 @@ def plan_export(
         name = recorded_embeddings.get(key, (None, ""))[1] or (key[2:] if key.startswith("X_") else key)
         embeddings.append(ExportEmbedding(id, name, key))
     embeddings.sort(key=lambda e: e.id)
+    _check_fits([(str(e.id), np.dtype(obsm[e.key].dtype.str)) for e in embeddings],
+                f"{len(embeddings):,} embeddings (two-column obsm arrays)", "Keep fewer of them first.")
 
     # Clusterings: the recorded ones, and those --clusterings names.
     obs = root["obs"]
@@ -683,6 +694,8 @@ def plan_export(
         recorded_metrics[position] = [m for m in recorded.get("clusterMarkerMetrics") or []
                                       if isinstance(m, dict) and m.get("accessor")]
         found.append(ExportClustering(position, column, entry))
+    _check_fits([(str(c.id), np.int64) for c in found],
+                f"{len(found):,} clusterings", "Name fewer with --clusterings.")
     # A clustering no import recorded owns the marker tables of its new id.
     for clustering in found:
         if clustering.id not in cluster_fields:

@@ -919,3 +919,31 @@ def test_metric_tables_without_their_markers_table_are_left_out(tmp_path):
     loom = _scope_loom(out)
     assert "ClusterMarkers_0_avg_logFC" not in loom["rows"]
     assert "clusterMarkerMetrics" not in loom["meta"]["clusterings"][0]
+
+
+def test_an_obsm_table_named_like_markers_claims_its_name(tmp_path):
+    """An obsm dataframe named ClusterMarkers_0 skipped the name check meant
+    for varm's marker tables, and was written over an obs column of that
+    name with the output half written."""
+    obj = _small_anndata(tmp_path, ClusterMarkers_0=np.arange(12.0))
+    obj.obsm["ClusterMarkers_0"] = pd.DataFrame({"A": np.ones(12)}, index=obj.obs_names)
+    source, out = tmp_path / "in.h5ad", tmp_path / "out.loom"
+    obj.write_h5ad(source)
+    result = _ok(source, "-o", out, "--scope")
+    assert "Not written: obsm/ClusterMarkers_0 -- col_attrs/ClusterMarkers_0 is obs column" in _out(result)
+    assert list(_scope_loom(out)["cols"]["ClusterMarkers_0"]) == list(np.arange(12.0))
+
+
+def test_too_many_embeddings_for_hdf5_are_refused_before_writing(tmp_path, monkeypatch):
+    from adata.conversion import scope
+
+    obj = _small_anndata(tmp_path)
+    obj.obsm["X_tsne"] = np.zeros((12, 2))
+    source, out = tmp_path / "in.h5ad", tmp_path / "out.loom"
+    obj.write_h5ad(source)
+    # Small enough to test, the same check as at 64 KiB.
+    monkeypatch.setattr(scope, "compound_fits", lambda dtype: len(dtype.names) < 2)
+    result = _convert(source, "-o", out, "--scope")
+    assert result.exit_code == 1
+    assert "2 embeddings (two-column obsm arrays) are more than HDF5 can hold" in _out(result)
+    assert not out.exists()
