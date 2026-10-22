@@ -5,13 +5,15 @@ streamed a block of rows at a time and written straight into the output, so
 peak memory is set by the block size rather than by the total size of the
 inputs.
 
-Columns of the concatenated axis follow `join`; elements of the alternative
-axis and of uns follow a `merge` strategy, since there is no single correct
-way to reconcile values that differ between inputs.
+Columns of the concatenated axis follow `join`, in obs and in obsm's
+dataframes alike; elements of the alternative axis (var's columns, varm) and
+of uns follow a `merge` strategy, since there is no single correct way to
+reconcile values that differ between inputs.
 """
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -23,6 +25,7 @@ from adata.core.select import read_names
 from adata.elements import spec
 from adata.elements.read import (
     dataframe_columns,
+    decode_str_array,
     element_len,
     read_str_all,
     read_categories,
@@ -39,10 +42,15 @@ from adata.elements.write import (
     write_mapping,
     write_string_array,
 )
+from adata.elements.strings import is_string_dtype
 from adata.storage import (
     copy_tree,
     create_dataset,
+    dataset_create_kwargs,
+    fit_chunks,
     is_dataset,
+    is_zarr_array,
+    is_zarr_group,
     Store,
     is_group,
     open_store,
@@ -211,8 +219,6 @@ def _column_kind(obj: Any) -> str:
     if enc in spec.MASKED_TYPES or (is_group(obj) and "values" in obj):
         return "masked"
     if is_dataset(obj):
-        from adata.elements.strings import is_string_dtype
-
         return "string" if is_string_dtype(obj.dtype) else "numeric"
     return "other"
 
@@ -689,10 +695,21 @@ def _concat_obsm(
     n_rows: int,
     chunk_rows: int,
     console: Console,
+    *,
+    lengths: Optional[List[int]] = None,
+    join: str = "inner",
+    target_obs: Optional[List[str]] = None,
 ) -> bool:
-    """Concatenate an obsm entry row-wise; its columns are not an axis."""
+    """Concatenate an obsm entry row-wise; its columns are not an axis.
+
+    A dataframe in every input (a SCope import's `RegulonsAUC`) is
+    concatenated as obs is, its columns following `join`.
+    """
+    if all(spec.encoding_type(s) == spec.DATAFRAME for s in sources) and target_obs is not None:
+        _concat_frame(dst_parent, name, sources, lengths or [], join, target_obs, console)
+        return True
     if not all(is_dataset(s) for s in sources):
-        console.print(f"[yellow]Skipping obsm/{name}: not a dense array in every input[/]")
+        console.print(f"[yellow]Skipping obsm/{name}: not an array, or not a dataframe, in every input[/]")
         return False
 
     widths = {tuple(s.shape[1:]) for s in sources}
@@ -716,6 +733,176 @@ def _concat_obsm(
             out[offset + start : offset + end, ...] = source[start:end, ...]
         offset += source.shape[0]
     return True
+
+
+def _concat_frame(
+    dst_parent: Any,
+    name: str,
+    sources: List[Any],
+    lengths: List[int],
+    join: str,
+    target_obs: List[str],
+    console: Console,
+) -> None:
+    """Dataframes stacked row-wise, as obs is: their columns follow `join`."""
+    per_input = [dataframe_columns(s, resolve_index(s, "obs")[1]) for s in sources]
+    if join == "inner":
+        shared = set(per_input[0]).intersection(*map(set, per_input[1:]))
+        names = [c for c in per_input[0] if c in shared]
+    else:
+        names = _index_union(per_input)
+    frame = write_dataframe_header(dst_parent, name, target_obs, [])
+    written = [
+        column for column in names
+        if _concat_obs_column(frame, column, [s[column] if column in s else None for s in sources],
+                              lengths, console)
+    ]
+    set_column_order(frame, written)
+
+
+# ---------------------------------------------------------------------------
+# varm
+
+
+def _aligned_rows(obj: Any, rows: np.ndarray) -> np.ndarray:
+    """`obj[rows]`, for target rows in any order, one block at a time.
+
+    Rows in order (an inner join keeps the first input's) are read as the
+    one slab they span; rows out of order by index, which both backends
+    take only sorted, then put back in the target's order.
+    """
+    order = np.argsort(rows, kind="stable")
+    wanted = rows[order]
+    lo, hi = int(wanted[0]), int(wanted[-1]) + 1
+    if hi - lo <= 2 * len(rows):
+        block = np.asarray(obj[lo:hi, ...])[wanted - lo]
+    elif is_zarr_array(obj):
+        block = np.asarray(obj.oindex[(wanted,) + (slice(None),) * (obj.ndim - 1)])
+    else:
+        block = np.asarray(obj[wanted, ...])
+    out = np.empty_like(block)
+    out[order] = block
+    # h5py writes text only from str objects, not numpy's `<U`.
+    return decode_str_array(out).astype(object) if is_string_dtype(out.dtype) else out
+
+
+def _digest(hasher: Any, values: np.ndarray) -> None:
+    """Feed values to `hasher` exactly: bytes for numbers, so NaN equals NaN,
+    and the text itself for strings, never object pointers."""
+    if values.dtype.kind in "OSUT":
+        for text in decode_str_array(values).reshape(-1).tolist():
+            data = text.encode("utf-8", "surrogatepass")
+            hasher.update(len(data).to_bytes(8, "little") + data)
+    else:
+        hasher.update(np.ascontiguousarray(values).tobytes())
+
+
+def _varm_snapshot(obj: Any, where: np.ndarray, block_rows: int) -> Any:
+    """A comparable value of a varm entry, on the target var: a digest of an
+    array, read a block of rows at a time; of each column, for a dataframe.
+
+    A digest, not the values, so that comparing an entry holds one block
+    (or one var-length column) in memory rather than every input's whole
+    entry at once.
+    """
+    if is_dataset(obj):
+        hasher = hashlib.blake2b(digest_size=32)
+        for start in range(0, len(where), block_rows):
+            _digest(hasher, _aligned_rows(obj, where[start:start + block_rows]))
+        kind = "text" if is_string_dtype(obj.dtype) else str(obj.dtype)
+        return ("array", kind, tuple(obj.shape[1:]), hasher.digest())
+    if spec.encoding_type(obj) != spec.DATAFRAME:
+        return _Incomparable()
+    columns = []
+    for name in dataframe_columns(obj, resolve_index(obj, "var")[1]):
+        column = obj[name]
+        kind = _column_kind(column)
+        hasher = hashlib.blake2b(digest_size=32)
+        if kind == "numeric":
+            values = np.asarray(column[...])[where]
+            _digest(hasher, values)
+            columns.append((name, str(values.dtype), hasher.digest()))
+        elif kind == "categorical":
+            categories = np.asarray([str(c) for c in read_categories(column)] + [""], dtype=object)
+            codes = np.asarray(column["codes"][...], dtype=np.int64)[where]
+            _digest(hasher, codes < 0)
+            _digest(hasher, categories[codes])
+            columns.append((name, "categorical", hasher.digest()))
+        elif kind == "masked":
+            _digest(hasher, np.asarray(column["mask"][...], dtype=bool)[where])
+            _digest(hasher, np.asarray(column["values"][...])[where])
+            columns.append((name, "masked", hasher.digest()))
+        else:
+            _digest(hasher, np.asarray(read_str_all(column), dtype=object)[where])
+            columns.append((name, "text", hasher.digest()))
+    return ("dataframe", tuple(columns))
+
+
+def _write_varm_array(parent: Any, name: str, obj: Any, take: np.ndarray, block_rows: int) -> None:
+    """A varm array's rows on the target var, a block at a time, its
+    chunking and compression kept as every other copied dataset's are."""
+    backend = "zarr" if is_zarr_group(parent) else "hdf5"
+    shape = (len(take),) + tuple(obj.shape[1:])
+    kw = fit_chunks(dataset_create_kwargs(obj, target_backend=backend, dst_parent=parent),
+                    shape, backend=backend)
+    text = is_string_dtype(obj.dtype)
+    out = create_dataset(parent, name, shape=shape, dtype=obj.dtype, **kw)
+    spec.set_encoding(out, spec.STRING_ARRAY if text else spec.ARRAY)
+    for start in range(0, len(take), block_rows):
+        out[start:start + block_rows, ...] = _aligned_rows(obj, take[start:start + block_rows])
+
+
+def _write_varm(
+    dst: Any,
+    roots: List[Any],
+    var_names: List[List[str]],
+    target_var: List[str],
+    merge: Optional[str],
+    console: Console,
+    chunk_rows: int = 1024,
+) -> None:
+    """varm entries the merge strategy keeps, on the target var.
+
+    As var's columns: an input lacking the entry, or some of the target's
+    genes (an outer join), counts as missing; `same` and `unique` compare
+    digests read once per input, `first` and `only` presence alone. Arrays
+    are read and written `chunk_rows` genes at a time.
+    """
+    names = _index_union([list(r["varm"].keys()) if "varm" in r else [] for r in roots])
+    if not names:
+        return
+    if merge is None:
+        console.print(
+            "[yellow]Dropping varm: pass --merge to keep the entries the inputs agree on.[/]"
+        )
+        return
+    varm = write_mapping(dst, "varm")
+    positions = [_column_map(target_var, names_i) for names_i in var_names]
+    compares = merge in ("same", "unique")
+    for name in names:
+        aligned: List[Any] = []
+        for root, where in zip(roots, positions):
+            if "varm" not in root or name not in root["varm"] or (where < 0).any():
+                aligned.append(_MISSING)
+            elif compares:
+                aligned.append(_varm_snapshot(root["varm"][name], where, chunk_rows))
+            else:
+                aligned.append(_PRESENT)
+        keep, _ = _merge_values(aligned, merge)
+        if not keep:
+            continue
+        source = next(i for i, v in enumerate(aligned) if v is not _MISSING)
+        obj, take = roots[source]["varm"][name], positions[source]
+        if is_dataset(obj):
+            _write_varm_array(varm, name, obj, take, chunk_rows)
+        elif spec.encoding_type(obj) == spec.DATAFRAME:
+            frame = write_dataframe_header(varm, name, target_var, [])
+            columns = dataframe_columns(obj, resolve_index(obj, "var")[1])
+            for column in columns:
+                _write_var_column(frame, column, obj[column], take)
+            set_column_order(frame, columns)
+        else:
+            console.print(f"[yellow]Skipping varm/{name}: neither an array nor a dataframe[/]")
 
 
 # ---------------------------------------------------------------------------
@@ -945,7 +1132,9 @@ def concat_on_disk(
                 fill_value,
                 console,
             )
-            _write_obsm(dst, roots, n_obs, chunk_rows, console)
+            _write_obsm(dst, roots, n_obs, chunk_rows, console,
+                        lengths=obs_counts, join=join, target_obs=target_obs)
+            _write_varm(dst, roots, var_names, target_var, merge, console, chunk_rows)
 
             uns_groups = [r["uns"] if "uns" in r else None for r in roots]
             if any(g is not None for g in uns_groups):
@@ -1165,7 +1354,15 @@ def _write_matrices(
 
 
 def _write_obsm(
-    dst: Any, roots: List[Any], n_obs: int, chunk_rows: int, console: Console
+    dst: Any,
+    roots: List[Any],
+    n_obs: int,
+    chunk_rows: int,
+    console: Console,
+    *,
+    lengths: Optional[List[int]] = None,
+    join: str = "inner",
+    target_obs: Optional[List[str]] = None,
 ) -> None:
     """Concatenate obsm entries shared by all inputs."""
     names = _index_union(
@@ -1182,5 +1379,6 @@ def _write_obsm(
             )
             continue
         _concat_obsm(
-            obsm, name, [r["obsm"][name] for r in roots], n_obs, chunk_rows, console
+            obsm, name, [r["obsm"][name] for r in roots], n_obs, chunk_rows, console,
+            lengths=lengths, join=join, target_obs=target_obs,
         )
