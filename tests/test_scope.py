@@ -521,3 +521,76 @@ def test_metadata_from_columns_and_a_thresholds_table(tmp_path):
         {"regulon": "A_(+)", "defaultThresholdValue": 0.5, "motifData": "a.png"},
         {"regulon": "B_(2g)", "defaultThresholdValue": 0.25, "motifData": "b.png"},
     ]
+
+
+def _small_anndata(tmp_path: Path, n: int = 12, **obs):
+    rng = np.random.default_rng(1)
+    frame = {"leiden": pd.Categorical([str(i % 3) for i in range(n)]), **obs}
+    obj = ad.AnnData(
+        X=rng.poisson(1, (n, 4)).astype(np.float32),
+        obs=pd.DataFrame(frame, index=[f"c{i}" for i in range(n)]),
+        var=pd.DataFrame(index=[f"G{j}" for j in range(4)]),
+    )
+    obj.obsm["X_umap"] = rng.normal(size=(n, 2))
+    return obj
+
+
+def test_regulons_that_meet_once_spaces_go_keep_one_field_in_both_tables(tmp_path):
+    """`A B` and `A_B` were renamed table by table: with the columns in
+    another order in Regulons, one field held one regulon's AUC and the
+    other's targets."""
+    obj = _small_anndata(tmp_path)
+    obj.obsm["RegulonsAUC"] = pd.DataFrame({"A B": np.full(12, 0.25), "A_B": np.full(12, 0.75)},
+                                           index=obj.obs_names)
+    obj.varm["Regulons"] = pd.DataFrame({"A_B": [0, 0, 0, 1], "A B": [1, 1, 1, 0]}, index=obj.var_names)
+    source, out = tmp_path / "in.h5ad", tmp_path / "out.loom"
+    obj.write_h5ad(source)
+    _ok(source, "-o", out, "--scope")
+    loom = _scope_loom(out)
+    auc, targets = loom["cols"]["RegulonsAUC"], loom["rows"]["Regulons"]
+    assert sorted(auc.dtype.names) == sorted(targets.dtype.names)
+    for field in auc.dtype.names:
+        spaced = auc[field][0] == 0.25
+        assert list(targets[field]) == ([1, 1, 1, 0] if spaced else [0, 0, 0, 1]), field
+
+
+def test_cluster_id_is_written_from_the_first_clustering_not_a_stale_column(tmp_path):
+    """An obs column named ClusterID was written as it was, and SCope's own
+    ClusterID left out: after the clustering was edited the two disagreed."""
+    obj = _small_anndata(tmp_path, ClusterID=np.full(12, 7))
+    source, out = tmp_path / "in.h5ad", tmp_path / "out.loom"
+    obj.write_h5ad(source)
+    result = _ok(source, "-o", out, "--scope", "--clusterings", "leiden")
+    assert "'ClusterID' is written afresh from the first clustering, 'leiden'" in _out(result)
+    loom = _scope_loom(out)
+    assert list(loom["cols"]["ClusterID"]) == [i % 3 for i in range(12)]
+    assert "ClusterID" not in [m["name"] for m in loom["meta"]["metrics"]]
+
+
+def test_a_text_column_with_too_many_values_is_no_annotation_and_is_not_read_whole(tmp_path, monkeypatch):
+    """Annotation values were found by reading the whole column, however many
+    values it had, to throw them away past 245."""
+    import adata.elements.read as read
+    from adata.conversion import features, scope
+
+    n = 4000
+    obj = _small_anndata(tmp_path, n=n, barcode=[f"b{i}" for i in range(n)],
+                         sample=["s1", "s2"] * (n // 2))
+    source, out = tmp_path / "in.h5ad", tmp_path / "out.loom"
+    obj.write_h5ad(source)
+    _ok(source, "-o", out, "--scope")
+    names = [a["name"] for a in _scope_loom(out)["meta"]["annotations"]]
+    assert "barcode" not in names and "sample" in names
+
+    monkeypatch.setattr(features, "STRING_STEP", 10)
+    real, rows = read.read_str_chunk, []
+
+    def counted(obj, lo, hi, *args, **kwargs):
+        rows.append(hi - lo)
+        return real(obj, lo, hi, *args, **kwargs)
+
+    monkeypatch.setattr(read, "read_str_chunk", counted)
+    with h5py.File(source) as f:
+        assert scope._distinct_text(f["obs/barcode"], f["obs"], scope.MAX_ANNOTATION_VALUES) is None
+        assert sum(rows) == 250, "stops at the first block past 245 values"
+        assert scope._distinct_text(f["obs/sample"], f["obs"], scope.MAX_ANNOTATION_VALUES) == ["s1", "s2"]

@@ -808,6 +808,12 @@ class LoomExport(Converter):
                     varm_key=varm_key, clusterings=options.clusterings,
                     default_embedding=options.default_embedding, warnings=warnings,
                 )
+                if found.cluster_id and "ClusterID" in obs_columns:
+                    # A stale copy would disagree with Clusterings once the
+                    # first clustering is edited.
+                    obs_columns = [c for c in obs_columns if c != "ClusterID"]
+                    warnings.append("obs column 'ClusterID' is written afresh from the "
+                                    f"first clustering, {found.clusterings[0].column!r}.")
                 # Embeddings go out as SCope's, not again as plain attributes.
                 embedded = {e.key for e in found.embeddings}
                 obsm = [name for name in obsm if name not in embedded]

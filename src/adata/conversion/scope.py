@@ -520,13 +520,12 @@ def plan_export(
     warnings: List[str],
 ) -> ScopeExport:
     """Everything a SCope loom needs, worked out and checked before writing."""
-    from adata.elements.read import dataframe_columns, read_categories, read_str_all, resolve_index
-    from adata.util.names import natural_sorted
+    from adata.elements.read import dataframe_columns, read_categories, resolve_index
 
     parsed, recorded_embeddings, recorded_clusterings = _recorded(root)
 
-    # Compound tables: every dataframe in obsm and varm.
-    tables: List[ExportTable] = []
+    # Compound tables: every dataframe in obsm and varm, numeric columns only.
+    frames = []
     for axis, where in (("col", "obsm"), ("row", varm_key)):
         group = _resolve(root, where)
         for key in (group if group is not None else []):
@@ -542,22 +541,40 @@ def plan_export(
             if other:
                 warnings.append(f"Not written in {where}/{key}: {', '.join(other)} -- a SCope "
                                 "table holds numbers only.")
-            if not numeric:
-                continue
-            regulons = key.endswith("Regulons") or key.endswith("RegulonsAUC")
+            if numeric:
+                frames.append((axis, where, key, obj, numeric))
+
+    # One field name per regulon across AUC and Regulons, so that when two
+    # names meet once spaces go (`A B`, `A_B`) a regulon's scores and its
+    # targets still share a field.
+    is_regulons = lambda key: key.endswith("Regulons") or key.endswith("RegulonsAUC")  # noqa: E731
+    regulon_fields: Dict[str, str] = {}
+    taken_regulons: Set[str] = set()
+    for _, _, key, _, numeric in frames:
+        if is_regulons(key):
+            for c in numeric:
+                if c not in regulon_fields:
+                    regulon_fields[c] = claim(c.replace(" ", "_"), taken_regulons)
+
+    tables: List[ExportTable] = []
+    for axis, where, key, obj, numeric in frames:
+        regulons = is_regulons(key)
+        if regulons:
+            fields = [regulon_fields[c] for c in numeric]
+        else:
             taken: Set[str] = set()
-            fields = [claim(c.replace(" ", "_") if regulons else c, taken) for c in numeric]
-            renamed = [f"{c!r} as {f!r}" for c, f in zip(numeric, fields) if c != f]
-            if renamed:
-                warnings.append(f"Renamed in {key}: {', '.join(renamed)} -- SCope's regulon names hold no spaces.")
-            dtype = np.dtype([(f, np.dtype(obj[c].dtype.str)) for f, c in zip(fields, numeric)])
-            if not compound_fits(dtype):
-                raise ValueError(
-                    f"{where}/{key} has {len(fields):,} columns, more than HDF5 can hold "
-                    "as one compound attribute (its type must fit 64 KiB); pySCENIC's own "
-                    "export stops at the same limit. Keep fewer columns first."
-                )
-            tables.append(ExportTable(axis, key, f"{where}/{key}", numeric, fields, dtype))
+            fields = [claim(c, taken) for c in numeric]
+        renamed = [f"{c!r} as {f!r}" for c, f in zip(numeric, fields) if c != f]
+        if renamed:
+            warnings.append(f"Renamed in {key}: {', '.join(renamed)} -- SCope's regulon names hold no spaces.")
+        dtype = np.dtype([(f, np.dtype(obj[c].dtype.str)) for f, c in zip(fields, numeric)])
+        if not compound_fits(dtype):
+            raise ValueError(
+                f"{where}/{key} has {len(fields):,} columns, more than HDF5 can hold "
+                "as one compound attribute (its type must fit 64 KiB); pySCENIC's own "
+                "export stops at the same limit. Keep fewer columns first."
+            )
+        tables.append(ExportTable(axis, key, f"{where}/{key}", numeric, fields, dtype))
 
     # Embeddings: obsm arrays of two numeric columns.
     obsm = root["obsm"] if "obsm" in root else {}
@@ -664,6 +681,8 @@ def plan_export(
     # Metrics and annotations: the obs columns written.
     metrics, annotations = [], []
     for column in obs_columns:
+        if found and column == "ClusterID":
+            continue  # written afresh from the first clustering
         member = obs[column]
         enc = spec.encoding_type(member)
         if enc == spec.CATEGORICAL:
@@ -675,7 +694,9 @@ def plan_export(
         elif enc in (spec.STRING_ARRAY, spec.NULLABLE_STRING_ARRAY) or (
             getattr(member, "dtype", None) is not None and member.dtype.kind in "OSUT"
         ):
-            values = natural_sorted(set(read_str_all(member, parent_group=obs)))
+            values = _distinct_text(member, obs, MAX_ANNOTATION_VALUES)
+            if values is None:
+                continue
         elif enc in (spec.NULLABLE_INTEGER, spec.NULLABLE_BOOLEAN):
             metrics.append({"name": column})
             continue
@@ -688,11 +709,13 @@ def plan_export(
     auc_fields = {f for t in tables if t.axis == "col" and t.key.endswith("RegulonsAUC") for f in t.fields}
     thresholds = []
     for entry in parsed.get("regulonThresholds", []) or []:
-        if isinstance(entry, dict) and str(entry.get("regulon", "")).replace(" ", "_") in auc_fields:
-            thresholds.append(dict(entry, regulon=str(entry["regulon"]).replace(" ", "_")))
+        name = str(entry.get("regulon", "")) if isinstance(entry, dict) else ""
+        field = regulon_fields.get(name, name.replace(" ", "_"))
+        if field in auc_fields:
+            thresholds.append(dict(entry, regulon=field))
     if not thresholds and "uns" in root and "scope" in root["uns"] and "regulon_thresholds" in root["uns"]["scope"]:
         for regulon, row in _frame_rows(root["uns"]["scope"]["regulon_thresholds"]).items():
-            name = regulon.replace(" ", "_")
+            name = regulon_fields.get(regulon, regulon.replace(" ", "_"))
             if name in auc_fields:
                 entry = {"regulon": name}
                 for key, value in row.items():
@@ -712,8 +735,25 @@ def plan_export(
     )
     return ScopeExport(
         tables, embeddings, found, metadata,
-        cluster_id=bool(found) and "ClusterID" not in obs_columns, regulons=regulons,
+        cluster_id=bool(found), regulons=regulons,
     )
+
+
+def _distinct_text(member: Any, obs: Any, limit: int) -> Optional[List[str]]:
+    """A text column's distinct values, read a block at a time; None as soon
+    as there are more than `limit`, without reading the rest."""
+    from adata.conversion.features import STRING_STEP
+    from adata.elements.read import element_len, read_str_chunk
+    from adata.util.names import natural_sorted
+
+    seen: Set[str] = set()
+    cache: Dict[str, np.ndarray] = {}
+    n = element_len(member)
+    for lo in range(0, n, STRING_STEP):
+        seen.update(read_str_chunk(member, lo, min(lo + STRING_STEP, n), cache, parent_group=obs))
+        if len(seen) > limit:
+            return None
+    return natural_sorted(seen)
 
 
 def _resolve(root: Any, path: str) -> Any:

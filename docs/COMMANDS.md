@@ -483,7 +483,9 @@ clusterings and their clusters are numbered 0..n-1 in order, regulon names
 lose their spaces (`TP53 (5g)` becomes `TP53_(5g)`, alike in the AUC and
 the Regulons, with a warning), and cluster markers are written only with
 their metrics (`ClusterMarkers_<id>_avg_logFC` and the like, or those a
-SCope import recorded). `MetaData` is plain JSON, which SCope reads as it
+SCope import recorded). `ClusterID` is always written afresh from the first
+clustering, in place of an obs column of that name, so the two cannot
+disagree. `MetaData` is plain JSON, which SCope reads as it
 reads compressed. A clustering that is not categorical is refused, as is a
 table with more columns than HDF5 can hold in one compound attribute (its
 type must fit 64 KiB, a limit pySCENIC's own export shares), before any
