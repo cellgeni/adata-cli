@@ -676,6 +676,25 @@ def test_scope_loom_import_work_grows_linearly(tmp_path, monkeypatch):
     assert_grows_linearly(measure, what="convert SCope loom to h5ad", axis="n_cells")
 
 
+def test_scope_loom_export_work_grows_linearly(tmp_path, monkeypatch):
+    """Compound attributes are written a block of rows at a time, each field
+    read once per block."""
+    from adata.commands.convert import convert_store
+    from adata.conversion import Options, loom
+    from tests.conftest import write_scope_loom
+
+    monkeypatch.setattr(loom, "STRING_STEP", 16)
+
+    def measure(n: int) -> int:
+        h5ad = tmp_path / f"se{n}.h5ad"
+        convert_store(write_scope_loom(tmp_path / f"se{n}.loom", n_cells=n).path, h5ad, QUIET)
+        with count_io() as io:
+            convert_store(h5ad, tmp_path / f"ose{n}.loom", QUIET, options=Options(scope=True))
+        return io.work
+
+    assert_grows_linearly(measure, what="convert h5ad to a SCope loom", axis="n_cells")
+
+
 def test_scope_loom_import_writes_tables_in_blocks(tmp_path):
     """A block of rows is written per field, not a row: the write calls do
     not depend on the cell count."""

@@ -537,6 +537,9 @@ _CONVERT_FLAGS = {
     "key": "--key",
     "obs_names_key": "--obs-names-key",
     "var_names_key": "--var-names-key",
+    "scope": "--scope",
+    "clusterings": "--clusterings",
+    "default_embedding": "--default-embedding",
 }
 
 #: Flags that only make sense for format conversion; with recast's flags,
@@ -738,6 +741,24 @@ def convert(
         help="HDF5 input: the dataset naming the cells (default row_names, "
         "col_names with --transpose)",
     ),
+    scope: bool = typer.Option(
+        False,
+        "--scope",
+        help="loom output: write a SCope loom: regulons, embeddings, clusterings "
+        "and MetaData, as the SCope viewer reads them",
+    ),
+    clusterings: Optional[str] = typer.Option(
+        None,
+        "--clusterings",
+        help="SCope output: categorical obs columns written as clusterings, "
+        "comma separated (besides those a SCope import recorded)",
+    ),
+    default_embedding: Optional[str] = typer.Option(
+        None,
+        "--default-embedding",
+        help="SCope output: the obsm key SCope shows first (default: the "
+        "recorded default, else X_umap, else X_tsne, else the first)",
+    ),
     var_names_key: Optional[str] = typer.Option(
         None,
         "--var-names-key",
@@ -773,7 +794,7 @@ def convert(
     is read as anndata.read_loom reads it; a SCope loom (pySCENIC, SCENIC+,
     pycistopic) also gives its regulons as dataframes in obsm and varm, its
     embeddings and clusterings named from its MetaData, and the MetaData in
-    uns["scope"]. Features are named by gene id, unique but in probe-level
+    uns["scope"]; --scope writes them back as SCope reads them. Features are named by gene id, unique but in probe-level
     (Flex) matrices; --var-names gene_symbols names them as scanpy does.
 
     Nothing is written until every check has passed, and the output is moved
@@ -800,6 +821,7 @@ def convert(
         adata convert velocyto.loom -o velocyto.h5ad
         adata convert pyscenic_output.loom -o scenic.h5ad
         adata convert counts.h5ad -o counts.loom
+        adata convert scenic.h5ad -o scenic.loom --scope --clusterings leiden
         adata convert GSE123_counts.txt.gz -o counts.h5ad --transpose
         adata convert matrix.hdf5 -o matrix.h5ad --key data/counts
         adata convert cistopic_obj.pkl -o atac.h5ad
@@ -900,6 +922,9 @@ def convert(
                 key=key,
                 obs_names_key=obs_names_key,
                 var_names_key=var_names_key,
+                scope=scope,
+                clusterings=clusterings,
+                default_embedding=default_embedding,
             ),
         )
     except Exception as e:

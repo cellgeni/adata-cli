@@ -36,7 +36,7 @@ separate jobs.
 | `test_cistopic.py` | pycisTopic pickles read through the allowlist: a CistopicObject's matrices, frames, model and projections, an imputed-features pickle, a pickle naming `os.system` refused unrun, the missing-extra hint |
 | `test_pandas_frame.py` | Each pandas dtype written as anndata writes it, on every backend |
 | `test_concat_axis_elements.py` | `concat` on obsm dataframes and varm, against `anndata.concat` for each join and merge strategy |
-| `test_scope.py` | SCope looms as pySCENIC's `export2loom` writes them: regulons as dataframes, embeddings and clusterings named from `MetaData`, plain or compressed `MetaData`, region looms, R's logicals and factors, renamed fields, small blocks |
+| `test_scope.py` | SCope looms, read as pySCENIC's `export2loom` writes them and written with `--scope` (round trips, plain AnnData, refusals, markers): regulons as dataframes, embeddings and clusterings named from `MetaData`, plain or compressed `MetaData`, region looms, R's logicals and factors, renamed fields, small blocks |
 | `test_table.py` | The streaming CSV reader against pandas: column types, quoting, row subsets, blocks, refusals |
 | `test_mtx_codec.py`, `test_csr_build.py` | The streaming Matrix Market reader and writer against scipy, and the bucket sort they and `recast` share |
 | `test_external_readers.py` | 10x conversions, HDF5 and MTX, Parse runs and looms, checked by scanpy (Parse's own recipe for Parse), anndata with loompy (the pySCENIC tutorial's recipe for SCope looms), anndata's `read_csv`, `read_text` and `read_hdf`, a pandas 1.5 pycisTopic pickle read back there, and PyTables in their own uv environments (`integration`) |

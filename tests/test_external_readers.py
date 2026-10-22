@@ -627,6 +627,19 @@ def test_a_scope_loom_imports_as_the_pyscenic_recipe_reads_it(tmp_path, default_
     assert problems == [], problems
 
 
+def test_a_scope_export_reads_with_the_pyscenic_recipe(tmp_path):
+    """Our --scope loom, read the pySCENIC tutorial's way with loompy, holds
+    what the AnnData holds: a SCope loom (fixture) to h5ad, to a SCope loom
+    of ours, and back, compared through the recipe."""
+    truth = write_scope_loom(tmp_path / "scope.loom", compressed=False)
+    first, back, again = tmp_path / "a.h5ad", tmp_path / "back.loom", tmp_path / "b.h5ad"
+    _convert(str(truth.path), "-o", str(first))
+    _convert(str(first), "-o", str(back), "--scope")
+    _convert(str(back), "-o", str(again))
+    problems = _run(["anndata", "loompy", "pandas"], _COMPARE_SCOPE, str(back), str(again))
+    assert problems == [], problems
+
+
 _COMPARE_SCOPE = r"""
 import base64, json, sys, warnings, zlib
 warnings.filterwarnings("ignore")
@@ -635,7 +648,10 @@ import numpy as np, pandas as pd, loompy as lp, anndata as ad
 got = ad.read_h5ad(sys.argv[2])
 problems = []
 with lp.connect(sys.argv[1], mode="r", validate=False) as lf:
-    meta = json.loads(zlib.decompress(base64.b64decode(lf.attrs.MetaData)))
+    try:
+        meta = json.loads(lf.attrs.MetaData)
+    except ValueError:  # the tutorial's form: base64 of zlib
+        meta = json.loads(zlib.decompress(base64.b64decode(lf.attrs.MetaData)))
     auc = pd.DataFrame(lf.ca.RegulonsAUC, index=lf.ca.CellID)
     regulons = pd.DataFrame(lf.ra.Regulons, index=lf.ra.Gene)
     drx = pd.DataFrame(lf.ca.Embeddings_X, index=lf.ca.CellID)

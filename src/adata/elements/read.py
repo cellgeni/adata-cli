@@ -160,36 +160,38 @@ def _categorical_cache_key(col: Any, parent_group: Any | None = None) -> str:
     return repr(col)
 
 
-def read_categories(col: Any, parent_group: Any | None = None) -> np.ndarray:
-    """Read the category labels of a categorical column, modern or legacy."""
+def categories_dataset(col: Any, parent_group: Any | None = None) -> Any:
+    """The dataset holding a categorical column's labels, modern or legacy,
+    unread: its length says how many there are without reading them."""
     if is_group(col):
-        return np.asarray(decode_str_array(col["categories"][...]), dtype=str)
+        return col["categories"]
 
     cats_ref = col.attrs.get("categories", None)
     if cats_ref is not None and is_hdf5_dataset(col):
         # Legacy 0.7.x HDF5: an object reference into __categories.
-        return np.asarray(decode_str_array(col.file[cats_ref][...]), dtype=str)
+        return col.file[cats_ref]
 
     if parent_group is not None and "__categories" in parent_group:
         col_name = str(getattr(col, "name", "")).split("/")[-1]
         cats_grp = parent_group["__categories"]
         if col_name in cats_grp:
-            return np.asarray(decode_str_array(cats_grp[col_name][...]), dtype=str)
+            return cats_grp[col_name]
 
     if cats_ref is not None and isinstance(cats_ref, (str, bytes)):
         # Legacy Zarr: `categories` is an absolute path within the store.
         path = spec.decode_attr(cats_ref).lstrip("/")
-        root = getattr(col, "store_path", None)
         if parent_group is not None and path.split("/")[-1] in parent_group:
-            return np.asarray(
-                decode_str_array(parent_group[path.split("/")[-1]][...]), dtype=str
-            )
-        del root
+            return parent_group[path.split("/")[-1]]
 
     raise KeyError(
         f"Cannot find categories for categorical column "
         f"{getattr(col, 'name', '?')!r}."
     )
+
+
+def read_categories(col: Any, parent_group: Any | None = None) -> np.ndarray:
+    """Read the category labels of a categorical column, modern or legacy."""
+    return np.asarray(decode_str_array(categories_dataset(col, parent_group)[...]), dtype=str)
 
 
 def is_ordered(col: Any) -> bool:

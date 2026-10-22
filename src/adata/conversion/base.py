@@ -59,6 +59,11 @@ class Options:
     obs_names_key: Optional[str] = None
     var_names_key: Optional[str] = None
 
+    # Writing a SCope loom.
+    scope: bool = False
+    clusterings: Optional[str] = None
+    default_embedding: Optional[str] = None
+
 
 @dataclass
 class ConversionPlan:
