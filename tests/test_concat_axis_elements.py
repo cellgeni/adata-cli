@@ -170,3 +170,25 @@ def test_a_kept_varm_array_keeps_its_compression(tmp_path):
     with h5py.File(out) as f, h5py.File(a) as src:
         assert f["varm/topic_region"].compression == src["varm/topic_region"].compression == "gzip"
     assert np.array_equal(ad.read_h5ad(out).varm["topic_region"], values)
+
+
+@pytest.mark.parametrize("other", [np.int32, np.int64, np.float32, np.float64])
+def test_varm_in_another_dtype_merges_as_anndata_merges_it(tmp_path, other):
+    """anndata's `same` keeps an array only when the dtype matches as well as
+    the values (0.13: int64 against int32, float32 or float64 is dropped), so
+    the dtype stays part of what is compared."""
+    genes = [f"g{i}" for i in range(6)]
+    values = np.arange(12, dtype=np.int64).reshape(6, 2)
+    a = _varm_store(tmp_path / "a.h5ad", genes, {"counts": values})
+    b = _varm_store(tmp_path / "b.h5ad", genes, {"counts": values.astype(other)})
+    got = _concat(tmp_path, [a, b], merge="same")
+    ref = ad.concat([ad.read_h5ad(a), ad.read_h5ad(b)], merge="same")
+    assert sorted(got.varm) == sorted(ref.varm)
+
+
+def test_varm_differing_by_a_fraction_is_not_the_same(tmp_path):
+    genes = [f"g{i}" for i in range(6)]
+    values = np.arange(12, dtype=np.float64).reshape(6, 2)
+    a = _varm_store(tmp_path / "a.h5ad", genes, {"x": values})
+    b = _varm_store(tmp_path / "b.h5ad", genes, {"x": values + 0.5})
+    assert "x" not in _concat(tmp_path, [a, b], merge="same").varm
