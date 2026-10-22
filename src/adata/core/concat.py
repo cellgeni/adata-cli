@@ -13,6 +13,7 @@ reconcile values that differ between inputs.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -24,6 +25,7 @@ from adata.core.select import read_names
 from adata.elements import spec
 from adata.elements.read import (
     dataframe_columns,
+    decode_str_array,
     element_len,
     read_str_all,
     read_categories,
@@ -40,10 +42,15 @@ from adata.elements.write import (
     write_mapping,
     write_string_array,
 )
+from adata.elements.strings import is_string_dtype
 from adata.storage import (
     copy_tree,
     create_dataset,
+    dataset_create_kwargs,
+    fit_chunks,
     is_dataset,
+    is_zarr_array,
+    is_zarr_group,
     Store,
     is_group,
     open_store,
@@ -212,8 +219,6 @@ def _column_kind(obj: Any) -> str:
     if enc in spec.MASKED_TYPES or (is_group(obj) and "values" in obj):
         return "masked"
     if is_dataset(obj):
-        from adata.elements.strings import is_string_dtype
-
         return "string" if is_string_dtype(obj.dtype) else "numeric"
     return "other"
 
@@ -759,34 +764,92 @@ def _concat_frame(
 # varm
 
 
-def _varm_snapshot(obj: Any, where: np.ndarray) -> Any:
-    """A comparable value of a varm entry, on the target var: its bytes for
-    an array; each column's, for a dataframe. Exact, so NaN equals NaN."""
+def _aligned_rows(obj: Any, rows: np.ndarray) -> np.ndarray:
+    """`obj[rows]`, for target rows in any order, one block at a time.
+
+    Rows in order (an inner join keeps the first input's) are read as the
+    one slab they span; rows out of order by index, which both backends
+    take only sorted, then put back in the target's order.
+    """
+    order = np.argsort(rows, kind="stable")
+    wanted = rows[order]
+    lo, hi = int(wanted[0]), int(wanted[-1]) + 1
+    if hi - lo <= 2 * len(rows):
+        block = np.asarray(obj[lo:hi, ...])[wanted - lo]
+    elif is_zarr_array(obj):
+        block = np.asarray(obj.oindex[(wanted,) + (slice(None),) * (obj.ndim - 1)])
+    else:
+        block = np.asarray(obj[wanted, ...])
+    out = np.empty_like(block)
+    out[order] = block
+    # h5py writes text only from str objects, not numpy's `<U`.
+    return decode_str_array(out).astype(object) if is_string_dtype(out.dtype) else out
+
+
+def _digest(hasher: Any, values: np.ndarray) -> None:
+    """Feed values to `hasher` exactly: bytes for numbers, so NaN equals NaN,
+    and the text itself for strings, never object pointers."""
+    if values.dtype.kind in "OSUT":
+        for text in decode_str_array(values).reshape(-1).tolist():
+            data = text.encode("utf-8", "surrogatepass")
+            hasher.update(len(data).to_bytes(8, "little") + data)
+    else:
+        hasher.update(np.ascontiguousarray(values).tobytes())
+
+
+def _varm_snapshot(obj: Any, where: np.ndarray, block_rows: int) -> Any:
+    """A comparable value of a varm entry, on the target var: a digest of an
+    array, read a block of rows at a time; of each column, for a dataframe.
+
+    A digest, not the values, so that comparing an entry holds one block
+    (or one var-length column) in memory rather than every input's whole
+    entry at once.
+    """
     if is_dataset(obj):
-        values = np.asarray(obj[...])[where]
-        return ("array", str(values.dtype), values.shape, values.tobytes())
+        hasher = hashlib.blake2b(digest_size=32)
+        for start in range(0, len(where), block_rows):
+            _digest(hasher, _aligned_rows(obj, where[start:start + block_rows]))
+        kind = "text" if is_string_dtype(obj.dtype) else str(obj.dtype)
+        return ("array", kind, tuple(obj.shape[1:]), hasher.digest())
     if spec.encoding_type(obj) != spec.DATAFRAME:
         return _Incomparable()
     columns = []
     for name in dataframe_columns(obj, resolve_index(obj, "var")[1]):
         column = obj[name]
         kind = _column_kind(column)
+        hasher = hashlib.blake2b(digest_size=32)
         if kind == "numeric":
             values = np.asarray(column[...])[where]
-            columns.append((name, str(values.dtype), values.tobytes()))
+            _digest(hasher, values)
+            columns.append((name, str(values.dtype), hasher.digest()))
         elif kind == "categorical":
-            categories = [str(c) for c in read_categories(column)]
+            categories = np.asarray([str(c) for c in read_categories(column)] + [""], dtype=object)
             codes = np.asarray(column["codes"][...], dtype=np.int64)[where]
-            columns.append((name, tuple(categories[c] if c >= 0 else None for c in codes)))
+            _digest(hasher, codes < 0)
+            _digest(hasher, categories[codes])
+            columns.append((name, "categorical", hasher.digest()))
         elif kind == "masked":
-            mask = np.asarray(column["mask"][...], dtype=bool)[where]
-            values = np.asarray(column["values"][...])[where]
-            columns.append((name, values.tobytes() if values.dtype.kind != "O" else tuple(values.tolist()),
-                            mask.tobytes()))
+            _digest(hasher, np.asarray(column["mask"][...], dtype=bool)[where])
+            _digest(hasher, np.asarray(column["values"][...])[where])
+            columns.append((name, "masked", hasher.digest()))
         else:
-            text = read_str_all(column)
-            columns.append((name, tuple(text[i] for i in where)))
+            _digest(hasher, np.asarray(read_str_all(column), dtype=object)[where])
+            columns.append((name, "text", hasher.digest()))
     return ("dataframe", tuple(columns))
+
+
+def _write_varm_array(parent: Any, name: str, obj: Any, take: np.ndarray, block_rows: int) -> None:
+    """A varm array's rows on the target var, a block at a time, its
+    chunking and compression kept as every other copied dataset's are."""
+    backend = "zarr" if is_zarr_group(parent) else "hdf5"
+    shape = (len(take),) + tuple(obj.shape[1:])
+    kw = fit_chunks(dataset_create_kwargs(obj, target_backend=backend, dst_parent=parent),
+                    shape, backend=backend)
+    text = is_string_dtype(obj.dtype)
+    out = create_dataset(parent, name, shape=shape, dtype=obj.dtype, **kw)
+    spec.set_encoding(out, spec.STRING_ARRAY if text else spec.ARRAY)
+    for start in range(0, len(take), block_rows):
+        out[start:start + block_rows, ...] = _aligned_rows(obj, take[start:start + block_rows])
 
 
 def _write_varm(
@@ -796,12 +859,14 @@ def _write_varm(
     target_var: List[str],
     merge: Optional[str],
     console: Console,
+    chunk_rows: int = 1024,
 ) -> None:
     """varm entries the merge strategy keeps, on the target var.
 
     As var's columns: an input lacking the entry, or some of the target's
     genes (an outer join), counts as missing; `same` and `unique` compare
-    values read once per input, `first` and `only` presence alone.
+    digests read once per input, `first` and `only` presence alone. Arrays
+    are read and written `chunk_rows` genes at a time.
     """
     names = _index_union([list(r["varm"].keys()) if "varm" in r else [] for r in roots])
     if not names:
@@ -820,7 +885,7 @@ def _write_varm(
             if "varm" not in root or name not in root["varm"] or (where < 0).any():
                 aligned.append(_MISSING)
             elif compares:
-                aligned.append(_varm_snapshot(root["varm"][name], where))
+                aligned.append(_varm_snapshot(root["varm"][name], where, chunk_rows))
             else:
                 aligned.append(_PRESENT)
         keep, _ = _merge_values(aligned, merge)
@@ -829,7 +894,7 @@ def _write_varm(
         source = next(i for i, v in enumerate(aligned) if v is not _MISSING)
         obj, take = roots[source]["varm"][name], positions[source]
         if is_dataset(obj):
-            write_dense(varm, name, np.asarray(obj[...])[take])
+            _write_varm_array(varm, name, obj, take, chunk_rows)
         elif spec.encoding_type(obj) == spec.DATAFRAME:
             frame = write_dataframe_header(varm, name, target_var, [])
             columns = dataframe_columns(obj, resolve_index(obj, "var")[1])
@@ -1069,7 +1134,7 @@ def concat_on_disk(
             )
             _write_obsm(dst, roots, n_obs, chunk_rows, console,
                         lengths=obs_counts, join=join, target_obs=target_obs)
-            _write_varm(dst, roots, var_names, target_var, merge, console)
+            _write_varm(dst, roots, var_names, target_var, merge, console, chunk_rows)
 
             uns_groups = [r["uns"] if "uns" in r else None for r in roots]
             if any(g is not None for g in uns_groups):

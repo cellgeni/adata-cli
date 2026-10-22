@@ -100,3 +100,73 @@ def test_an_outer_join_drops_varm_an_input_cannot_cover(tmp_path):
     assert len(got.varm) == 0
     got = _concat(tmp_path, [a, b], join="outer", merge="first")
     assert len(got.varm) == 0, "neither input has every gene of the union"
+
+
+def _varm_store(path: Path, genes, entries, *, compress: bool = False):
+    obj = ad.AnnData(
+        X=np.zeros((2, len(genes)), dtype=np.float32),
+        obs=pd.DataFrame(index=[f"{path.stem}{i}" for i in range(2)]),
+        var=pd.DataFrame(index=list(genes)),
+    )
+    for key, value in entries.items():
+        obj.varm[key] = value
+    if path.suffix == ".zarr":
+        obj.write_zarr(path)
+    else:
+        obj.write_h5ad(path, compression="gzip" if compress else None)
+    return path
+
+
+@pytest.mark.parametrize("ext", [".h5ad", ".zarr"])
+def test_varm_on_genes_in_another_order_is_compared_and_written_a_block_at_a_time(tmp_path, ext):
+    """varm was read whole, every input's at once, to compare it: memory grew
+    with the entry and the number of inputs rather than with --chunk."""
+    genes = [f"g{i}" for i in range(40)]
+    shuffled = list(np.random.default_rng(0).permutation(genes))
+    values = np.arange(40 * 3, dtype=np.float64).reshape(40, 3)
+    by_gene = dict(zip(genes, values))
+    a = _varm_store(tmp_path / f"a{ext}", genes, {"topic_region": values})
+    b = _varm_store(tmp_path / f"b{ext}", shuffled,
+                    {"topic_region": np.stack([by_gene[g] for g in shuffled])})
+    c = _varm_store(tmp_path / f"c{ext}", shuffled,
+                    {"topic_region": np.stack([by_gene[g] for g in shuffled]) + 1})
+    for inputs, kept in (([a, b], True), ([a, c], False)):
+        out = tmp_path / f"out{len(list(tmp_path.iterdir()))}{ext}"
+        concat_on_disk(inputs, out, QUIET, merge="same", chunk_rows=4)
+        got = ad.read_zarr(out) if ext == ".zarr" else ad.read_h5ad(out)
+        assert ("topic_region" in got.varm) is kept
+        if kept:
+            assert np.array_equal(got.varm["topic_region"], values)
+    # The first input has no varm, so `first` takes c's, onto the first's genes.
+    bare = _varm_store(tmp_path / f"bare{ext}", genes, {})
+    out = tmp_path / f"first{ext}"
+    concat_on_disk([bare, c], out, QUIET, merge="first", chunk_rows=4)
+    got = ad.read_zarr(out) if ext == ".zarr" else ad.read_h5ad(out)
+    assert np.array_equal(got.varm["topic_region"], values + 1)
+
+
+def test_varm_text_arrays_are_compared_by_their_text(tmp_path):
+    """Text arrays were compared by their bytes, which for strings read from
+    HDF5 are pointers to Python objects: equal text compared unequal."""
+    genes = [f"g{i}" for i in range(5)]
+    labels = np.asarray([[f"t{i}", f"u{i}"] for i in range(5)], dtype=object)
+    a = _varm_store(tmp_path / "a.h5ad", genes, {"labels": labels})
+    b = _varm_store(tmp_path / "b.h5ad", genes, {"labels": labels.copy()})
+    got = _concat(tmp_path, [a, b], merge="same")
+    assert [list(row) for row in got.varm["labels"]] == labels.tolist()
+
+
+def test_a_kept_varm_array_keeps_its_compression(tmp_path):
+    """varm was written with the writer's defaults, uncompressed whatever the
+    input was."""
+    import h5py
+
+    genes = [f"g{i}" for i in range(50)]
+    values = np.tile(np.arange(50, dtype=np.float64)[:, None], (1, 4))
+    a = _varm_store(tmp_path / "a.h5ad", genes, {"topic_region": values}, compress=True)
+    b = _varm_store(tmp_path / "b.h5ad", genes, {"topic_region": values}, compress=True)
+    out = tmp_path / "out.h5ad"
+    concat_on_disk([a, b], out, QUIET, merge="same", chunk_rows=8)
+    with h5py.File(out) as f, h5py.File(a) as src:
+        assert f["varm/topic_region"].compression == src["varm/topic_region"].compression == "gzip"
+    assert np.array_equal(ad.read_h5ad(out).varm["topic_region"], values)
