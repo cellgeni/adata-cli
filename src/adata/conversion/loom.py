@@ -824,6 +824,13 @@ class LoomExport(Converter):
                     "leaves them out."
                 )
 
+            obs_columns, obsm, var_columns, varm = _one_owner_per_name(
+                obs_columns, obsm, var_columns, varm, found, gene, accession, varm_key, warnings
+            )
+            if found is not None:
+                for part in ("metrics", "annotations"):
+                    found.metadata[part] = [m for m in found.metadata[part] if m["name"] in obs_columns]
+
         dense = n_obs * n_var * max(1, main.dtype.itemsize) * (1 + len(layers))
         summary = (
             f"{src_format} → loom 3.0.0{' (SCope)' if found is not None else ''}, "
@@ -1020,6 +1027,52 @@ def _columns(group: Any, index_name: str, warnings: List[str], axis: str) -> Lis
             "numbers or text only."
         )
     return kept
+
+
+def _one_owner_per_name(
+    obs_columns: List[str], obsm: List[str], var_columns: List[str], varm: List[str],
+    found: Optional[scope.ScopeExport], gene: str, accession: Optional[str], varm_key: str,
+    warnings: List[str],
+) -> Tuple[List[str], List[str], List[str], List[str]]:
+    """A loom's col_attrs and row_attrs are flat, so an obs column, an obsm
+    entry and one of SCope's parts can ask for the same name, and the second
+    write failed with the output half written. The first to ask keeps it:
+    loom's and SCope's own attributes, then columns, SCope's tables, arrays.
+    The others are left out, each with a warning."""
+    owners: Dict[str, Dict[str, str]] = {"col_attrs": {"CellID": "the cell names"},
+                                         "row_attrs": {"Gene": "the gene names"}}
+    if accession is not None:
+        owners["row_attrs"]["Accession"] = "the gene ids"
+    if found is not None:
+        own = owners["col_attrs"]
+        if any(e.id == -1 for e in found.embeddings):
+            own["Embedding"] = "SCope's default embedding"
+        if found.embeddings:
+            own.update(Embeddings_X="SCope's embeddings", Embeddings_Y="SCope's embeddings")
+        if found.clusterings:
+            own["Clusterings"] = "SCope's clusterings"
+        if found.cluster_id:
+            own["ClusterID"] = "SCope's first clustering"
+
+    def claim_name(group: str, name: str, what: str) -> bool:
+        owner = owners[group].get(name)
+        if owner is None:
+            owners[group][name] = what
+            return True
+        warnings.append(f"Not written: {what} -- {group}/{name} is {owner}.")
+        return False
+
+    skip = {gene, accession, "Gene", "Accession"}
+    obs_columns = [c for c in obs_columns if c == "CellID" or claim_name("col_attrs", c, f"obs column {c!r}")]
+    var_columns = [c for c in var_columns if c in skip or claim_name("row_attrs", c, f"var column {c!r}")]
+    if found is not None:
+        found.tables = [
+            t for t in found.tables
+            if claim_name("col_attrs" if t.axis == "col" else "row_attrs", t.key, t.source)
+        ]
+    obsm = [k for k in obsm if claim_name("col_attrs", k, f"obsm/{k}")]
+    varm = [k for k in varm if claim_name("row_attrs", k, f"{varm_key}/{k}")]
+    return obs_columns, obsm, var_columns, varm
 
 
 def _gene_attrs(columns: List[str]) -> Tuple[str, Optional[str]]:

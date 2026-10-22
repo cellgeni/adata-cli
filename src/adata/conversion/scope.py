@@ -650,6 +650,9 @@ def plan_export(
             cluster_fields[position] = {
                 _label(number): str(position_of[label])
                 for (number, _), label in zip(clusters, labels) if label in position_of
+            } if clusters else {
+                # Undescribed clusters: the import labelled them by their ids.
+                label: str(i) for label, i in position_of.items()
             }
         entry = {
             "id": position,

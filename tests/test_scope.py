@@ -672,3 +672,46 @@ def test_a_categorical_with_too_many_categories_is_no_annotation_and_its_categor
                                   default_embedding=None, warnings=[])
     assert [a["name"] for a in found.metadata["annotations"]] == ["leiden"]
     assert "/obs/barcode" not in seen
+
+
+def test_markers_of_undescribed_clusters_are_kept_on_a_round_trip(tmp_path):
+    """With no clusters in MetaData the import labels them by id, and the
+    export, finding no descriptions to match, dropped every marker field."""
+    truth = write_scope_loom(tmp_path / "scope.loom", compressed=False)
+    meta = json.loads(json.dumps(truth.metadata))
+    meta["clusterings"][0]["clusters"] = []
+    meta["clusterings"][0]["clusterMarkerMetrics"] = [{"accessor": "avg_logFC", "name": "logFC", "description": ""}]
+    _set_metadata(truth.path, json.dumps(meta))
+    with h5py.File(truth.path, "a") as f:
+        logfc = np.zeros(10, dtype=[("0", "f4"), ("1", "f4"), ("2", "f4")])
+        marks = np.zeros(10, dtype=[("0", "i8"), ("1", "i8"), ("2", "i8")])
+        logfc["1"][4], marks["1"][4] = 2.5, 1
+        f["row_attrs"].create_dataset("ClusterMarkers_0", data=marks)
+        f["row_attrs"].create_dataset("ClusterMarkers_0_avg_logFC", data=logfc)
+    first, back = tmp_path / "a.h5ad", tmp_path / "back.loom"
+    _ok(truth.path, "-o", first)
+    _ok(first, "-o", back, "--scope")
+    loom = _scope_loom(back)
+    assert loom["rows"]["ClusterMarkers_0_avg_logFC"].dtype.names == ("0", "1", "2")
+    assert loom["rows"]["ClusterMarkers_0_avg_logFC"]["1"][4] == 2.5
+
+
+@pytest.mark.parametrize("scope_flag", [True, False])
+def test_two_elements_asking_for_one_attribute_name_keep_the_first_and_warn(tmp_path, scope_flag):
+    """An obs column and an obsm entry of one name were both written to
+    col_attrs: the second failed with the output half written."""
+    obj = _small_anndata(tmp_path, scores=np.arange(12.0), Clusterings=pd.Categorical(["x"] * 12))
+    obj.obsm["scores"] = pd.DataFrame({"A": np.ones(12)}, index=obj.obs_names) if scope_flag else np.ones((12, 3))
+    obj.varm["Gene"] = np.ones((4, 3))
+    source, out = tmp_path / "in.h5ad", tmp_path / "out.loom"
+    obj.write_h5ad(source)
+    args = ["--scope", "--clusterings", "leiden"] if scope_flag else []
+    result = _ok(source, "-o", out, *args)
+    text = _out(result)
+    assert "Not written: obsm/scores -- col_attrs/scores is obs column 'scores'." in text
+    assert "Not written: varm/Gene -- row_attrs/Gene is the gene names." in text
+    with h5py.File(out) as f:
+        assert list(f["col_attrs/scores"][...]) == list(np.arange(12.0))
+        if scope_flag:
+            assert "Not written: obs column 'Clusterings' -- col_attrs/Clusterings is SCope's clusterings." in text
+            assert f["col_attrs/Clusterings"].dtype.names == ("0",)

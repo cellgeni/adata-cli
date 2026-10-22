@@ -490,7 +490,11 @@ disagree. `MetaData` is plain JSON, which SCope reads as it
 reads compressed. A clustering that is not categorical is refused, as is a
 table with more columns than HDF5 can hold in one compound attribute (its
 type must fit 64 KiB, a limit pySCENIC's own export shares), before any
-output exists. Attributes are written a block of cells at a time.
+output exists. Attributes are written a block of cells at a time. A loom's
+attributes share one flat namespace per axis, with or without `--scope`:
+where an obs column, an obsm entry or one of SCope's parts ask for one name,
+the first keeps it (loom's and SCope's own attributes, then columns, SCope's
+tables, arrays) and the others are left out with a warning.
 
 SCope opens looms without loompy's validation, which rejects compound
 attributes; so do `loompy.connect(..., validate=False)` and the pySCENIC
