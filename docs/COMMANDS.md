@@ -481,8 +481,8 @@ clusterings' ids and names, recorded in `uns["scope"]`, so a SCope loom
 converts to h5ad and back with the same attributes. As SCope expects,
 clusterings and their clusters are numbered 0..n-1 in order, regulon names
 lose their spaces (`TP53 (5g)` becomes `TP53_(5g)`, alike in the AUC and
-the Regulons, with a warning), and cluster markers are written only with
-their metrics (`ClusterMarkers_<id>_avg_logFC` and the like, which
+the Regulons, with a warning), and cluster markers are written only as
+`ClusterMarkers_<id>` with their metrics (`ClusterMarkers_<id>_avg_logFC` and the like, which
 `clusterMarkerMetrics` then lists, under the names a SCope import recorded), their fields renumbered with the clusters; a
 clustering `--clusterings` names owns `ClusterMarkers_<its id>`. `ClusterID` is always written afresh from the first
 clustering, in place of an obs column of that name, so the two cannot

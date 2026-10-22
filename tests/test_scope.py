@@ -889,3 +889,33 @@ def test_a_marker_table_left_with_no_cluster_is_not_listed_as_a_metric(tmp_path)
     loom = _scope_loom(back)
     assert "ClusterMarkers_0_pval" not in loom["rows"]
     assert [m["accessor"] for m in loom["meta"]["clusterings"][0]["clusterMarkerMetrics"]] == ["avg_logFC"]
+
+
+def test_a_clustering_leaves_its_name_to_an_obsm_entry(tmp_path):
+    """A clustering column claimed its attribute name and then went out only
+    inside Clusterings, so an obsm entry of that name was dropped for
+    nothing."""
+    obj = _small_anndata(tmp_path)
+    obj.obsm["leiden"] = pd.DataFrame({"A": np.full(12, 0.5)}, index=obj.obs_names)
+    source, out = tmp_path / "in.h5ad", tmp_path / "out.loom"
+    obj.write_h5ad(source)
+    result = _ok(source, "-o", out, "--scope", "--clusterings", "leiden")
+    assert "Not written: obsm/leiden" not in _out(result)
+    loom = _scope_loom(out)
+    assert loom["cols"]["leiden"].dtype.names == ("A",)
+    assert list(loom["cols"]["Clusterings"]["0"]) == [i % 3 for i in range(12)]
+
+
+def test_metric_tables_without_their_markers_table_are_left_out(tmp_path):
+    """ClusterMarkers_0_avg_logFC with no ClusterMarkers_0 was written, and
+    listed as a metric, though SCope finds markers through the latter."""
+    obj = _small_anndata(tmp_path)
+    obj.varm["ClusterMarkers_0_avg_logFC"] = pd.DataFrame(
+        {str(k): np.ones(4, dtype=np.float32) for k in range(3)}, index=obj.var_names)
+    source, out = tmp_path / "in.h5ad", tmp_path / "out.loom"
+    obj.write_h5ad(source)
+    result = _ok(source, "-o", out, "--scope", "--clusterings", "leiden")
+    assert "Not written: ClusterMarkers_0" in _out(result)
+    loom = _scope_loom(out)
+    assert "ClusterMarkers_0_avg_logFC" not in loom["rows"]
+    assert "clusterMarkerMetrics" not in loom["meta"]["clusterings"][0]

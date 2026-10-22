@@ -510,6 +510,18 @@ def _scalar_text(ds: Any) -> str:
     return value.decode("utf-8") if isinstance(value, bytes) else str(value)
 
 
+def clustering_columns(root: Any, clusterings: Optional[str]) -> List[str]:
+    """The obs columns to write as clusterings: those a SCope import
+    recorded, then those `--clusterings` names (checked by the plan)."""
+    obs = root["obs"]
+    wanted = [c for c in _recorded(root)[2] if c in obs]
+    for column in (clusterings or "").split(","):
+        column = column.strip()
+        if column and column not in wanted:
+            wanted.append(column)
+    return wanted
+
+
 def plan_export(
     root: Any,
     *,
@@ -628,11 +640,7 @@ def plan_export(
 
     # Clusterings: the recorded ones, and those --clusterings names.
     obs = root["obs"]
-    wanted = [c for c in recorded_clusterings if c in obs]
-    for column in (clusterings or "").split(","):
-        column = column.strip()
-        if column and column not in wanted:
-            wanted.append(column)
+    wanted = clustering_columns(root, clusterings)
     entries = {str(e.get("id")): e for e in parsed.get("clusterings", []) if isinstance(e, dict)}
     found: List[ExportClustering] = []
     renumbered: Dict[int, int] = {}
@@ -724,7 +732,7 @@ def plan_export(
         metrics = [m for m in recorded_metrics.get(new, []) if m["accessor"] in accessors]
         listed = {m["accessor"] for m in metrics}
         metrics += [{"accessor": a, "name": a, "description": ""} for a in accessors if a not in listed]
-        if not metrics or not any(t.key == base for t in group_tables) and any(t.key == base for t in named):
+        if not metrics or not any(t.key == base for t in group_tables):
             warnings.append(
                 f"Not written: ClusterMarkers_{old} -- without metrics (_avg_logFC, "
                 "_pval, ...) or markers, SCope cannot show them."
@@ -735,10 +743,10 @@ def plan_export(
     tables = keep
 
     # Metrics and annotations: the obs columns written; clusterings are SCope's own.
-    clustering_columns = {c.column for c in found}
+    clustered = {c.column for c in found}
     metrics, annotations = [], []
     for column in obs_columns:
-        if found and column == "ClusterID" or column in clustering_columns:
+        if found and column == "ClusterID" or column in clustered:
             continue  # written afresh from the first clustering; a clustering
         member = obs[column]
         enc = spec.encoding_type(member)

@@ -801,8 +801,13 @@ class LoomExport(Converter):
             obsp = _graphs(root, "obsp", n_obs, warnings)
             varp = [] if raw else _graphs(root, "varp", n_var, warnings)
             uns = _uns_scalars(root, warnings)
+            # A clustering goes out inside Clusterings alone (a plain copy too
+            # would come back from the loom as a second column), so it claims
+            # no attribute name of its own.
+            clustered = set(scope.clustering_columns(root, options.clusterings)) if options.scope else set()
             obs_columns, var_columns, owners = _column_owners(
-                obs_columns, var_columns, gene, accession, options.scope, warnings
+                [c for c in obs_columns if c not in clustered], var_columns, gene, accession,
+                options.scope, warnings,
             )
             found = None
             if options.scope:
@@ -812,10 +817,6 @@ class LoomExport(Converter):
                     default_embedding=options.default_embedding, warnings=warnings,
                     owners=owners,
                 )
-                # A clustering is written once, as SCope's: a plain copy too
-                # would come back from the loom as a second column.
-                clustered = {c.column for c in found.clusterings}
-                obs_columns = [c for c in obs_columns if c not in clustered]
                 if found.cluster_id and "ClusterID" in obs_columns:
                     # A stale copy would disagree with Clusterings once the
                     # first clustering is edited.
