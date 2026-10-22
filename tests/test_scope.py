@@ -715,3 +715,43 @@ def test_two_elements_asking_for_one_attribute_name_keep_the_first_and_warn(tmp_
         if scope_flag:
             assert "Not written: obs column 'Clusterings' -- col_attrs/Clusterings is SCope's clusterings." in text
             assert f["col_attrs/Clusterings"].dtype.names == ("0",)
+
+
+def test_an_edited_thresholds_table_wins_over_the_recorded_metadata(tmp_path):
+    """The thresholds table was read only when the recorded MetaData had
+    none, so editing it changed nothing in the export."""
+    truth = write_scope_loom(tmp_path / "scope.loom")
+    first, back = tmp_path / "a.h5ad", tmp_path / "back.loom"
+    _ok(truth.path, "-o", first)
+    with h5py.File(first, "a") as f:
+        f["uns/scope/regulon_thresholds/defaultThresholdValue"][0] = 0.9
+    _ok(first, "-o", back, "--scope")
+    thresholds = _scope_loom(back)["meta"]["regulonThresholds"]
+    assert thresholds[0]["defaultThresholdValue"] == 0.9
+    assert [t["defaultThresholdValue"] for t in thresholds[1:]] == pytest.approx([0.2, 0.3])
+    assert thresholds[0]["allThresholds"] == truth.metadata["regulonThresholds"][0]["allThresholds"]
+
+
+def test_marker_metrics_list_the_tables_written(tmp_path):
+    """clusterMarkerMetrics was copied as recorded, listing a metric whose
+    table had gone and missing one added since."""
+    truth = write_scope_loom(tmp_path / "scope.loom", compressed=False)
+    meta = json.loads(json.dumps(truth.metadata))
+    meta["clusterings"][0]["clusterMarkerMetrics"] = [
+        {"accessor": "avg_logFC", "name": "logFC", "description": "log fold change"},
+        {"accessor": "pval", "name": "p", "description": ""},
+    ]
+    _set_metadata(truth.path, json.dumps(meta))
+    fields = [("0", "f4"), ("1", "f4"), ("2", "f4")]
+    with h5py.File(truth.path, "a") as f:
+        rows = f["row_attrs"]
+        rows.create_dataset("ClusterMarkers_0", data=np.zeros(10, dtype=[(n, "i8") for n, _ in fields]))
+        rows.create_dataset("ClusterMarkers_0_avg_logFC", data=np.zeros(10, dtype=fields))
+        rows.create_dataset("ClusterMarkers_0_score", data=np.zeros(10, dtype=fields))
+    first, back = tmp_path / "a.h5ad", tmp_path / "back.loom"
+    _ok(truth.path, "-o", first)
+    _ok(first, "-o", back, "--scope")
+    assert _scope_loom(back)["meta"]["clusterings"][0]["clusterMarkerMetrics"] == [
+        {"accessor": "avg_logFC", "name": "logFC", "description": "log fold change"},
+        {"accessor": "score", "name": "score", "description": ""},
+    ]

@@ -468,7 +468,7 @@ adata convert scenic.h5ad -o scenic.loom --scope --default-embedding X_umap
 | `obsm` arrays of two columns | `Embeddings_X` and `Embeddings_Y`, a field per id; the default (id -1) as `Embedding` too |
 | the categorical obs columns a SCope import recorded, and those `--clusterings` names | `Clusterings`, int codes per clustering, with `ClusterID` for the first; their clusters described in `MetaData` |
 | other obs columns | plain attributes, as ever, listed in `MetaData` as metrics (numbers) and annotations (up to 245 values) |
-| `uns["scope"]` | `MetaData`'s regulon thresholds, and the recorded ids and names |
+| `uns["scope"]` | `MetaData`'s regulon thresholds (from the `regulon_thresholds` table, as edited), and the recorded ids and names |
 
 | Flag | Meaning |
 |---|---|
@@ -482,8 +482,8 @@ converts to h5ad and back with the same attributes. As SCope expects,
 clusterings and their clusters are numbered 0..n-1 in order, regulon names
 lose their spaces (`TP53 (5g)` becomes `TP53_(5g)`, alike in the AUC and
 the Regulons, with a warning), and cluster markers are written only with
-their metrics (`ClusterMarkers_<id>_avg_logFC` and the like, or those a
-SCope import recorded), their fields renumbered with the clusters; a
+their metrics (`ClusterMarkers_<id>_avg_logFC` and the like, which
+`clusterMarkerMetrics` then lists, under the names a SCope import recorded), their fields renumbered with the clusters; a
 clustering `--clusterings` names owns `ClusterMarkers_<its id>`. `ClusterID` is always written afresh from the first
 clustering, in place of an obs column of that name, so the two cannot
 disagree. `MetaData` is plain JSON, which SCope reads as it

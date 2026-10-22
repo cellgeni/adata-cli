@@ -629,6 +629,8 @@ def plan_export(
     #: Per clustering written, its recorded cluster ids (as marker fields
     #: name them) to the new ones, its categories' positions.
     cluster_fields: Dict[int, Dict[str, str]] = {}
+    #: Per clustering written, the marker metrics its import recorded.
+    recorded_metrics: Dict[int, List[Dict[str, Any]]] = {}
     for position, column in enumerate(wanted):
         if column not in obs:
             raise ValueError(f"--clusterings {column}: no such obs column.")
@@ -660,8 +662,8 @@ def plan_export(
             "name": name or column,
             "clusters": [{"id": i, "description": c} for i, c in enumerate(categories)],
         }
-        if recorded.get("clusterMarkerMetrics"):
-            entry["clusterMarkerMetrics"] = recorded["clusterMarkerMetrics"]
+        recorded_metrics[position] = [m for m in recorded.get("clusterMarkerMetrics") or []
+                                      if isinstance(m, dict) and m.get("accessor")]
         found.append(ExportClustering(position, column, entry))
     # A clustering no import recorded owns the marker tables of its new id.
     for clustering in found:
@@ -681,16 +683,18 @@ def plan_export(
             continue
         entry = found[new].entry
         accessors = [m.group(2) for t in group_tables if (m := _MARKERS.match(t.key)).group(2)]
-        if not entry.get("clusterMarkerMetrics"):
-            if not accessors:
-                warnings.append(
-                    f"Not written: ClusterMarkers_{old} -- without metrics (_avg_logFC, "
-                    "_pval, ...) SCope cannot show markers."
-                )
-                continue
-            entry["clusterMarkerMetrics"] = [
-                {"accessor": a, "name": a, "description": ""} for a in accessors
-            ]
+        # The metrics of the tables written: those recorded, named as they
+        # were, then any table added since, named after its accessor.
+        metrics = [m for m in recorded_metrics.get(new, []) if m["accessor"] in accessors]
+        listed = {m["accessor"] for m in metrics}
+        metrics += [{"accessor": a, "name": a, "description": ""} for a in accessors if a not in listed]
+        if not metrics:
+            warnings.append(
+                f"Not written: ClusterMarkers_{old} -- without metrics (_avg_logFC, "
+                "_pval, ...) SCope cannot show markers."
+            )
+            continue
+        entry["clusterMarkerMetrics"] = metrics
         fields_map = cluster_fields.get(new)
         for table in group_tables:
             accessor = _MARKERS.match(table.key).group(2)
@@ -742,20 +746,30 @@ def plan_export(
 
     # Regulon thresholds, for the regulons written.
     auc_fields = {f for t in tables if t.axis == "col" and t.key.endswith("RegulonsAUC") for f in t.fields}
-    thresholds = []
+    field_of = lambda regulon: regulon_fields.get(regulon, regulon.replace(" ", "_"))  # noqa: E731
+    recorded_thresholds: Dict[str, Dict[str, Any]] = {}
     for entry in parsed.get("regulonThresholds", []) or []:
-        name = str(entry.get("regulon", "")) if isinstance(entry, dict) else ""
-        field = regulon_fields.get(name, name.replace(" ", "_"))
-        if field in auc_fields:
-            thresholds.append(dict(entry, regulon=field))
-    if not thresholds and "uns" in root and "scope" in root["uns"] and "regulon_thresholds" in root["uns"]["scope"]:
-        for regulon, row in _frame_rows(root["uns"]["scope"]["regulon_thresholds"]).items():
-            name = regulon_fields.get(regulon, regulon.replace(" ", "_"))
-            if name in auc_fields:
-                entry = {"regulon": name}
-                for key, value in row.items():
-                    entry[key] = _float(value) if key == "defaultThresholdValue" else value
-                thresholds.append(entry)
+        if isinstance(entry, dict) and field_of(str(entry.get("regulon", ""))) in auc_fields:
+            recorded_thresholds[field_of(str(entry["regulon"]))] = entry
+    table = _resolve(root, "uns/scope/regulon_thresholds")
+    if table is not None:
+        # The table is what may have been edited since the import: its rows
+        # and values win, the metadata adding what the table does not hold
+        # (allThresholds, and fields a regulon never had).
+        thresholds = []
+        for regulon, row in _frame_rows(table).items():
+            name = field_of(regulon)
+            if name not in auc_fields:
+                continue
+            entry = dict(recorded_thresholds.get(name, {}), regulon=name)
+            for key, value in row.items():
+                if key == "defaultThresholdValue":
+                    entry[key] = _float(value)
+                elif value != "" or key in entry:
+                    entry[key] = value
+            thresholds.append(entry)
+    else:
+        thresholds = [dict(e, regulon=name) for name, e in recorded_thresholds.items()]
 
     metadata = dict(parsed)
     metadata.update(
