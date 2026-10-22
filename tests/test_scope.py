@@ -785,7 +785,10 @@ def test_markers_whose_table_lost_its_name_are_left_out_with_their_metrics(tmp_p
     source, out = tmp_path / "in.h5ad", tmp_path / "out.loom"
     obj.write_h5ad(source)
     result = _ok(source, "-o", out, "--scope", "--clusterings", "leiden")
-    assert "Not written: ClusterMarkers_0 and its metrics" in _out(result)
+    text = _out(result)
+    assert ("Not written: varm/ClusterMarkers_0_avg_logFC -- row_attrs/ClusterMarkers_0_avg_logFC "
+            "is var column 'ClusterMarkers_0_avg_logFC'.") in text
+    assert "Not written: ClusterMarkers_0 -- without metrics" in text
     loom = _scope_loom(out)
     assert "ClusterMarkers_0" not in loom["rows"]
     assert loom["rows"]["ClusterMarkers_0_avg_logFC"].dtype.names is None, "the var column"
@@ -800,3 +803,64 @@ def test_an_anndata_07_categorical_can_be_a_clustering(tmp_path, sample_legacy_v
     loom = _scope_loom(out)
     assert list(loom["cols"]["Clusterings"]["0"]) == [0, 1, 0, 2]
     assert [c["description"] for c in loom["meta"]["clusterings"][0]["clusters"]] == ["TypeA", "TypeB", "TypeC"]
+
+
+def test_an_anndata_07_categorical_with_too_many_categories_is_not_read(tmp_path, sample_legacy_v010_h5ad):
+    """The count of a legacy categorical's categories was checked only for
+    the current layout: anndata 0.7's were read whole to be thrown away."""
+    import adata.elements.read as read
+    from adata.conversion import scope
+
+    with h5py.File(sample_legacy_v010_h5ad, "a") as f:
+        obs = f["obs"]
+        cats = obs["__categories"].create_dataset("barcode", data=np.array([f"b{i}" for i in range(300)], dtype="S"))
+        codes = obs.create_dataset("barcode", data=np.array([0, 1, 2, 3], dtype=np.int16))
+        codes.attrs["categories"] = cats.ref
+    real, seen = read.read_categories, []
+
+    def counted(column, *args, **kwargs):
+        seen.append(column.name)
+        return real(column, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(read, "read_categories", counted)
+        with h5py.File(sample_legacy_v010_h5ad) as f:
+            found = scope.plan_export(f, obs_columns=["cell_type", "barcode"], varm_key="varm",
+                                      clusterings=None, default_embedding=None, warnings=[])
+    assert [a["name"] for a in found.metadata["annotations"]] == ["cell_type"]
+    assert "/obs/barcode" not in seen
+
+
+def test_a_missing_threshold_is_left_out_of_strict_json(tmp_path):
+    """A missing defaultThresholdValue went into MetaData as NaN, which no
+    strict JSON reader (SCope's client) parses."""
+    truth = write_scope_loom(tmp_path / "scope.loom")
+    first, back = tmp_path / "a.h5ad", tmp_path / "back.loom"
+    _ok(truth.path, "-o", first)
+    with h5py.File(first, "a") as f:
+        f["uns/scope/regulon_thresholds/defaultThresholdValue"][0] = np.nan
+    _ok(first, "-o", back, "--scope")
+
+    def refuse(token):
+        raise ValueError(f"not JSON: {token}")
+
+    with h5py.File(back) as f:
+        meta = json.loads(f["attrs/MetaData"][()], parse_constant=refuse)
+    assert "defaultThresholdValue" not in meta["regulonThresholds"][0]
+    assert meta["regulonThresholds"][1]["defaultThresholdValue"] == pytest.approx(0.2)
+
+
+def test_an_auc_table_that_loses_its_name_takes_its_regulon_metadata_with_it(tmp_path):
+    """An obs column named RegulonsAUC kept the name, and the AUC table was
+    left out, but its regulon thresholds stayed in MetaData."""
+    truth = write_scope_loom(tmp_path / "scope.loom")
+    first, edited, back = tmp_path / "a.h5ad", tmp_path / "b.h5ad", tmp_path / "back.loom"
+    _ok(truth.path, "-o", first)
+    obj = _read(first)
+    obj.obs["RegulonsAUC"] = np.arange(obj.n_obs, dtype=float)
+    obj.write_h5ad(edited)
+    result = _ok(edited, "-o", back, "--scope")
+    assert "Not written: obsm/RegulonsAUC -- col_attrs/RegulonsAUC is obs column 'RegulonsAUC'." in _out(result)
+    loom = _scope_loom(back)
+    assert loom["cols"]["RegulonsAUC"].dtype.names is None
+    assert loom["meta"]["regulonThresholds"] == []

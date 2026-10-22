@@ -801,12 +801,16 @@ class LoomExport(Converter):
             obsp = _graphs(root, "obsp", n_obs, warnings)
             varp = [] if raw else _graphs(root, "varp", n_var, warnings)
             uns = _uns_scalars(root, warnings)
+            obs_columns, var_columns, owners = _column_owners(
+                obs_columns, var_columns, gene, accession, options.scope, warnings
+            )
             found = None
             if options.scope:
                 found = scope.plan_export(
                     root, obs_columns=[c for c in obs_columns if c != "CellID"],
                     varm_key=varm_key, clusterings=options.clusterings,
                     default_embedding=options.default_embedding, warnings=warnings,
+                    owners=owners,
                 )
                 # A clustering is written once, as SCope's: a plain copy too
                 # would come back from the loom as a second column.
@@ -828,13 +832,10 @@ class LoomExport(Converter):
                     "leaves them out."
                 )
 
-            obs_columns, obsm, var_columns, varm = _one_owner_per_name(
-                obs_columns, obsm, var_columns, varm, found, gene, accession, varm_key, warnings
-            )
-            if found is not None:
-                scope.prune_markers(found, warnings)
-                for part in ("metrics", "annotations"):
-                    found.metadata[part] = [m for m in found.metadata[part] if m["name"] in obs_columns]
+            # Arrays last: every name they could want is settled by now.
+            obsm = [k for k in obsm if scope.claim_attr(owners, "col_attrs", k, f"obsm/{k}", warnings)]
+            varm = [k for k in varm
+                    if scope.claim_attr(owners, "row_attrs", k, f"{varm_key}/{k}", warnings)]
 
         dense = n_obs * n_var * max(1, main.dtype.itemsize) * (1 + len(layers))
         summary = (
@@ -916,7 +917,7 @@ class LoomExport(Converter):
                     _export_scope(root, cols, rows, detail.scope, detail.varm_key)
                     # Before uns's own attributes, which a stale MetaData among
                     # them must not replace.
-                    _attr(attrs, scope.METADATA, json.dumps(detail.scope.metadata))
+                    _attr(attrs, scope.METADATA, json.dumps(scope.json_safe(detail.scope.metadata)))
                 for name in detail.uns:
                     value = _uns_value(root, name)
                     if name not in ("LOOM_SPEC_VERSION", "CreationDate"):
@@ -1034,50 +1035,34 @@ def _columns(group: Any, index_name: str, warnings: List[str], axis: str) -> Lis
     return kept
 
 
-def _one_owner_per_name(
-    obs_columns: List[str], obsm: List[str], var_columns: List[str], varm: List[str],
-    found: Optional[scope.ScopeExport], gene: str, accession: Optional[str], varm_key: str,
-    warnings: List[str],
-) -> Tuple[List[str], List[str], List[str], List[str]]:
+def _column_owners(
+    obs_columns: List[str], var_columns: List[str], gene: str, accession: Optional[str],
+    scope_export: bool, warnings: List[str],
+) -> Tuple[List[str], List[str], Dict[str, Dict[str, str]]]:
     """A loom's col_attrs and row_attrs are flat, so an obs column, an obsm
-    entry and one of SCope's parts can ask for the same name, and the second
-    write failed with the output half written. The first to ask keeps it:
-    loom's and SCope's own attributes, then columns, SCope's tables, arrays.
-    The others are left out, each with a warning."""
+    entry and one of SCope's parts can ask for one name, and the second
+    write failed with the output half written. Names go to the first that
+    asks: loom's and SCope's own attributes, then columns here; SCope's
+    tables (`scope.plan_export`) and arrays claim theirs after. The others
+    are left out, each with a warning."""
     owners: Dict[str, Dict[str, str]] = {"col_attrs": {"CellID": "the cell names"},
                                          "row_attrs": {"Gene": "the gene names"}}
     if accession is not None:
         owners["row_attrs"]["Accession"] = "the gene ids"
-    if found is not None:
-        own = owners["col_attrs"]
-        if any(e.id == -1 for e in found.embeddings):
-            own["Embedding"] = "SCope's default embedding"
-        if found.embeddings:
-            own.update(Embeddings_X="SCope's embeddings", Embeddings_Y="SCope's embeddings")
-        if found.clusterings:
-            own["Clusterings"] = "SCope's clusterings"
-        if found.cluster_id:
-            own["ClusterID"] = "SCope's first clustering"
-
-    def claim_name(group: str, name: str, what: str) -> bool:
-        owner = owners[group].get(name)
-        if owner is None:
-            owners[group][name] = what
-            return True
-        warnings.append(f"Not written: {what} -- {group}/{name} is {owner}.")
-        return False
-
+    if scope_export:
+        owners["col_attrs"].update({
+            scope.EMBEDDING: "SCope's default embedding", scope.EMBEDDINGS_X: "SCope's embeddings",
+            scope.EMBEDDINGS_Y: "SCope's embeddings", scope.CLUSTERINGS: "SCope's clusterings",
+        })
+    # ClusterID is SCope's only once there are clusterings; the plan decides.
+    obs_columns = [c for c in obs_columns if c in ("CellID", "ClusterID")
+                   or scope.claim_attr(owners, "col_attrs", c, f"obs column {c!r}", warnings)]
     skip = {gene, accession, "Gene", "Accession"}
-    obs_columns = [c for c in obs_columns if c == "CellID" or claim_name("col_attrs", c, f"obs column {c!r}")]
-    var_columns = [c for c in var_columns if c in skip or claim_name("row_attrs", c, f"var column {c!r}")]
-    if found is not None:
-        found.tables = [
-            t for t in found.tables
-            if claim_name("col_attrs" if t.axis == "col" else "row_attrs", t.key, t.source)
-        ]
-    obsm = [k for k in obsm if claim_name("col_attrs", k, f"obsm/{k}")]
-    varm = [k for k in varm if claim_name("row_attrs", k, f"{varm_key}/{k}")]
-    return obs_columns, obsm, var_columns, varm
+    var_columns = [c for c in var_columns if c in skip
+                   or scope.claim_attr(owners, "row_attrs", c, f"var column {c!r}", warnings)]
+    if scope_export:
+        owners["col_attrs"].setdefault("ClusterID", "SCope's first clustering")
+    return obs_columns, var_columns, owners
 
 
 def _gene_attrs(columns: List[str]) -> Tuple[str, Optional[str]]:

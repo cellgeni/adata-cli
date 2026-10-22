@@ -518,11 +518,18 @@ def plan_export(
     clusterings: Optional[str],
     default_embedding: Optional[str],
     warnings: List[str],
+    owners: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> ScopeExport:
-    """Everything a SCope loom needs, worked out and checked before writing."""
-    from adata.elements.read import dataframe_columns, read_categories, resolve_index
+    """Everything a SCope loom needs, worked out and checked before writing.
+
+    `owners` holds the attribute names already given away (`claim_attr`): a
+    table asking for one is left out before anything is derived from it, so
+    the metadata only ever describes tables that are written.
+    """
+    from adata.elements.read import categories_dataset, dataframe_columns, read_categories, resolve_index
 
     parsed, recorded_embeddings, recorded_clusterings = _recorded(root)
+    owners = owners if owners is not None else {"col_attrs": {}, "row_attrs": {}}
 
     # Compound tables: every dataframe in obsm and varm, numeric columns only.
     frames = []
@@ -541,7 +548,10 @@ def plan_export(
             if other:
                 warnings.append(f"Not written in {where}/{key}: {', '.join(other)} -- a SCope "
                                 "table holds numbers only.")
-            if numeric:
+            # Marker tables claim their names once renumbered, below.
+            if numeric and (_MARKERS.match(key) or claim_attr(
+                owners, "col_attrs" if axis == "col" else "row_attrs", key, f"{where}/{key}", warnings
+            )):
                 frames.append((axis, where, key, obj, numeric))
 
     # One field name per regulon across AUC and Regulons, so that when two
@@ -682,6 +692,16 @@ def plan_export(
             warnings.append(f"Not written: ClusterMarkers_{old} -- no clustering written has id {old}.")
             continue
         entry = found[new].entry
+        for table in group_tables:
+            accessor = _MARKERS.match(table.key).group(2)
+            table.key = f"ClusterMarkers_{new}" + (f"_{accessor}" if accessor else "")
+        named = [t for t in group_tables if claim_attr(owners, "row_attrs", t.key, t.source, warnings)]
+        base = f"ClusterMarkers_{new}"
+        if len(named) < len(group_tables) and any(t.key == base for t in group_tables) \
+                and not any(t.key == base for t in named):
+            warnings.append(f"Not written: the rest of {base} -- its table of markers is left out.")
+            continue
+        group_tables = named
         accessors = [m.group(2) for t in group_tables if (m := _MARKERS.match(t.key)).group(2)]
         # The metrics of the tables written: those recorded, named as they
         # were, then any table added since, named after its accessor.
@@ -697,8 +717,6 @@ def plan_export(
         entry["clusterMarkerMetrics"] = metrics
         fields_map = cluster_fields.get(new)
         for table in group_tables:
-            accessor = _MARKERS.match(table.key).group(2)
-            table.key = f"ClusterMarkers_{new}" + (f"_{accessor}" if accessor else "")
             if fields_map is not None:
                 # Fields are cluster ids, renumbered with the clusters.
                 gone = [f for f in table.fields if f not in fields_map]
@@ -724,7 +742,7 @@ def plan_export(
         member = obs[column]
         enc = spec.encoding_type(member)
         if is_categorical(member):
-            if is_group(member) and len(member["categories"]) > MAX_ANNOTATION_VALUES:
+            if len(categories_dataset(member, obs)) > MAX_ANNOTATION_VALUES:
                 continue  # too many to list, and not read to find that out
             values = [str(c) for c in read_categories(member, parent_group=obs)]
         elif enc in (None, spec.ARRAY, spec.STRING_ARRAY) and getattr(member, "ndim", 0) == 1 \
@@ -765,7 +783,11 @@ def plan_export(
             entry = dict(recorded_thresholds.get(name, {}), regulon=name)
             for key, value in row.items():
                 if key == "defaultThresholdValue":
-                    entry[key] = _float(value)
+                    number = _float(value)
+                    if np.isfinite(number):
+                        entry[key] = number
+                    else:
+                        entry.pop(key, None)  # missing in the table
                 elif value != "" or key in entry:
                     entry[key] = value
             thresholds.append(entry)
@@ -789,24 +811,28 @@ def plan_export(
     )
 
 
-def prune_markers(found: "ScopeExport", warnings: List[str]) -> None:
-    """Keep the cluster markers whole once tables have been left out after
-    planning (a name another attribute took): a clustering's metrics list
-    only the accessor tables still written, and without its
-    `ClusterMarkers_<id>` table, or any metric, none of them is written."""
-    keys = {t.key for t in found.tables if t.axis == "row"}
-    for clustering in found.clusterings:
-        base = f"ClusterMarkers_{clustering.id}"
-        metrics = [m for m in clustering.entry.get("clusterMarkerMetrics", [])
-                   if f"{base}_{m['accessor']}" in keys]
-        if base in keys and metrics:
-            clustering.entry["clusterMarkerMetrics"] = metrics
-            continue
-        if base in keys or any(k.startswith(base + "_") for k in keys):
-            warnings.append(f"Not written: {base} and its metrics -- part of them is left out.")
-        clustering.entry.pop("clusterMarkerMetrics", None)
-        found.tables = [t for t in found.tables
-                        if not (t.axis == "row" and (t.key == base or t.key.startswith(base + "_")))]
+def claim_attr(owners: Dict[str, Dict[str, str]], group: str, name: str, what: str,
+               warnings: List[str]) -> bool:
+    """Give `name` in a loom's flat `group` (col_attrs, row_attrs) to `what`,
+    unless something already has it: then `what` is left out, with a warning."""
+    owner = owners[group].get(name)
+    if owner is None:
+        owners[group][name] = what
+        return True
+    warnings.append(f"Not written: {what} -- {group}/{name} is {owner}.")
+    return False
+
+
+def json_safe(value: Any) -> Any:
+    """`value` with NaN and infinities as null: SCope's client parses MetaData
+    as strict JSON, which has no token for them."""
+    if isinstance(value, float):
+        return value if np.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(v) for v in value]
+    return value
 
 
 def is_categorical(member: Any) -> bool:
