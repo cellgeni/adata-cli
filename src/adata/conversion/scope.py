@@ -43,7 +43,7 @@ from adata.elements.write import (
     write_scalar,
     write_string_array,
 )
-from adata.storage import create_dataset
+from adata.storage import create_dataset, is_dataset, is_group
 from adata.util.names import claim, make_index_unique, sanitize_label, storable
 
 METADATA = "MetaData"
@@ -634,7 +634,7 @@ def plan_export(
     for position, column in enumerate(wanted):
         if column not in obs:
             raise ValueError(f"--clusterings {column}: no such obs column.")
-        if spec.encoding_type(obs[column]) != spec.CATEGORICAL:
+        if not is_categorical(obs[column]):
             raise ValueError(
                 f"--clusterings {column}: not a categorical obs column, which SCope's "
                 "clusterings need (cluster ids with descriptions)."
@@ -715,15 +715,16 @@ def plan_export(
             keep.append(table)
     tables = keep
 
-    # Metrics and annotations: the obs columns written.
+    # Metrics and annotations: the obs columns written; clusterings are SCope's own.
+    clustering_columns = {c.column for c in found}
     metrics, annotations = [], []
     for column in obs_columns:
-        if found and column == "ClusterID":
-            continue  # written afresh from the first clustering
+        if found and column == "ClusterID" or column in clustering_columns:
+            continue  # written afresh from the first clustering; a clustering
         member = obs[column]
         enc = spec.encoding_type(member)
-        if enc == spec.CATEGORICAL:
-            if "categories" in member and len(member["categories"]) > MAX_ANNOTATION_VALUES:
+        if is_categorical(member):
+            if is_group(member) and len(member["categories"]) > MAX_ANNOTATION_VALUES:
                 continue  # too many to list, and not read to find that out
             values = [str(c) for c in read_categories(member, parent_group=obs)]
         elif enc in (None, spec.ARRAY, spec.STRING_ARRAY) and getattr(member, "ndim", 0) == 1 \
@@ -786,6 +787,38 @@ def plan_export(
         tables, embeddings, found, metadata,
         cluster_id=bool(found), regulons=regulons,
     )
+
+
+def prune_markers(found: "ScopeExport", warnings: List[str]) -> None:
+    """Keep the cluster markers whole once tables have been left out after
+    planning (a name another attribute took): a clustering's metrics list
+    only the accessor tables still written, and without its
+    `ClusterMarkers_<id>` table, or any metric, none of them is written."""
+    keys = {t.key for t in found.tables if t.axis == "row"}
+    for clustering in found.clusterings:
+        base = f"ClusterMarkers_{clustering.id}"
+        metrics = [m for m in clustering.entry.get("clusterMarkerMetrics", [])
+                   if f"{base}_{m['accessor']}" in keys]
+        if base in keys and metrics:
+            clustering.entry["clusterMarkerMetrics"] = metrics
+            continue
+        if base in keys or any(k.startswith(base + "_") for k in keys):
+            warnings.append(f"Not written: {base} and its metrics -- part of them is left out.")
+        clustering.entry.pop("clusterMarkerMetrics", None)
+        found.tables = [t for t in found.tables
+                        if not (t.axis == "row" and (t.key == base or t.key.startswith(base + "_")))]
+
+
+def is_categorical(member: Any) -> bool:
+    """A categorical column, in the current layout or anndata 0.7's: codes
+    whose `categories` attribute points into `__categories`."""
+    if is_group(member):
+        return spec.encoding_type(member) == spec.CATEGORICAL or "codes" in member
+    return is_dataset(member) and "categories" in member.attrs
+
+
+def categorical_codes(member: Any) -> Any:
+    return member["codes"] if is_group(member) else member
 
 
 def _distinct_text(member: Any, obs: Any, limit: int) -> Optional[List[str]]:

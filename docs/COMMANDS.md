@@ -466,7 +466,7 @@ adata convert scenic.h5ad -o scenic.loom --scope --default-embedding X_umap
 |---|---|
 | a dataframe in obsm or varm (`RegulonsAUC`, `Regulons`, `ClusterMarkers_<id>`) | a compound `col_attrs` or `row_attrs` of its numeric columns |
 | `obsm` arrays of two columns | `Embeddings_X` and `Embeddings_Y`, a field per id; the default (id -1) as `Embedding` too |
-| the categorical obs columns a SCope import recorded, and those `--clusterings` names | `Clusterings`, int codes per clustering, with `ClusterID` for the first; their clusters described in `MetaData` |
+| the categorical obs columns a SCope import recorded, and those `--clusterings` names | `Clusterings`, int codes per clustering (and not a plain attribute too), with `ClusterID` for the first; their clusters described in `MetaData` |
 | other obs columns | plain attributes, as ever, listed in `MetaData` as metrics (numbers) and annotations (up to 245 values) |
 | `uns["scope"]` | `MetaData`'s regulon thresholds (from the `regulon_thresholds` table, as edited), and the recorded ids and names |
 

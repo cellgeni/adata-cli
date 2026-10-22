@@ -755,3 +755,48 @@ def test_marker_metrics_list_the_tables_written(tmp_path):
         {"accessor": "avg_logFC", "name": "logFC", "description": "log fold change"},
         {"accessor": "score", "name": "score", "description": ""},
     ]
+
+
+def test_a_clustering_is_written_once_and_comes_back_under_its_own_name(tmp_path):
+    """A clustering went out as Clusterings and as a plain attribute too; the
+    loom read back gave the plain one the name, the clustering `leiden-1`,
+    and each round trip added another."""
+    obj = _small_anndata(tmp_path)
+    source, out, back = tmp_path / "in.h5ad", tmp_path / "out.loom", tmp_path / "back.h5ad"
+    obj.write_h5ad(source)
+    _ok(source, "-o", out, "--scope", "--clusterings", "leiden")
+    loom = _scope_loom(out)
+    assert "leiden" not in loom["cols"]
+    assert "leiden" not in [a["name"] for a in loom["meta"]["annotations"]]
+    _ok(out, "-o", back)
+    obs = _read(back).obs
+    assert [c for c in obs.columns if c.startswith("leiden")] == ["leiden"]
+    assert list(obs["leiden"].astype(str)) == list(obj.obs["leiden"].astype(str))
+
+
+def test_markers_whose_table_lost_its_name_are_left_out_with_their_metrics(tmp_path):
+    """A marker table that lost its name to a var column was left out, but
+    clusterMarkerMetrics still listed it."""
+    obj = _small_anndata(tmp_path)
+    marks = pd.DataFrame({str(k): [int(g == k) for g in range(4)] for k in range(3)}, index=obj.var_names)
+    obj.varm["ClusterMarkers_0"] = marks
+    obj.varm["ClusterMarkers_0_avg_logFC"] = marks.astype(np.float32)
+    obj.var["ClusterMarkers_0_avg_logFC"] = np.arange(4.0)
+    source, out = tmp_path / "in.h5ad", tmp_path / "out.loom"
+    obj.write_h5ad(source)
+    result = _ok(source, "-o", out, "--scope", "--clusterings", "leiden")
+    assert "Not written: ClusterMarkers_0 and its metrics" in _out(result)
+    loom = _scope_loom(out)
+    assert "ClusterMarkers_0" not in loom["rows"]
+    assert loom["rows"]["ClusterMarkers_0_avg_logFC"].dtype.names is None, "the var column"
+    assert "clusterMarkerMetrics" not in loom["meta"]["clusterings"][0]
+
+
+def test_an_anndata_07_categorical_can_be_a_clustering(tmp_path, sample_legacy_v010_h5ad):
+    """--clusterings took only the current categorical layout, and refused
+    anndata 0.7's codes with a `categories` reference."""
+    out = tmp_path / "out.loom"
+    _ok(sample_legacy_v010_h5ad, "-o", out, "--scope", "--clusterings", "cell_type")
+    loom = _scope_loom(out)
+    assert list(loom["cols"]["Clusterings"]["0"]) == [0, 1, 0, 2]
+    assert [c["description"] for c in loom["meta"]["clusterings"][0]["clusters"]] == ["TypeA", "TypeB", "TypeC"]

@@ -808,6 +808,10 @@ class LoomExport(Converter):
                     varm_key=varm_key, clusterings=options.clusterings,
                     default_embedding=options.default_embedding, warnings=warnings,
                 )
+                # A clustering is written once, as SCope's: a plain copy too
+                # would come back from the loom as a second column.
+                clustered = {c.column for c in found.clusterings}
+                obs_columns = [c for c in obs_columns if c not in clustered]
                 if found.cluster_id and "ClusterID" in obs_columns:
                     # A stale copy would disagree with Clusterings once the
                     # first clustering is edited.
@@ -828,6 +832,7 @@ class LoomExport(Converter):
                 obs_columns, obsm, var_columns, varm, found, gene, accession, varm_key, warnings
             )
             if found is not None:
+                scope.prune_markers(found, warnings)
                 for part in ("metrics", "annotations"):
                     found.metadata[part] = [m for m in found.metadata[part] if m["name"] in obs_columns]
 
@@ -951,7 +956,7 @@ def _export_scope(
         obs = root["obs"]
         dtype = np.dtype([(str(c.id), np.int64) for c in found.clusterings])
         codes = [
-            (str(c.id), (lambda lo, hi, col=c.column: np.asarray(obs[col]["codes"][lo:hi], dtype=np.int64)))
+            (str(c.id), (lambda lo, hi, col=c.column: np.asarray(scope.categorical_codes(obs[col])[lo:hi], dtype=np.int64)))
             for c in found.clusterings
         ]
         _write_records(cols, "Clusterings", n_obs, dtype, codes)
