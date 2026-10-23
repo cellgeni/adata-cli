@@ -212,6 +212,11 @@ def _global_rows(root: Any, mod: str, axis: str, warnings: List[str]) -> Tuple[n
             f"so the modality's {axis} cannot be matched to them."
         )
     own = read_names(root["mod"][mod], axis)
+    if len(set(own)) != len(own):
+        raise ValueError(
+            f"There is no {axis}map/{mod}, and {mod}'s {axis} names repeat, so its "
+            f"{axis} cannot be told apart among the global ones."
+        )
     missing = [n for n in own if n not in lookup]
     if missing:
         raise ValueError(
@@ -621,8 +626,11 @@ class MudataExport(Converter):
                 "--mod writes the whole AnnData as one modality and "
                 "--feature-types-column splits it by type: pass one."
             )
-        if options.mod is not None and (not options.mod or "/" in options.mod):
-            raise ValueError(f"--mod {options.mod!r}: a modality name cannot be empty or hold '/'.")
+        if options.mod is not None and storable(options.mod) != options.mod:
+            # "", "." and ".." name a group itself or its parent; "/" a path.
+            raise ValueError(
+                f"--mod {options.mod!r}: a modality name cannot be empty, '.', '..' or hold '/'."
+            )
         with open_store(source, "r", require_anndata=False) as store:
             root = store.root
             n_obs = element_len(resolve_index(root["obs"], "obs")[0])

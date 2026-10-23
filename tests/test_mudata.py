@@ -328,7 +328,9 @@ def test_other_feature_types_are_named_after_themselves(tmp_path):
 
 @pytest.mark.parametrize("extra, message", [
     (["--mod", "x", "--feature-types-column", "feature_types"], "pass one"),
-    (["--mod", "a/b"], "cannot be empty or hold '/'"),
+    (["--mod", "a/b"], "cannot be empty, '.', '..' or hold '/'"),
+    (["--mod", ".."], "cannot be empty, '.', '..' or hold '/'"),
+    (["--mod", "."], "cannot be empty, '.', '..' or hold '/'"),
     (["--feature-types-column", "nope"], "no such var column"),
 ])
 def test_export_refusals_leave_nothing(tmp_path, extra, message):
@@ -396,3 +398,19 @@ def test_a_remapped_sparse_element_keeps_its_layout(tmp_path):
         out = f["obsp/wide"]
         assert out["indices"].dtype == np.int64 and out["indptr"].dtype == np.int64
         assert out["data"].compression == "gzip" and out["indices"].compression == "gzip"
+
+
+def test_without_maps_repeated_modality_names_are_refused(tmp_path):
+    """Two of the modality's cells named alike would both take one global
+    row, and a sparse global element would keep only the last."""
+    from anndata.io import write_elem
+
+    truth = _mudata(tmp_path, maps=False)
+    names = list(truth.mods["atac"].obs_names)
+    names[1] = names[0]
+    with h5py.File(truth.path, "a") as f:
+        del f["mod/atac/obs"]
+        write_elem(f["mod/atac"], "obs", pd.DataFrame(index=names))
+    result = _convert(truth.path, "-o", tmp_path / "out.h5ad", "--mod", "atac")
+    assert result.exit_code == 1 and "atac's obs names repeat" in _out(result)
+    assert [p.name for p in tmp_path.iterdir()] == [truth.path.name]
