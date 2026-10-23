@@ -786,11 +786,12 @@ def is_legacy_categorical(obj: Any) -> bool:
 
 def write_legacy_categorical(
     frame: Any, name: str, codes_src: Any, dst_group: Any, codes: Optional[np.ndarray] = None,
-    *, compression: Optional[str] = None,
+    *, compression: Optional[str] = None, kept: Optional[np.ndarray] = None,
 ) -> Any:
     """A legacy categorical column of `frame` as a current `categorical`
     group: its codes (all of them, or `codes`, already taken) and the labels
-    its reference points to, copied beside them.
+    its reference points to, copied beside them (only those at `kept`,
+    when given, `codes` being renumbered onto them).
 
     An object reference cannot leave its file -- h5py's copy into another
     file nulls it, and Zarr cannot hold one -- so the column is rewritten in
@@ -804,7 +805,13 @@ def write_legacy_categorical(
         "encoding-type": "categorical", "encoding-version": "0.2.0",
         "ordered": bool(_decode_attr(codes_src.attrs.get("ordered", False))),
     }, group.attrs, target_backend=target_backend)
-    copy_dataset(categories_dataset(codes_src, frame), group, "categories", compression=compression)
+    categories = categories_dataset(codes_src, frame)
+    if kept is None:
+        copy_dataset(categories, group, "categories", compression=compression)
+    else:
+        values = np.asarray(categories[...])[kept]
+        kw = dataset_create_kwargs(categories, target_backend=target_backend, dst_parent=group)
+        create_dataset(group, "categories", data=values, **fit_chunks(kw, values.shape, backend=target_backend))
     if codes is None:
         copy_dataset(codes_src, group, "codes", compression=compression, skip_attrs=("categories", "ordered"))
     else:

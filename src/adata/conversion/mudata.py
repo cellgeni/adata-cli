@@ -702,6 +702,9 @@ class MudataExport(Converter):
             _write_targets(
                 src, targets, chunk_rows=ROW_BLOCK, console=console,
                 skip={"obs", "obsm", "obsp", "uns"}, verb="Writing",
+                # A modality split from var narrows its categories, as
+                # anndata's adata[:, mask] does; the whole AnnData is no subset.
+                prune_whole_axes=False,
             )
             for target in targets:
                 set_column_order(write_index_frame(target.root, "obs", detail.n_obs, [obs_names]), [])

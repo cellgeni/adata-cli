@@ -173,7 +173,9 @@ def test_subset_roundtrips_through_anndata(reference, out_fmt, tmp_path):
     assert dtypes["nullable_int"] == "Int32"
     assert dtypes["nullable_bool"] == "boolean"
     assert got.obs["cell_type"].cat.ordered is True
-    assert list(got.obs["cell_type"].cat.categories) == ["A", "B", "C"]
+    # As anndata subsets: only the categories the kept cells use.
+    ref = _read(reference)[["cell_0", "cell_2"]].copy()
+    assert list(got.obs["cell_type"].cat.categories) == list(ref.obs["cell_type"].cat.categories) == ["A"]
 
     assert got.obs["nullable_int"].isna().tolist() == [False, True]
     assert got.raw is not None, "raw/ must survive subsetting"
