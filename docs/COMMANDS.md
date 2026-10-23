@@ -83,6 +83,11 @@ adata subset data.h5ad --inplace --obs barcodes.txt
 `raw/` is carried over and matched against its **own** var axis, which usually
 holds more genes than the main object.
 
+A categorical obs or var column keeps only the categories its rows use, as
+anndata's own subsetting keeps them (on an axis kept whole too), and
+`uns["<column>_colors"]` keeps the colours of those categories. `split`
+does the same for each output.
+
 The selection is resolved before anything is written, and the output is
 written beside its destination (`out.adata-tmp.h5ad`) and moved into place
 only once complete. A query that fails therefore leaves nothing behind, and an

@@ -73,7 +73,8 @@ def test_a_subset_of_a_legacy_dataframe_keeps_its_categoricals(tmp_path, suffix)
     _ok("subset", source, "--obs", keep, "-o", out)
     got = _read(out)
     assert list(got.obs["cell_type"]) == ["A", "A", "C"]
-    assert list(got.obs["cell_type"].cat.categories) == ["A", "B", "C"]
+    # As anndata subsets: the categories the rows use.
+    assert list(got.obs["cell_type"].cat.categories) == ["A", "C"]
     assert list(got.var["kind"]) == ["x", "y"]
 
 
@@ -96,7 +97,7 @@ def test_a_copied_legacy_frame_is_written_as_the_current_version(tmp_path):
         assert obs.attrs["encoding-version"] == "0.2.0"
         assert "__categories" not in obs
         assert obs["cell_type"].attrs["encoding-type"] == "categorical"
-        assert list(obs["cell_type/codes"][...]) == [1]
+        assert list(obs["cell_type/codes"][...]) == [0], "renumbered onto B, the one used"
 
 
 def test_a_mudata_with_legacy_frames_reads_with_its_categoricals(tmp_path):

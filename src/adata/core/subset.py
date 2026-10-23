@@ -186,27 +186,65 @@ def _copy_rows(
     """Write the selected rows of `src_ds` into `dst_parent` as `name`."""
     if indices is None:
         return copy_tree(src_ds, dst_parent, name)
+    return _write_like(src_ds, dst_parent, name, _take_rows(src_ds, indices))
 
+
+def _write_like(src_ds: Any, dst_parent: Any, name: str, values: Any) -> Any:
+    """`values` as `dst_parent[name]`, laid out and attributed as `src_ds`."""
     target_backend = _target_backend(dst_parent)
     kw = dataset_create_kwargs(
         src_ds, target_backend=target_backend, dst_parent=dst_parent
     )
-    kw = fit_chunks(kw, (len(indices),), backend=target_backend)
-    ds = create_dataset(
-        dst_parent,
-        name,
-        data=_take_rows(src_ds, indices),
-        **kw,
-    )
+    kw = fit_chunks(kw, (len(values),), backend=target_backend)
+    ds = create_dataset(dst_parent, name, data=values, **kw)
     copy_attrs(src_ds.attrs, ds.attrs, target_backend=target_backend)
     return ds
+
+
+#: Per categorical column narrowed: the categories kept (positions in the
+#: source's), and how many the source had.
+Pruned = Dict[str, Tuple[np.ndarray, int]]
+
+
+def prune_categories(codes: np.ndarray, n_categories: int) -> Tuple[Optional[np.ndarray], np.ndarray]:
+    """The categories `codes` use, and the codes renumbered onto them, as
+    anndata's subsetting does (`remove_unused_categories`); None and the
+    codes themselves when every category is used."""
+    used = np.zeros(n_categories, dtype=bool)
+    present = codes[codes >= 0]
+    used[present] = True
+    if used.all():
+        return None, codes
+    kept = np.flatnonzero(used)
+    remap = np.full(n_categories, -1, dtype=np.int64)
+    remap[kept] = np.arange(kept.size)
+    renumbered = np.where(codes >= 0, remap[np.maximum(codes, 0)], codes)
+    return kept, renumbered.astype(codes.dtype, copy=False)
+
+
+def prune_colors(uns: Any, src_uns: Any, pruned: Pruned) -> None:
+    """`uns["<col>_colors"]` narrowed to the categories kept, as anndata
+    narrows it when a subset drops some (only where one color per category
+    of the source is what it holds)."""
+    for column, (kept, n) in pruned.items():
+        key = f"{column}_colors"
+        if key not in uns or not is_dataset(uns[key]):
+            continue
+        source = src_uns[key]
+        if source.ndim != 1 or source.shape[0] != n:
+            continue
+        values = np.asarray(source[...])[kept]
+        del uns[key]
+        _write_like(source, uns, key, values)
 
 
 def subset_axis_group(
     src: Any,
     dst: Any,
     indices: Optional[np.ndarray],
-) -> None:
+    *,
+    prune: bool = False,
+) -> Pruned:
     """Copy a dataframe group, taking only `indices` along its rows.
 
     Every column layout the spec allows has to be narrowed here, not just plain
@@ -214,7 +252,12 @@ def subset_axis_group(
     while the masked layouts (`nullable-*`, which anndata >= 0.11 uses for the
     index and every string column) subset both `values` and `mask`. Copying a
     masked column whole would leave it longer than the rest of the frame.
+
+    With `prune`, as for obs and var, a categorical keeps only the
+    categories its rows use, as anndata's subsetting keeps them (on an axis
+    kept whole too); returns which, per column, for `prune_colors`.
     """
+    pruned: Pruned = {}
     target_backend = _target_backend(dst)
     copy_attrs(src.attrs, dst.attrs, target_backend=target_backend)
     # anndata 0.7's categoricals point into `__categories` by object
@@ -230,8 +273,17 @@ def subset_axis_group(
         if legacy and key == "__categories":
             continue
         if legacy and is_legacy_categorical(obj):
-            codes = None if indices is None else np.asarray(_take_rows(obj, indices))
-            write_legacy_categorical(src, key, obj, dst, codes)
+            codes = kept = None
+            if indices is not None or prune:
+                codes = np.asarray(obj[...] if indices is None else _take_rows(obj, indices))
+            if prune:
+                from adata.elements.read import categories_dataset
+
+                n = element_len(categories_dataset(obj, src))
+                kept, codes = prune_categories(codes, n)
+                if kept is not None:
+                    pruned[key] = (kept, n)
+            write_legacy_categorical(src, key, obj, dst, codes, kept=kept)
             continue
 
         if is_dataset(obj):
@@ -246,8 +298,22 @@ def subset_axis_group(
         if enc == spec.CATEGORICAL or (enc is None and "codes" in obj):
             gdst = dst.create_group(key)
             copy_attrs(obj.attrs, gdst.attrs, target_backend=target_backend)
-            copy_tree(obj["categories"], gdst, "categories")
-            _copy_rows(obj["codes"], gdst, "codes", indices)
+            if not prune:
+                copy_tree(obj["categories"], gdst, "categories")
+                _copy_rows(obj["codes"], gdst, "codes", indices)
+                continue
+            # Even an axis kept whole: anndata drops a category no row uses
+            # whenever it subsets, on either axis.
+            n = element_len(obj["categories"])
+            codes = np.asarray(obj["codes"][...] if indices is None else _take_rows(obj["codes"], indices))
+            kept, codes = prune_categories(codes, n)
+            if kept is None:
+                copy_tree(obj["categories"], gdst, "categories")
+                _copy_rows(obj["codes"], gdst, "codes", indices)
+                continue
+            _write_like(obj["categories"], gdst, "categories", np.asarray(obj["categories"][...])[kept])
+            _write_like(obj["codes"], gdst, "codes", codes)
+            pruned[key] = (kept, n)
             continue
 
         if enc in spec.MASKED_TYPES or ("values" in obj and "mask" in obj):
@@ -259,6 +325,7 @@ def subset_axis_group(
 
         # Not row-aligned (e.g. __categories) -- copy verbatim.
         copy_tree(obj, dst, key)
+    return pruned
 
 
 def _minor_remap(keep: Optional[np.ndarray], size: int) -> Optional[np.ndarray]:
@@ -867,6 +934,7 @@ def _write_targets(
         tasks.extend(f"copy:{k}" for k in passthrough)
 
     labels = {v: k for k, v in _TASK_LABELS.items()}
+    pruned: List[Pruned] = [{} for _ in targets]
     tasks = [t for t in tasks if labels.get(t.split(":", 1)[0], t.split(":", 1)[0]) not in skip
              and not (t.startswith("copy:") and t.split(":", 1)[1] in skip)]
 
@@ -879,12 +947,13 @@ def _write_targets(
         for task in tasks:
             task_id = progress.add_task(f"[cyan]{verb} {task}...[/]", total=None)
             if task in ("obs", "var"):
-                for target in targets:
-                    subset_axis_group(
+                for target, narrowed in zip(targets, pruned):
+                    narrowed.update(subset_axis_group(
                         src[task],
                         target.root.create_group(task),
                         _axis_idx(target, task),
-                    )
+                        prune=True,
+                    ))
             elif task == "X":
                 X = src["X"]
                 pairs = [(t.root, t.obs_idx, t.var_idx) for t in targets]
@@ -896,8 +965,9 @@ def _write_targets(
                     for target in targets:
                         copy_tree(X, target.root, "X")
             elif task == "uns":
-                for target in targets:
+                for target, narrowed in zip(targets, pruned):
                     copy_tree(src["uns"], target.root, "uns")
+                    prune_colors(target.root["uns"], src["uns"], narrowed)
             elif task == "raw":
                 _fan_out_raw(
                     src["raw"], targets, chunk_rows=chunk_rows, console=console
