@@ -366,3 +366,33 @@ def test_a_global_graph_of_the_wrong_shape_is_refused_before_writing(tmp_path):
     result = _convert(truth.path, "-o", tmp_path / "out.h5ad")
     assert result.exit_code == 1 and "Global obsp/odd is (40, 3), not 40 x 40." in _out(result)
     assert [p.name for p in tmp_path.iterdir()] == [truth.path.name]
+
+
+def test_feature_types_that_meet_as_names_get_a_modality_each(tmp_path):
+    """`Foo Bar` and `foo_bar` both name a modality foo_bar: they were given
+    one name, and the second group failed with the output half written."""
+    types = ("Foo Bar",) * 3 + ("foo_bar",) * 2
+    source, _ = _multiome(tmp_path, types=types)
+    _ok(source, "-o", tmp_path / "multi.h5mu")
+    with h5py.File(tmp_path / "multi.h5mu") as f:
+        assert sorted(f["mod"].keys()) == ["foo_bar", "foo_bar_1"]
+        assert f["mod/foo_bar/X"].attrs["shape"][1] == 3
+
+
+def test_a_remapped_sparse_element_keeps_its_layout(tmp_path):
+    """Global sparse elements were rebuilt with int32 indices, uncompressed,
+    whatever the source held."""
+    from anndata.io import write_elem
+
+    truth = _mudata(tmp_path)
+    n = len(truth.obs)
+    graph = sp.random(n, n, density=0.1, format="csr", random_state=6, dtype=np.float32)
+    graph.indices = graph.indices.astype(np.int64)
+    graph.indptr = graph.indptr.astype(np.int64)
+    with h5py.File(truth.path, "a") as f:
+        write_elem(f["obsp"], "wide", graph, dataset_kwargs={"compression": "gzip"})
+    _ok(truth.path, "-o", tmp_path / "out.h5ad", "--mod", "atac")
+    with h5py.File(tmp_path / "out.h5ad") as f:
+        out = f["obsp/wide"]
+        assert out["indices"].dtype == np.int64 and out["indptr"].dtype == np.int64
+        assert out["data"].compression == "gzip" and out["indices"].compression == "gzip"

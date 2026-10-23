@@ -808,11 +808,12 @@ def write_legacy_categorical(
     if codes is None:
         copy_dataset(codes_src, group, "codes", compression=compression, skip_attrs=("categories", "ordered"))
     else:
-        kw = fit_chunks(
-            dataset_create_kwargs(codes_src, target_backend=target_backend, dst_parent=group),
-            codes.shape, backend=target_backend,
-        )
-        create_dataset(group, "codes", data=np.asarray(codes), **kw)
+        codes = np.asarray(codes)
+        kw = dataset_create_kwargs(codes_src, target_backend=target_backend, dst_parent=group)
+        if compression is not None:
+            kw = with_compression(kw, compression, shape=codes.shape, dtype=codes.dtype,
+                                  backend=target_backend, zarr_format=zarr_format_of(group))
+        create_dataset(group, "codes", data=codes, **fit_chunks(kw, codes.shape, backend=target_backend))
     return group
 
 

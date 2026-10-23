@@ -277,7 +277,11 @@ class CsrAppender:
         data_dtype: Any,
         index_dtype: Any = np.int32,
         compression: Optional[str] = None,
+        templates: Optional[Tuple[Any, Any, Any]] = None,
     ) -> None:
+        """`templates`, a source's `data`, `indices` and `indptr`, give the
+        layout to keep (chunks, codecs) and the `indptr` dtype, as copies
+        keep them; without, the defaults."""
         from adata.core.subset import _growable_like
         from adata.elements import spec
         from adata.elements.write import set_shape_attr
@@ -289,11 +293,12 @@ class CsrAppender:
         self.data_dtype = np.dtype(data_dtype)
         self.index_dtype = np.dtype(index_dtype)
         self.compression = compression
+        self.templates = templates or (None, None, None)
         self.data = _growable_like(
-            self.group, "data", self.data_dtype, None, compression=compression
+            self.group, "data", self.data_dtype, self.templates[0], compression=compression
         )
         self.indices = _growable_like(
-            self.group, "indices", self.index_dtype, None, compression=compression
+            self.group, "indices", self.index_dtype, self.templates[1], compression=compression
         )
         self.counts = np.zeros(shape[0], dtype=np.int64)
         self.nnz = 0
@@ -319,9 +324,12 @@ class CsrAppender:
         from adata.core.subset import _sparse_dataset
 
         dtype = np.int32 if self.nnz <= INT32_MAX else np.int64
+        template = self.templates[2]
+        if template is not None and np.dtype(template.dtype).itemsize > np.dtype(dtype).itemsize:
+            dtype = np.dtype(template.dtype)  # the source's wider pointers, kept
         indptr = np.concatenate(([0], np.cumsum(self.counts))).astype(dtype)
         dataset = _sparse_dataset(
-            self.group, "indptr", np.dtype(dtype), indptr.size, None,
+            self.group, "indptr", np.dtype(dtype), indptr.size, template,
             compression=self.compression,
         )
         dataset[:] = indptr

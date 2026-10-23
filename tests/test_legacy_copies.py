@@ -116,3 +116,18 @@ def test_a_mudata_with_legacy_frames_reads_with_its_categoricals(tmp_path):
     rows = truth.rows("atac")
     assert list(got.obs["leiden"]) == [leiden[i] for i in rows]
     assert list(got.obs["batch"]) == ["b1" if i % 2 else "b2" for i in range(len(rows))]
+
+
+def test_compression_applies_to_legacy_codes_taken_onto_a_modality(tmp_path):
+    from tests.conftest import write_h5mu
+
+    truth = write_h5mu(tmp_path / "in.h5mu")
+    leiden = [str(v) for v in truth.obs["leiden"]]
+    with h5py.File(truth.path, "a") as f:
+        del f["obs"]
+        _legacy_frame(f, "obs", list(truth.obs.index), {"leiden": leiden})
+    _ok("convert", truth.path, "-o", tmp_path / "out.h5ad", "--mod", "atac", "--compression", "gzip")
+    with h5py.File(tmp_path / "out.h5ad") as f:
+        # Its labels are HDF5 strings, which are never compressed: only
+        # their heap pointers would be.
+        assert f["obs/leiden/codes"].compression == "gzip"

@@ -68,7 +68,7 @@ from adata.storage import (
     write_legacy_categorical,
     zarr_format_of,
 )
-from adata.util.names import storable, unique_names
+from adata.util.names import claim, storable, unique_names
 from adata.util.path import same_path
 
 #: The root's encoding, as mudata writes it (and reads it, in any case).
@@ -578,8 +578,11 @@ def _take_sparse(
         if major.size:
             grouped = grouped and major[0] >= last and bool((np.diff(major) >= 0).all())
             last = int(major[-1])
-    appender = CsrAppender(parent, name, shape=(out_major, out_minor), data_dtype=data.dtype,
-                           compression=compression)
+    appender = CsrAppender(
+        parent, name, shape=(out_major, out_minor), data_dtype=data.dtype,
+        index_dtype=indices.dtype, compression=compression,
+        templates=(data, indices, obj["indptr"]),
+    )
     write_runs(
         blocks(), n_rows=out_major, n_targets=1, destinations=[[appender]], scratch_parent=parent,
         grouped=grouped, canonical=False, counts=counts, value_dtype=data.dtype, chunk=1 << 20,
@@ -635,11 +638,11 @@ class MudataExport(Converter):
             if types_col is not None:
                 types = np.asarray(read_str_all(var[types_col], parent_group=var), dtype=object)
                 counted = type_counts(types)
-                names = [modality_name(label) for label, _ in counted]
-                stems = unique_names(names)
-                for (label, _), name in zip(counted, names):
-                    mods.append((stems[name] if names.count(name) > 1 else name,
-                                 np.flatnonzero(types == label)))
+                # By position: two types can name one modality (`Foo Bar`,
+                # `foo_bar`), and each needs a group of its own.
+                taken: set = set()
+                for label, _ in counted:
+                    mods.append((claim(modality_name(label), taken), np.flatnonzero(types == label)))
             else:
                 mods.append((options.mod or "rna", np.arange(n_var, dtype=np.int64)))
             for key in _keys(_child(root, "obsm")):
