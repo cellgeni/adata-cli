@@ -3,6 +3,57 @@
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
+## 0.16.0
+
+Reads and writes MuData, the container muon, mudata and SCENIC+ keep
+multimodal data in: an `.h5mu` (or a MuData Zarr store) converts to one
+AnnData per modality, with the joint results on its cells, and an AnnData
+converts back to an `.h5mu`, split by feature type. Copies of anndata 0.7's
+dataframes, which every copy broke, now come out readable.
+
+### Added
+
+- **`adata convert x.h5mu -o x.h5ad` writes each modality as an AnnData**
+  ([#31](https://github.com/cellgeni/adata-cli/issues/31)), to
+  `x.<mod>.h5ad`, or the one `--mod` names:
+  - the modality as it is stored;
+  - the global obs columns, obsm and obsp (a joint clustering, a WNN
+    embedding, the joint graph) taken onto its cells through `obsmap`, in
+    its order, a block at a time; graphs keep CSR or CSC;
+  - a global name the modality already has keeps the modality's own, with
+    a warning; a column pulled from a modality (`<mod>:col`) goes back
+    only to that modality.
+
+  Without maps, cells are matched by name; a map that does not place each
+  cell once is refused before anything is written. A global sparse element
+  keeps its index dtypes, compression and duplicate entries. An `.h5mu` is no longer
+  taken for an h5ad, nor a MuData Zarr store for a Zarr AnnData. On muon's
+  `minipbcite.h5mu`, both modalities equal what mudata reads.
+- **`adata convert x.h5ad -o x.h5mu` writes a MuData**
+  ([#31](https://github.com/cellgeni/adata-cli/issues/31)). var is split
+  by feature type as muon does (Gene Expression → `rna`, Peaks → `atac`,
+  Antibody Capture → `prot`), or the whole AnnData is written under
+  `--mod`:
+  - each modality keeps X, layers, var, varm, varp and raw for its
+    features, every matrix read once for all of them; raw's features are
+    shared out by raw/var's own feature types, so genes and peaks var was
+    filtered of still land in their modality (with `--mod`, raw is kept
+    whole);
+  - obs, obsm, obsp and uns are written once, globally;
+  - the maps, masks and userblock mudata expects are written too.
+
+  mudata reads the result without a warning; a 10x Multiome matrix goes to
+  `.h5mu` in two steps.
+
+### Fixed
+
+- **Copies of anndata 0.7's dataframes are readable.** Their categoricals
+  point into `__categories` by an HDF5 object reference, which cannot
+  leave the file: `subset` wrote an h5ad that anndata could not read, and
+  `subset` or `convert` to Zarr stopped with "Object of type Reference is
+  not JSON serializable". Every copy now writes them as current
+  `categorical` groups, in a dataframe of the current version.
+
 ## 0.15.0
 
 Writes SCope looms, so results from pySCENIC, SCENIC+ or pycistopic can go
