@@ -541,3 +541,30 @@ def test_a_global_entry_named_like_the_scratch_group_is_taken_too(tmp_path):
     _ok(truth.path, "-o", tmp_path / "out.zarr", "--mod", "atac")
     got, rows = _read(tmp_path / "out.zarr"), truth.rows("atac")
     assert np.array_equal(_dense(got.obsp["__csr_scratch__"]), graph[rows][:, rows].toarray())
+
+
+def test_an_anndata_without_features_is_one_empty_modality(tmp_path):
+    """No features gave no feature types and no modality: an .h5mu that the
+    import refuses."""
+    obj = ad.AnnData(np.zeros((4, 0), dtype=np.float32))
+    obj.var["feature_types"] = pd.Categorical([])
+    obj.write_h5ad(tmp_path / "empty.h5ad")
+    _ok(tmp_path / "empty.h5ad", "-o", tmp_path / "empty.h5mu")
+    _ok(tmp_path / "empty.h5mu", "-o", tmp_path / "back.h5ad")
+    assert _read(tmp_path / "back.h5ad").shape == (4, 0)
+
+
+def test_var_names_in_two_modalities_refuse_a_split_by_name(tmp_path):
+    """Without types in raw/var, raw's features are shared out by var's
+    names: a name in two modalities would put one raw feature in both."""
+    source, obj = _multiome(tmp_path)
+    raw = obj.raw.to_adata()
+    raw.var = raw.var.drop(columns=["feature_types"])
+    obj.raw = raw
+    names = list(obj.var_names)
+    names[6] = names[0]  # a peak named like a gene
+    obj.var_names = names
+    obj.write_h5ad(source)
+    result = _convert(source, "-o", tmp_path / "multi.h5mu")
+    assert result.exit_code == 1 and "are in more than one modality" in _out(result)
+    assert not (tmp_path / "multi.h5mu").exists()

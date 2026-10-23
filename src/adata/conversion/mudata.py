@@ -658,7 +658,7 @@ class MudataExport(Converter):
                 taken: set = set()
                 for label, _ in counted:
                     mods.append((claim(modality_name(label), taken), np.flatnonzero(types == label)))
-            else:
+            if not mods:  # no features, or nothing to split by: one modality
                 mods.append((options.mod or "rna", np.arange(n_var, dtype=np.int64)))
             raw_keep = _plan_raw(root, mods, n_var, types_col, warnings)
             for key in _keys(_child(root, "obsm")):
@@ -733,7 +733,7 @@ def _plan_raw(
     raw = _child(root, "raw")
     if raw is None or not is_group(raw) or "var" not in raw:
         return [None] * len(mods)
-    if types_col is None:  # --mod, or nothing to split by: the whole AnnData
+    if types_col is None or not n_var:  # --mod, or nothing to split by: the whole AnnData
         return [None] * len(mods)
     raw_var = raw["var"]
     raw_names = read_names(raw, "var")
@@ -762,6 +762,13 @@ def _plan_raw(
         return [set(names[raw_types == label].tolist()) for label in labels]
     var_names = read_names(root, "var")
     keeps = [set(var_names[i] for i in rows) for _, rows in mods]
+    shared = set().union(*(a & b for i, a in enumerate(keeps) for b in keeps[i + 1:]))
+    if shared:
+        raise ValueError(
+            f"{len(shared):,} var names (first: {sorted(shared)[0]!r}) are in more than one "
+            "modality, so raw's feature of that name cannot be given to one. Give raw/var a "
+            "feature-types column, or pass --mod to write the whole AnnData as one modality."
+        )
     left = len(set(raw_names) - set().union(*keeps))
     if left:
         warnings.append(
