@@ -732,13 +732,29 @@ def _plan_raw(
         return [None]
     raw_var = raw["var"]
     raw_names = read_names(raw, "var")
+    if len(set(raw_names)) != len(raw_names):
+        # raw's features are chosen by name, which a repeated one cannot
+        # place: it would land in one modality, once.
+        raise ValueError(
+            "raw's var names repeat, so its features cannot be shared out among "
+            "the modalities by name. Make them unique first, or pass --mod to "
+            "write the whole AnnData, raw with it, as one modality."
+        )
     raw_columns = dataframe_columns(raw_var, resolve_index(raw_var, "var")[1])
     if types_col is not None and types_col in raw_columns:
         raw_types = np.asarray(read_str_all(raw_var[types_col], parent_group=raw_var), dtype=object)
         var = root["var"]
         types = np.asarray(read_str_all(var[types_col], parent_group=var), dtype=object)
-        return [set(np.asarray(raw_names, dtype=object)[raw_types == types[rows[0]]].tolist()) if len(rows) else set()
-                for _, rows in mods]
+        labels = [types[rows[0]] for _, rows in mods]
+        orphans = sorted({str(t) for t in raw_types.tolist()} - {str(t) for t in labels})
+        if orphans:
+            count = int(np.isin(raw_types, orphans).sum())
+            warnings.append(
+                f"Not written: {count:,} raw features of type {', '.join(map(repr, orphans))}, "
+                "which var no longer has, so no modality is written for them."
+            )
+        names = np.asarray(raw_names, dtype=object)
+        return [set(names[raw_types == label].tolist()) for label in labels]
     var_names = read_names(root, "var")
     keeps = [set(var_names[i] for i in rows) for _, rows in mods]
     left = len(set(raw_names) - set().union(*keeps))

@@ -458,3 +458,25 @@ def test_raw_features_no_modality_can_claim_are_left_out_with_a_warning(tmp_path
     source, _ = _with_raw_extra(tmp_path, types_in_raw=False)
     result = _ok(source, "-o", tmp_path / "multi.h5mu")
     assert "Not written: 2 raw features that var lacks" in _out(result)
+
+
+def test_raw_features_of_a_type_var_no_longer_has_are_reported(tmp_path):
+    source, obj = _multiome(tmp_path)
+    raw = obj.raw.to_adata()
+    raw.var["feature_types"] = pd.Categorical(["Gene Expression"] * 6 + ["Peaks"] * 2 + ["Antibody Capture"] * 2)
+    obj.raw = raw
+    obj.write_h5ad(source)
+    result = _ok(source, "-o", tmp_path / "multi.h5mu")
+    assert "Not written: 2 raw features of type 'Antibody Capture'" in _out(result)
+
+
+def test_repeated_raw_names_refuse_a_split(tmp_path):
+    source, obj = _multiome(tmp_path)
+    raw = obj.raw.to_adata()
+    raw.var_names = ["same"] * 2 + list(raw.var_names[2:])
+    obj.raw = raw
+    obj.write_h5ad(source)
+    result = _convert(source, "-o", tmp_path / "multi.h5mu")
+    assert result.exit_code == 1 and "raw's var names repeat" in _out(result)
+    assert not (tmp_path / "multi.h5mu").exists()
+    _ok(source, "-o", tmp_path / "one.h5mu", "--mod", "all")  # whole, raw with it
