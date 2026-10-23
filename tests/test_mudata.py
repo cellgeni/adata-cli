@@ -590,3 +590,17 @@ def test_duplicate_entries_of_a_global_graph_are_kept(tmp_path, mod):
     got, kept = _read(tmp_path / "out.h5ad").obsp["dup"], len(truth.rows(mod))
     assert got.nnz == 2 * kept, "both entries of each pair kept, not summed"
     assert np.array_equal(_dense(got), 2 * np.eye(kept, dtype=np.float32))
+
+
+def test_a_modality_key_named_like_the_scratch_group_is_left_alone(tmp_path):
+    """The scratch group took a fixed name in the output's root, where a key
+    the modality brought along could already be."""
+    truth = _mudata(tmp_path)
+    with h5py.File(truth.path, "a") as f:
+        f["mod/atac"].create_group("__csr_scratch__").attrs["mine"] = 1
+    _ok(truth.path, "-o", tmp_path / "out.zarr", "--mod", "atac")
+    import zarr
+
+    root = zarr.open_group(str(tmp_path / "out.zarr"), mode="r")
+    assert root["__csr_scratch__"].attrs["mine"] == 1
+    assert [k for k in root.keys() if k.startswith("__csr_scratch__")] == ["__csr_scratch__"]

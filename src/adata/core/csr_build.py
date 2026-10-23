@@ -122,6 +122,12 @@ def scratch_group(dst_parent: Any, name: str) -> Iterator[Any]:
     Zarr store frees the space, so there it stays in place.
     """
     if not is_hdf5_group(dst_parent):
+        # A name the store does not hold: whatever was copied in beside it
+        # (a modality's own top-level keys) may already have this one.
+        base, n = name, 0
+        while name in dst_parent:
+            n += 1
+            name = f"{base}_{n}"
         group = dst_parent.create_group(name)
         try:
             yield group
