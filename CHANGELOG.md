@@ -3,6 +3,27 @@
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
+## 0.16.1
+
+`subset`, `split` and the MuData export now narrow categorical columns as
+anndata's own subsetting does, so their obs and var equal what anndata
+gives, and outputs that kept every label of a large categorical are smaller.
+
+### Fixed
+
+- **A subset keeps only the categories its rows use**
+  ([#74](https://github.com/cellgeni/adata-cli/pull/74)). anndata drops a
+  category no kept row uses, on obs and var (the axis kept whole too), and
+  narrows `uns["<col>_colors"]` with it; `subset`, `split` and the MuData
+  export kept every category. A peaks subset of a 10x Multiome matrix held
+  all 134,905 interval labels for 98,319 peaks, and its `.h5mu` was 84.7 MB
+  where it is now 74.2 MB.
+  - Colours follow anndata's rule: those of the categories kept, along the
+    first axis (RGBA rows too); a list of the wrong length is dropped, a
+    single colour becomes a list of one; obs before var.
+  - Order and `ordered` are kept. A whole AnnData written to `.h5mu` with
+    `--mod` keeps its categories, as nothing is subset.
+
 ## 0.16.0
 
 Reads and writes MuData, the container muon, mudata and SCENIC+ keep
