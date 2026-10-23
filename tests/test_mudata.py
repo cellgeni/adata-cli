@@ -510,3 +510,34 @@ def test_one_type_left_in_var_still_splits_raw_by_type(tmp_path):
     assert "Not written: 2 raw features of type 'Peaks'" in _out(result)
     _ok(tmp_path / "rna.h5mu", "-o", tmp_path / "back.h5ad")
     assert list(_read(tmp_path / "back.h5ad").raw.var_names) == list(obj.var_names)
+
+
+def test_modality_names_that_meet_as_file_names_each_get_a_file(tmp_path):
+    """`a b`, `a_b` and `a_b_1` were given stems a_b, a_b_1 and a_b_1: two
+    modalities wrote one file."""
+    truth = _mudata(tmp_path)
+    names = ["a b", "a_b", "a_b_1"]
+    with h5py.File(truth.path, "a") as f:
+        for name in names:
+            f.copy(f["mod/rna"], f["mod"], name)
+            f.copy(f["obsmap/rna"], f["obsmap"], name)
+            f.copy(f["varmap/rna"], f["varmap"], name)
+        f["mod"].attrs["mod-order"] = np.array(["rna", "atac", *names], dtype=h5py.string_dtype())
+    _ok(truth.path, "-o", tmp_path / "out.h5ad")
+    written = sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("out."))
+    assert written == ["out.a_b.h5ad", "out.a_b_1.h5ad", "out.a_b_1_1.h5ad", "out.atac.h5ad", "out.rna.h5ad"]
+
+
+def test_a_global_entry_named_like_the_scratch_group_is_taken_too(tmp_path):
+    """Sorting a reversed modality's graph built its buckets in a group named
+    __csr_scratch__ inside obsp itself, where an entry of that name was."""
+    from anndata.io import write_elem
+
+    truth = _mudata(tmp_path)
+    n = len(truth.obs)
+    graph = sp.random(n, n, density=0.1, format="csr", random_state=7, dtype=np.float32)
+    with h5py.File(truth.path, "a") as f:
+        write_elem(f["obsp"], "__csr_scratch__", graph)
+    _ok(truth.path, "-o", tmp_path / "out.zarr", "--mod", "atac")
+    got, rows = _read(tmp_path / "out.zarr"), truth.rows("atac")
+    assert np.array_equal(_dense(got.obsp["__csr_scratch__"]), graph[rows][:, rows].toarray())

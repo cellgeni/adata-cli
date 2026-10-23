@@ -68,7 +68,7 @@ from adata.storage import (
     write_legacy_categorical,
     zarr_format_of,
 )
-from adata.util.names import claim, storable, unique_names
+from adata.util.names import claim, sanitize_label, storable
 from adata.util.path import same_path
 
 #: The root's encoding, as mudata writes it (and reads it, in any case).
@@ -342,7 +342,10 @@ class MudataImport(Converter):
             if options.mod is not None and options.mod not in mods:
                 raise ValueError(f"No modality {options.mod!r}; this file has: {', '.join(mods)}.")
             wanted = [options.mod] if options.mod is not None else mods
-            stems = unique_names(wanted)
+            # Claimed in turn against every stem so far: sanitising can make
+            # `a b`, `a_b` and `a_b_1` meet, and each needs its own file.
+            taken_stems: set = set()
+            stems = {mod: claim(sanitize_label(mod), taken_stems) for mod in wanted}
             skipped: Dict[str, int] = {}
             planned: List[_Modality] = []
             for mod in wanted:
@@ -425,7 +428,7 @@ def _write_axis(
         obj = src[mapping][key]
         if spec.encoding_type(obj) in spec.SPARSE_TYPES:
             position = _positions(axis) if position is None else position
-            _take_sparse(obj, dst[mapping], name, position, None, axis, compression)
+            _take_sparse(obj, dst[mapping], name, position, None, axis, compression, dst)
         elif spec.encoding_type(obj) == spec.DATAFRAME:
             _take_frame(obj, dst[mapping], name, axis.rows, compression)
         else:
@@ -434,7 +437,7 @@ def _write_axis(
         obj = src[graphs][key]
         position = _positions(axis) if position is None else position
         if spec.encoding_type(obj) in spec.SPARSE_TYPES:
-            _take_sparse(obj, dst[graphs], name, position, position, axis, compression)
+            _take_sparse(obj, dst[graphs], name, position, position, axis, compression, dst)
         else:
             _take_square(obj, dst[graphs], name, axis.rows, compression)
 
@@ -543,13 +546,15 @@ def _take_square(obj: Any, parent: Any, name: str, rows: np.ndarray, compression
 
 def _take_sparse(
     obj: Any, parent: Any, name: str, row_pos: np.ndarray, col_pos: Optional[np.ndarray],
-    axis: _Axis, compression: Optional[str],
+    axis: _Axis, compression: Optional[str], scratch: Any,
 ) -> None:
     """A sparse matrix's rows (and, for a graph, columns) onto the
     modality's, in any order: entries are remapped as they stream and built
     into the output through on-disk buckets, the transpose's way.
 
-    CSC stays CSC: it is built as the CSR of its transpose."""
+    CSC stays CSC: it is built as the CSR of its transpose. The buckets go
+    under `scratch`, the output's root, where no entry of the file's can
+    have their name."""
     enc = spec.encoding_type(obj)
     n_rows, n_cols = _sparse_shape(obj)
     out_rows = len(axis.rows)
@@ -589,7 +594,7 @@ def _take_sparse(
         templates=(data, indices, obj["indptr"]),
     )
     write_runs(
-        blocks(), n_rows=out_major, n_targets=1, destinations=[[appender]], scratch_parent=parent,
+        blocks(), n_rows=out_major, n_targets=1, destinations=[[appender]], scratch_parent=scratch,
         grouped=grouped, canonical=False, counts=counts, value_dtype=data.dtype, chunk=1 << 20,
     )
     appender.finish()
