@@ -491,3 +491,22 @@ def test_an_old_anndata_with_a_mod_group_is_still_an_anndata(tmp_path):
             f.create_group(key)
         f.create_group("mod")
     assert detect_format(path) == "h5ad"
+
+
+def test_one_type_left_in_var_still_splits_raw_by_type(tmp_path):
+    """With only RNA left in var, the one modality took all of raw, Peaks
+    and all."""
+    types = ("Gene Expression",) * 6
+    source, obj = _multiome(tmp_path, types=types)
+    raw = ad.AnnData(
+        sp.random(obj.n_obs, 8, density=0.4, format="csr", random_state=3, dtype=np.float32),
+        obs=obj.obs[[]].copy(),
+        var=pd.DataFrame({"feature_types": pd.Categorical(["Gene Expression"] * 6 + ["Peaks"] * 2)},
+                         index=list(obj.var_names) + ["p1", "p2"]),
+    )
+    obj.raw = raw
+    obj.write_h5ad(source)
+    result = _ok(source, "-o", tmp_path / "rna.h5mu")
+    assert "Not written: 2 raw features of type 'Peaks'" in _out(result)
+    _ok(tmp_path / "rna.h5mu", "-o", tmp_path / "back.h5ad")
+    assert list(_read(tmp_path / "back.h5ad").raw.var_names) == list(obj.var_names)

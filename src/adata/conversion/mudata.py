@@ -728,8 +728,8 @@ def _plan_raw(
     raw = _child(root, "raw")
     if raw is None or not is_group(raw) or "var" not in raw:
         return [None] * len(mods)
-    if len(mods) == 1 and len(mods[0][1]) == n_var:
-        return [None]
+    if types_col is None:  # --mod, or nothing to split by: the whole AnnData
+        return [None] * len(mods)
     raw_var = raw["var"]
     raw_names = read_names(raw, "var")
     if len(set(raw_names)) != len(raw_names):
