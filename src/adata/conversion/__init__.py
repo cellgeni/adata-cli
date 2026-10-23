@@ -17,7 +17,7 @@ from typing import Dict, FrozenSet, List, Optional
 
 import h5py
 
-from adata.conversion import cellbender, cistopic, hdf5, loom, mtx, parse, tenx, text
+from adata.conversion import cellbender, cistopic, hdf5, loom, mtx, mudata, parse, tenx, text
 from adata.formats import pickled
 from adata.conversion.anndata_copy import AnnDataCopy
 from adata.conversion.base import ConversionPlan, Converter, Format, Options
@@ -44,12 +44,21 @@ def _sniff_h5ad(path: Path) -> bool:
     """
     if path.is_dir() or not h5py.is_hdf5(path):
         return False
+    # A MuData's root has obs and var too, beside its modalities: only a
+    # root that is one (by its attributes or muon's userblock) is turned away.
+    if mudata.sniff(path):
+        return False
     with h5py.File(path, "r") as handle:
         if has_valid_anndata_root_attrs(handle):
             return True
         return all(
             isinstance(handle.get(key), h5py.Group) for key in ("obs", "var")
         )
+
+
+def _sniff_zarr(path: Path) -> bool:
+    """A Zarr store, unless it is a MuData's."""
+    return is_zarr_path(path) and not mudata.sniff(path)
 
 
 FORMATS: Dict[str, Format] = {
@@ -65,7 +74,17 @@ FORMATS: Dict[str, Format] = {
         description="AnnData, Zarr backend (v2 or v3)",
         extensions=(".zarr",),
         anndata=True,
-        sniff=is_zarr_path,
+        sniff=_sniff_zarr,
+    ),
+    # Its root has obs and var, so it would pass for an h5ad; non-AnnData
+    # sniffers run first.
+    "mudata": Format(
+        name="mudata",
+        description="MuData (.h5mu, or a MuData Zarr store): one AnnData per modality",
+        extensions=(".h5mu",),
+        sniff=mudata.sniff,
+        importer=mudata.MudataImport(),
+        exporter=mudata.MudataExport(),
     ),
     # Before 10x-h5: a CellBender file is a 10x matrix too, and the first
     # sniffer to match wins. `--from 10x-h5` still reads one as plain 10x.

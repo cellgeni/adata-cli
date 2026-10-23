@@ -703,7 +703,8 @@ def _chunk_step(
 
 
 def copy_dataset(
-    src: Any, dst_group: Any, name: str, *, compression: Optional[str] = None
+    src: Any, dst_group: Any, name: str, *, compression: Optional[str] = None,
+    skip_attrs: Sequence[str] = (),
 ) -> Any:
     """Copy a dataset into `dst_group`, streaming it in chunks.
 
@@ -743,7 +744,10 @@ def copy_dataset(
         dtype=target_dtype(src.dtype, target_backend, zformat),
         **fit_chunks(kw, shape, backend=target_backend),
     )
-    copy_attrs(src.attrs, ds.attrs, target_backend=target_backend)
+    attrs = src.attrs if not skip_attrs else {
+        k: v for k, v in src.attrs.items() if k not in skip_attrs
+    }
+    copy_attrs(attrs, ds.attrs, target_backend=target_backend)
 
     if shape == ():
         ds[()] = src[()]
@@ -763,6 +767,77 @@ def copy_dataset(
     return ds
 
 
+#: A dataframe as anndata 0.7 wrote it: each categorical a dataset of codes
+#: whose `categories` attribute is an object reference into `__categories`.
+LEGACY_DATAFRAME_VERSION = "0.1.0"
+
+
+def is_legacy_dataframe(obj: Any) -> bool:
+    return (
+        is_group(obj)
+        and _decode_attr(obj.attrs.get("encoding-type", None)) == "dataframe"
+        and str(_decode_attr(obj.attrs.get("encoding-version", None))) == LEGACY_DATAFRAME_VERSION
+    )
+
+
+def is_legacy_categorical(obj: Any) -> bool:
+    return is_dataset(obj) and "categories" in obj.attrs
+
+
+def write_legacy_categorical(
+    frame: Any, name: str, codes_src: Any, dst_group: Any, codes: Optional[np.ndarray] = None,
+    *, compression: Optional[str] = None,
+) -> Any:
+    """A legacy categorical column of `frame` as a current `categorical`
+    group: its codes (all of them, or `codes`, already taken) and the labels
+    its reference points to, copied beside them.
+
+    An object reference cannot leave its file -- h5py's copy into another
+    file nulls it, and Zarr cannot hold one -- so the column is rewritten in
+    the layout anndata has written since 0.8, which needs none.
+    """
+    from adata.elements.read import categories_dataset
+
+    target_backend = "zarr" if is_zarr_group(dst_group) else "hdf5"
+    group = dst_group.create_group(name)
+    copy_attrs({
+        "encoding-type": "categorical", "encoding-version": "0.2.0",
+        "ordered": bool(_decode_attr(codes_src.attrs.get("ordered", False))),
+    }, group.attrs, target_backend=target_backend)
+    copy_dataset(categories_dataset(codes_src, frame), group, "categories", compression=compression)
+    if codes is None:
+        copy_dataset(codes_src, group, "codes", compression=compression, skip_attrs=("categories", "ordered"))
+    else:
+        codes = np.asarray(codes)
+        kw = dataset_create_kwargs(codes_src, target_backend=target_backend, dst_parent=group)
+        if compression is not None:
+            kw = with_compression(kw, compression, shape=codes.shape, dtype=codes.dtype,
+                                  backend=target_backend, zarr_format=zarr_format_of(group))
+        create_dataset(group, "codes", data=codes, **fit_chunks(kw, codes.shape, backend=target_backend))
+    return group
+
+
+def copy_legacy_dataframe(
+    src: Any, dst_group: Any, name: str, *, compression: Optional[str] = None
+) -> Any:
+    """A 0.1.0 dataframe copied as a current (0.2.0) one: its categoricals
+    rewritten as `categorical` groups (`write_legacy_categorical`), the
+    `__categories` they pointed into dropped, every other column as it is."""
+    target_backend = "zarr" if is_zarr_group(dst_group) else "hdf5"
+    grp = dst_group.create_group(name)
+    copy_attrs(src.attrs, grp.attrs, target_backend=target_backend)
+    grp.attrs["encoding-version"] = "0.2.0"
+    for key in src.keys():
+        child = src[key]
+        if key == "__categories":
+            continue
+        if is_legacy_categorical(child):
+            write_legacy_categorical(src, key, child, grp, compression=compression)
+        else:
+            copy_tree(child, grp, key, compression=compression)
+    return grp
+
+
 def copy_tree(
     src_obj: Any,
     dst_group: Any,
@@ -771,6 +846,8 @@ def copy_tree(
     exclude: Iterable[str] = (),
     compression: Optional[str] = None,
 ) -> Any:
+    if is_legacy_dataframe(src_obj) and not exclude:
+        return copy_legacy_dataframe(src_obj, dst_group, name, compression=compression)
     if is_hdf5_group(dst_group) and (
         is_hdf5_group(src_obj) or is_hdf5_dataset(src_obj)
     ):

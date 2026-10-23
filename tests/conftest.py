@@ -1216,3 +1216,114 @@ def write_imputed_pickle(path: Path, *, n_cells: int = 15, n_features: int = 8, 
     obj.project = "demo"
     path.write_bytes(pickle.dumps(obj, protocol=4))
     return CistopicTruth(path, obj)
+
+
+# ---------------------------------------------------------------------------
+# MuData, laid out as mudata's write_h5mu lays it out: each modality and each
+# global element written with anndata's write_elem.
+
+
+@dataclass
+class MudataTruth:
+    path: Path
+    mods: Dict[str, Any]  # name -> AnnData
+    obs: Any  # the global obs, a DataFrame
+    obsm: Dict[str, np.ndarray]
+    obsp: Dict[str, Any]
+    uns: Dict[str, Any]
+
+    def rows(self, mod: str) -> np.ndarray:
+        """The global row of each of the modality's cells."""
+        where = {name: i for i, name in enumerate(self.obs.index)}
+        return np.array([where[n] for n in self.mods[mod].obs_names])
+
+
+def write_h5mu(
+    path: Path,
+    *,
+    zarr_format: Optional[int] = None,
+    maps: bool = True,
+    userblock: bool = True,
+    root_attrs: bool = True,
+    n_cells: int = 40,
+    seed: int = 0,
+) -> MudataTruth:
+    """Two modalities sharing some cells: `rna` has all of them, `atac` the
+    last three quarters, in reverse order, so its rows are out of the
+    global order. Global obs columns (one clashing with rna's own, one
+    pulled from atac as `atac:tss`), a global obsm, obsp and uns."""
+    import anndata as ad
+    import pandas as pd
+    import scipy.sparse as sp
+    from anndata.io import write_elem
+
+    rng = np.random.default_rng(seed)
+    cells = [f"c{i}" for i in range(n_cells)]
+    rna = ad.AnnData(
+        sp.random(n_cells, 6, density=0.4, format="csr", random_state=seed, dtype=np.float32),
+        obs=pd.DataFrame({"n_genes": rng.integers(1, 9, n_cells)}, index=cells),
+        var=pd.DataFrame({"gene_ids": [f"ENSG{j}" for j in range(6)]}, index=[f"G{j}" for j in range(6)]),
+    )
+    rna.obsm["X_pca"] = rng.normal(size=(n_cells, 3))
+    rna.uns["rna_only"] = 1
+    atac_cells = cells[n_cells // 4:][::-1]
+    atac = ad.AnnData(
+        sp.random(len(atac_cells), 5, density=0.4, format="csr", random_state=seed + 1, dtype=np.float32),
+        obs=pd.DataFrame({"tss": rng.random(len(atac_cells))}, index=atac_cells),
+        var=pd.DataFrame(index=[f"chr1:{100 * j}-{100 * j + 50}" for j in range(5)]),
+    )
+    mods = {"rna": rna, "atac": atac}
+    obs = pd.DataFrame(index=cells)
+    obs["leiden"] = pd.Categorical(rng.choice(["a", "b", "c"], n_cells))
+    obs["n_genes"] = np.zeros(n_cells, dtype=np.int64)  # rna has its own
+    obs["atac:tss"] = np.nan
+    obs.loc[atac_cells, "atac:tss"] = atac.obs["tss"].to_numpy()
+    obs["sample"] = pd.array([None if i % 7 == 0 else f"s{i % 2}" for i in range(n_cells)], dtype="string")
+    obsm = {"X_wnn_umap": rng.normal(size=(n_cells, 2)),
+            "X_pca": rng.normal(size=(n_cells, 3))}  # rna has its own
+    # About five neighbours a cell, as a kNN graph has, whatever the count.
+    obsp = {"wnn_connectivities": sp.random(n_cells, n_cells, density=min(0.2, 5 / n_cells),
+                                            format="csr", random_state=seed + 2, dtype=np.float32)}
+    uns = {"wnn": {"k": 5}, "rna_only": 2}
+    var_names = list(rna.var_names) + list(atac.var_names)
+
+    if zarr_format is None:
+        handle = h5py.File(path, "w", userblock_size=512 if userblock else 0)
+    else:
+        import zarr
+
+        handle = zarr.open_group(str(path), mode="w", zarr_format=zarr_format)
+    try:
+        root = handle
+        write_elem(root, "obs", obs)
+        write_elem(root, "var", pd.DataFrame(index=var_names))
+        masks = {m: np.isin(cells, list(a.obs_names)) for m, a in mods.items()}
+        write_elem(root, "obsm", {**obsm, **masks})
+        write_elem(root, "varm", {m: np.isin(var_names, list(a.var_names)) for m, a in mods.items()})
+        write_elem(root, "obsp", obsp)
+        write_elem(root, "varp", {})
+        write_elem(root, "uns", uns)
+        if maps:
+            position = {m: {n: i for i, n in enumerate(a.obs_names)} for m, a in mods.items()}
+            write_elem(root, "obsmap", {
+                m: np.array([position[m].get(c, -1) + 1 for c in cells], dtype=np.uint32) for m in mods
+            })
+            vposition = {m: {n: i for i, n in enumerate(a.var_names)} for m, a in mods.items()}
+            write_elem(root, "varmap", {
+                m: np.array([vposition[m].get(v, -1) + 1 for v in var_names], dtype=np.uint32) for m in mods
+            })
+        group = root.create_group("mod")
+        for name, adata in mods.items():
+            write_elem(group, name, adata)
+        group.attrs["mod-order"] = list(mods) if zarr_format else np.array(list(mods), dtype=h5py.string_dtype())
+        if root_attrs:
+            root.attrs.update({"encoding-type": "mudata", "encoding-version": "0.1.0",
+                               "encoder": "mudata", "encoder-version": "0.3.2", "axis": 0})
+    finally:
+        if zarr_format is None:
+            handle.close()
+    if zarr_format is None and userblock:
+        header = b"MuData (format-version=0.1.0;creator=muon;creator-version=0.3.2)"
+        with open(path, "r+b") as raw:
+            raw.write(header.ljust(512, b"\0"))
+    return MudataTruth(path, mods, obs, obsm, obsp, uns)

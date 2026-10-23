@@ -64,6 +64,10 @@ class Options:
     clusterings: Optional[str] = None
     default_embedding: Optional[str] = None
 
+    # Reading or writing a MuData: the modality to read, or the one name to
+    # write the whole AnnData under.
+    mod: Optional[str] = None
+
 
 @dataclass
 class ConversionPlan:

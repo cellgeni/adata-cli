@@ -540,6 +540,7 @@ _CONVERT_FLAGS = {
     "scope": "--scope",
     "clusterings": "--clusterings",
     "default_embedding": "--default-embedding",
+    "mod": "--mod",
 }
 
 #: Flags that only make sense for format conversion; with recast's flags,
@@ -581,7 +582,7 @@ def convert(
         None,
         "--output",
         "-o",
-        help="Output path; its extension picks the format (.h5ad, .zarr, .h5), "
+        help="Output path; its extension picks the format (.h5ad, .zarr, .h5, .loom, .h5mu), "
         "or a folder with --to 10x-mtx",
         dir_okay=True,
         file_okay=True,
@@ -759,6 +760,13 @@ def convert(
         help="SCope output: the obsm key SCope shows first (default: the "
         "recorded default, else X_umap, else X_tsne, else the first)",
     ),
+    mod: Optional[str] = typer.Option(
+        None,
+        "--mod",
+        help="MuData: the modality to read (default: each, to OUT.<mod>.<ext>), "
+        "or the name to write the whole AnnData under (default: split by "
+        "feature_types)",
+    ),
     var_names_key: Optional[str] = typer.Option(
         None,
         "--var-names-key",
@@ -825,6 +833,9 @@ def convert(
         adata convert GSE123_counts.txt.gz -o counts.h5ad --transpose
         adata convert matrix.hdf5 -o matrix.h5ad --key data/counts
         adata convert cistopic_obj.pkl -o atac.h5ad
+        adata convert multiome.h5mu -o multiome.h5ad
+        adata convert scenicplus.h5mu -o rna.h5ad --mod scRNA_counts
+        adata convert multiome.h5ad -o multiome.h5mu
     """
     entries = list(ctx.args)
     recast_flags = _given(ctx, _RECAST_FLAGS)
@@ -925,6 +936,7 @@ def convert(
                 scope=scope,
                 clusterings=clusterings,
                 default_embedding=default_embedding,
+                mod=mod,
             ),
         )
     except Exception as e:
