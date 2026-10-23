@@ -568,3 +568,25 @@ def test_var_names_in_two_modalities_refuse_a_split_by_name(tmp_path):
     result = _convert(source, "-o", tmp_path / "multi.h5mu")
     assert result.exit_code == 1 and "are in more than one modality" in _out(result)
     assert not (tmp_path / "multi.h5mu").exists()
+
+
+@pytest.mark.parametrize("mod", ["rna", "atac"], ids=["in-order", "reversed"])
+def test_duplicate_entries_of_a_global_graph_are_kept(tmp_path, mod):
+    """Remapping summed a stored matrix's duplicate entries, as if building
+    one from coordinates: the map is one to one, so each is the source's."""
+    from anndata.io import write_elem
+
+    truth = _mudata(tmp_path)
+    n = len(truth.obs)
+    # Each cell's own column, twice.
+    graph = sp.csr_matrix(
+        (np.ones(2 * n, dtype=np.float32), np.repeat(np.arange(n), 2), np.arange(0, 2 * n + 1, 2)),
+        shape=(n, n),
+    )
+    assert not graph.has_canonical_format
+    with h5py.File(truth.path, "a") as f:
+        write_elem(f["obsp"], "dup", graph)
+    _ok(truth.path, "-o", tmp_path / "out.h5ad", "--mod", mod)
+    got, kept = _read(tmp_path / "out.h5ad").obsp["dup"], len(truth.rows(mod))
+    assert got.nnz == 2 * kept, "both entries of each pair kept, not summed"
+    assert np.array_equal(_dense(got), 2 * np.eye(kept, dtype=np.float32))

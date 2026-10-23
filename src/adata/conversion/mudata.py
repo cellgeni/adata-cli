@@ -596,6 +596,8 @@ def _take_sparse(
     write_runs(
         blocks(), n_rows=out_major, n_targets=1, destinations=[[appender]], scratch_parent=scratch,
         grouped=grouped, canonical=False, counts=counts, value_dtype=data.dtype, chunk=1 << 20,
+        # The map is one to one: a duplicate is the source's own, kept.
+        sum_duplicates=False,
     )
     appender.finish()
     if csc:

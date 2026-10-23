@@ -348,6 +348,7 @@ def write_runs(
     counts: np.ndarray,
     value_dtype: Any,
     chunk: int,
+    sum_duplicates: bool = True,
 ) -> int:
     """Append entries, given in any order, to each output's CSR matrix.
 
@@ -356,12 +357,13 @@ def write_runs(
     pass, and `grouped` / `canonical` what that pass learned of the order:
     grouped entries go straight through, others through on-disk buckets.
     `destinations[t]` are the appenders for output `t`. Returns how many
-    duplicate entries were summed away.
+    duplicate entries were summed away. `sum_duplicates=False` keeps them,
+    for entries that are a stored matrix's own, moved rather than built.
     """
     summer = DuplicateSummer()
 
     def consume(runs: Iterator[Triple]) -> None:
-        for keys, minors, values in summer(runs):
+        for keys, minors, values in (summer(runs) if sum_duplicates else runs):
             targets = keys // n_rows if n_targets > 1 else None
             for t in np.unique(targets) if targets is not None else (0,):
                 if targets is not None:
