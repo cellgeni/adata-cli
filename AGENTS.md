@@ -158,6 +158,13 @@ These are easy to break without any test noticing straight away:
   - a regression test's docstring says what used to go wrong;
   - comments explain *why*.
 
+## Status
+
+`STATUS.md` records what has been released, what is in progress (with its
+decisions and steps), follow-ups noticed along the way, and the next
+candidates. Update it as work moves: tick steps when they are done, and move
+an item to Released when its tag is out.
+
 ## Releases
 
 - Use a branch `release/X.Y.Z`.
