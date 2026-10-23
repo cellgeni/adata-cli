@@ -83,3 +83,62 @@ def test_a_var_subset_narrows_var_and_leaves_obs_whole(tmp_path):
     # anndata drops a category no row uses on the axis kept whole too.
     pd.testing.assert_frame_equal(got.obs, ref.obs)
     assert list(got.uns["stage_colors"]) == list(ref.uns["stage_colors"]) == ["#x", "#y"]
+
+
+def _subset_both(tmp_path, obj, obs_keep, var_keep=None):
+    obj.write_h5ad(tmp_path / "in.h5ad")
+    (tmp_path / "obs.txt").write_text("\n".join(obs_keep) + "\n")
+    args = ["subset", tmp_path / "in.h5ad", "--obs", tmp_path / "obs.txt", "-o", tmp_path / "sub.h5ad"]
+    if var_keep is not None:
+        (tmp_path / "var.txt").write_text("\n".join(var_keep) + "\n")
+        args += ["--var", tmp_path / "var.txt"]
+    _ok(*args)
+    return ad.read_h5ad(tmp_path / "sub.h5ad")
+
+
+def test_colours_follow_anndatas_rule(tmp_path):
+    """RGBA rows were left whole, so they no longer lined up with the
+    categories; colours of the wrong length were kept, and a single colour
+    left 0-d, where anndata drops the one and wraps the other."""
+    obj = _store(tmp_path / "x.h5ad")
+    obj.uns["cell_type_colors"] = np.array([[1, 0, 0, 1], [0, 1, 0, 1], [0, 0, 1, 1]], dtype=float)
+    obj.uns["stage_colors"] = np.array(["#a", "#b"], dtype=object)  # 2 for 3 categories
+    obj.obs["one"] = pd.Categorical(["m"] * obj.n_obs)
+    obj.uns["one_colors"] = "#m"
+    keep = [f"c{i}" for i in range(4, 12)]
+    got = _subset_both(tmp_path, obj, keep)
+    ref = obj[keep].copy()
+    assert np.array_equal(got.uns["cell_type_colors"], ref.uns["cell_type_colors"])
+    assert "stage_colors" not in ref.uns and "stage_colors" not in got.uns
+    assert list(got.uns["one_colors"]) == list(ref.uns["one_colors"]) == ["#m"]
+
+
+def test_a_column_name_in_obs_and_var_has_its_colours_narrowed_obs_then_var(tmp_path):
+    rng = np.random.default_rng(0)
+    obj = ad.AnnData(
+        rng.random((4, 3)).astype(np.float32),
+        obs=pd.DataFrame({"k": pd.Categorical(["p", "q", "r", "r"])}, index=[f"c{i}" for i in range(4)]),
+        var=pd.DataFrame({"k": pd.Categorical(["s", "t", "u"])}, index=[f"f{j}" for j in range(3)]),
+    )
+    obj.uns["k_colors"] = np.array(["#1", "#2", "#3"], dtype=object)
+    got = _subset_both(tmp_path, obj, ["c0", "c1"], ["f0"])
+    ref = obj[["c0", "c1"], ["f0"]].copy()
+    # obs narrows them to p, q; then var's three categories match two
+    # colours no longer, so they go.
+    assert "k_colors" not in ref.uns and "k_colors" not in got.uns
+
+
+def test_converting_a_whole_anndata_to_mudata_keeps_its_categories(tmp_path):
+    """--mod writes the whole AnnData, no subset: an unused category stayed
+    on main, and should stay."""
+    import h5py
+
+    rng = np.random.default_rng(0)
+    obj = ad.AnnData(
+        rng.random((3, 2)).astype(np.float32),
+        var=pd.DataFrame({"kind": pd.Categorical(["g", "p"], categories=["g", "p", "z"])}, index=["f0", "f1"]),
+    )
+    obj.write_h5ad(tmp_path / "in.h5ad")
+    _ok("convert", tmp_path / "in.h5ad", "-o", tmp_path / "out.h5mu", "--mod", "rna")
+    with h5py.File(tmp_path / "out.h5mu") as f:
+        assert f["mod/rna/var/kind/categories"].shape[0] == 3
