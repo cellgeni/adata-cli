@@ -608,6 +608,8 @@ class _Export:
     mods: List[Tuple[str, np.ndarray]]
     n_obs: int
     n_var: int
+    #: Per modality, the raw/var names it keeps; None for all of raw.
+    raw_keep: List[Optional[set]] = field(default_factory=list)
 
 
 def modality_name(label: str) -> str:
@@ -653,6 +655,7 @@ class MudataExport(Converter):
                     mods.append((claim(modality_name(label), taken), np.flatnonzero(types == label)))
             else:
                 mods.append((options.mod or "rna", np.arange(n_var, dtype=np.int64)))
+            raw_keep = _plan_raw(root, mods, n_var, types_col, warnings)
             for key in _keys(_child(root, "obsm")):
                 if key in {m for m, _ in mods}:
                     raise ValueError(
@@ -669,7 +672,7 @@ class MudataExport(Converter):
             outputs=[output],
             summary=f"{src_format} → MuData (.h5mu), {n_obs:,} obs; {described}",
             warnings=warnings,
-            detail=_Export(mods, n_obs, n_var),
+            detail=_Export(mods, n_obs, n_var, raw_keep),
         )
 
     def write(self, plan: ConversionPlan, staged: Sequence[Path], console: Console) -> None:
@@ -683,12 +686,11 @@ class MudataExport(Converter):
             mod_group = out.create_group("mod")
             targets = []
             obs_names = read_names(src, "obs")
-            for name, rows in detail.mods:
+            for (name, rows), keep in zip(detail.mods, detail.raw_keep):
                 group = mod_group.create_group(name)
                 ensure_anndata_root_attrs(group)
                 group.attrs["encoder"] = "adata"
                 group.attrs["encoder-version"] = __version__
-                keep = set(read_names(src, "var", rows)) if "raw" in src else None
                 targets.append(Target(group, None, None if len(rows) == detail.n_var else rows, keep))
             _write_targets(
                 src, targets, chunk_rows=ROW_BLOCK, console=console,
@@ -710,6 +712,42 @@ class MudataExport(Converter):
         header = f"MuData (format-version={ENCODING_VERSION};creator=adata;creator-version={__version__})"
         with open(staged[0], "r+b") as raw:
             raw.write(header.encode("ascii")[:USERBLOCK].ljust(USERBLOCK, b"\0"))
+
+
+def _plan_raw(
+    root: Any, mods: List[Tuple[str, np.ndarray]], n_var: int, types_col: Optional[str],
+    warnings: List[str],
+) -> List[Optional[set]]:
+    """Which of raw's features each modality keeps.
+
+    The whole AnnData as one modality keeps raw whole: raw often holds genes
+    var was filtered of. Split, each modality takes raw's features of its
+    type, by raw/var's own column where it has one; otherwise those named in
+    its var, and raw's others are left out, with a warning.
+    """
+    raw = _child(root, "raw")
+    if raw is None or not is_group(raw) or "var" not in raw:
+        return [None] * len(mods)
+    if len(mods) == 1 and len(mods[0][1]) == n_var:
+        return [None]
+    raw_var = raw["var"]
+    raw_names = read_names(raw, "var")
+    raw_columns = dataframe_columns(raw_var, resolve_index(raw_var, "var")[1])
+    if types_col is not None and types_col in raw_columns:
+        raw_types = np.asarray(read_str_all(raw_var[types_col], parent_group=raw_var), dtype=object)
+        var = root["var"]
+        types = np.asarray(read_str_all(var[types_col], parent_group=var), dtype=object)
+        return [set(np.asarray(raw_names, dtype=object)[raw_types == types[rows[0]]].tolist()) if len(rows) else set()
+                for _, rows in mods]
+    var_names = read_names(root, "var")
+    keeps = [set(var_names[i] for i in rows) for _, rows in mods]
+    left = len(set(raw_names) - set().union(*keeps))
+    if left:
+        warnings.append(
+            f"Not written: {left:,} raw features that var lacks -- raw/var has no "
+            f"{types_col or 'feature types'} column to say which modality they belong to."
+        )
+    return keeps
 
 
 def _write_globals(src: Any, out: h5py.File, detail: _Export) -> None:

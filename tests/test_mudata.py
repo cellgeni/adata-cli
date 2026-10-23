@@ -414,3 +414,47 @@ def test_without_maps_repeated_modality_names_are_refused(tmp_path):
     result = _convert(truth.path, "-o", tmp_path / "out.h5ad", "--mod", "atac")
     assert result.exit_code == 1 and "atac's obs names repeat" in _out(result)
     assert [p.name for p in tmp_path.iterdir()] == [truth.path.name]
+
+
+def _with_raw_extra(tmp_path, *, types_in_raw: bool):
+    """A filtered AnnData whose raw holds two more features than var."""
+    source, obj = _multiome(tmp_path)
+    full = obj.copy()
+    full.var = full.var.copy()
+    extra = ad.AnnData(
+        sp.random(obj.n_obs, 2, density=0.5, format="csr", random_state=9, dtype=np.float32),
+        obs=obj.obs[[]].copy(),
+        var=pd.DataFrame({"feature_types": pd.Categorical(["Gene Expression", "Peaks"]),
+                          "gene_ids": ["idx0", "idx1"]}, index=["extra_g", "extra_p"]),
+    )
+    raw = ad.concat([full, extra], axis=1, merge="first")
+    raw.var["feature_types"] = pd.Categorical(list(full.var["feature_types"]) + ["Gene Expression", "Peaks"])
+    if not types_in_raw:
+        raw.var = raw.var.drop(columns=["feature_types"])
+    obj.raw = raw
+    obj.write_h5ad(source)
+    return source, obj
+
+
+def test_the_whole_anndata_as_one_modality_keeps_raw_whole(tmp_path):
+    """raw's features beyond var were dropped: they were selected by var's
+    names, as if the modality were part of it."""
+    source, obj = _with_raw_extra(tmp_path, types_in_raw=True)
+    _ok(source, "-o", tmp_path / "one.h5mu", "--mod", "all")
+    _ok(tmp_path / "one.h5mu", "-o", tmp_path / "back.h5ad")
+    assert list(_read(tmp_path / "back.h5ad").raw.var_names) == list(obj.raw.var_names)
+
+
+def test_split_modalities_take_raws_features_of_their_type(tmp_path):
+    source, obj = _with_raw_extra(tmp_path, types_in_raw=True)
+    _ok(source, "-o", tmp_path / "multi.h5mu")
+    _ok(tmp_path / "multi.h5mu", "-o", tmp_path / "back.h5ad")
+    rna, atac = _read(tmp_path / "back.rna.h5ad"), _read(tmp_path / "back.atac.h5ad")
+    assert "extra_g" in rna.raw.var_names and "extra_p" not in rna.raw.var_names
+    assert "extra_p" in atac.raw.var_names and "extra_g" not in atac.raw.var_names
+
+
+def test_raw_features_no_modality_can_claim_are_left_out_with_a_warning(tmp_path):
+    source, _ = _with_raw_extra(tmp_path, types_in_raw=False)
+    result = _ok(source, "-o", tmp_path / "multi.h5mu")
+    assert "Not written: 2 raw features that var lacks" in _out(result)
