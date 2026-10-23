@@ -480,3 +480,14 @@ def test_repeated_raw_names_refuse_a_split(tmp_path):
     assert result.exit_code == 1 and "raw's var names repeat" in _out(result)
     assert not (tmp_path / "multi.h5mu").exists()
     _ok(source, "-o", tmp_path / "one.h5mu", "--mod", "all")  # whole, raw with it
+
+
+def test_an_old_anndata_with_a_mod_group_is_still_an_anndata(tmp_path):
+    """A `mod` group alone, in an anndata 0.7 file with no root attributes
+    and no MuData userblock, made it unrecognisable by content."""
+    path = tmp_path / "old.h5"
+    with h5py.File(path, "w") as f:
+        for key in ("obs", "var"):
+            f.create_group(key)
+        f.create_group("mod")
+    assert detect_format(path) == "h5ad"

@@ -44,12 +44,13 @@ def _sniff_h5ad(path: Path) -> bool:
     """
     if path.is_dir() or not h5py.is_hdf5(path):
         return False
+    # A MuData's root has obs and var too, beside its modalities: only a
+    # root that is one (by its attributes or muon's userblock) is turned away.
+    if mudata.sniff(path):
+        return False
     with h5py.File(path, "r") as handle:
         if has_valid_anndata_root_attrs(handle):
             return True
-        # A MuData's root has obs and var too, beside its modalities.
-        if mudata.is_mudata_root(handle) or isinstance(handle.get("mod"), h5py.Group):
-            return False
         return all(
             isinstance(handle.get(key), h5py.Group) for key in ("obs", "var")
         )
