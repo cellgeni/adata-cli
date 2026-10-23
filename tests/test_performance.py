@@ -710,6 +710,43 @@ def test_scope_loom_import_writes_tables_in_blocks(tmp_path):
     assert_independent_of(measure, what="convert SCope loom write calls", axis="n_cells")
 
 
+def test_mudata_import_work_grows_linearly(tmp_path, monkeypatch):
+    """Global rows are taken onto a modality's a block at a time, out of
+    order too (atac's cells are reversed), and its graph through buckets."""
+    from adata.commands.convert import convert_store
+    from adata.conversion import mudata
+    from tests.conftest import write_h5mu
+
+    monkeypatch.setattr(mudata, "ROW_BLOCK", 16)
+
+    def measure(n: int) -> int:
+        source = write_h5mu(tmp_path / f"mu{n}.h5mu", n_cells=n).path
+        with count_io() as io:
+            convert_store(source, tmp_path / f"mu{n}.h5ad", QUIET)
+        return io.work
+
+    assert_grows_linearly(measure, what="convert MuData to h5ads", axis="n_cells")
+
+
+def test_mudata_export_work_grows_linearly(tmp_path, monkeypatch):
+    """Every modality is written in one pass over the matrices."""
+    from adata.commands.convert import convert_store
+    from adata.conversion import Options, mudata
+    from tests.conftest import write_h5mu
+
+    monkeypatch.setattr(mudata, "ROW_BLOCK", 16)
+
+    def measure(n: int) -> int:
+        h5ad = tmp_path / f"me{n}.h5ad"
+        source = write_h5mu(tmp_path / f"me{n}.h5mu", n_cells=n).path
+        convert_store(source, h5ad, QUIET, options=Options(mod="rna", given=frozenset({"--mod"})))
+        with count_io() as io:
+            convert_store(h5ad, tmp_path / f"out{n}.h5mu", QUIET)
+        return io.work
+
+    assert_grows_linearly(measure, what="convert h5ad to MuData", axis="n_cells")
+
+
 @pytest.mark.parametrize("transpose", [False, True], ids=["cells-as-rows", "transposed"])
 def test_text_import_work_grows_linearly(tmp_path, monkeypatch, transpose):
     """Blocks of lines, each parsed once; a transposed file's entries go

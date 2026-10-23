@@ -21,6 +21,7 @@ import numpy as np
 from rich.console import Console
 
 from adata.core.info import axis_len
+from adata.core.subset import aligned_rows
 from adata.core.select import read_names
 from adata.elements import spec
 from adata.elements.read import (
@@ -49,7 +50,6 @@ from adata.storage import (
     dataset_create_kwargs,
     fit_chunks,
     is_dataset,
-    is_zarr_array,
     is_zarr_group,
     Store,
     is_group,
@@ -764,28 +764,6 @@ def _concat_frame(
 # varm
 
 
-def _aligned_rows(obj: Any, rows: np.ndarray) -> np.ndarray:
-    """`obj[rows]`, for target rows in any order, one block at a time.
-
-    Rows in order (an inner join keeps the first input's) are read as the
-    one slab they span; rows out of order by index, which both backends
-    take only sorted, then put back in the target's order.
-    """
-    order = np.argsort(rows, kind="stable")
-    wanted = rows[order]
-    lo, hi = int(wanted[0]), int(wanted[-1]) + 1
-    if hi - lo <= 2 * len(rows):
-        block = np.asarray(obj[lo:hi, ...])[wanted - lo]
-    elif is_zarr_array(obj):
-        block = np.asarray(obj.oindex[(wanted,) + (slice(None),) * (obj.ndim - 1)])
-    else:
-        block = np.asarray(obj[wanted, ...])
-    out = np.empty_like(block)
-    out[order] = block
-    # h5py writes text only from str objects, not numpy's `<U`.
-    return decode_str_array(out).astype(object) if is_string_dtype(out.dtype) else out
-
-
 def _digest(hasher: Any, values: np.ndarray) -> None:
     """Feed values to `hasher` exactly: bytes for numbers, so NaN equals NaN,
     and the text itself for strings, never object pointers."""
@@ -808,7 +786,7 @@ def _varm_snapshot(obj: Any, where: np.ndarray, block_rows: int) -> Any:
     if is_dataset(obj):
         hasher = hashlib.blake2b(digest_size=32)
         for start in range(0, len(where), block_rows):
-            _digest(hasher, _aligned_rows(obj, where[start:start + block_rows]))
+            _digest(hasher, aligned_rows(obj, where[start:start + block_rows]))
         kind = "text" if is_string_dtype(obj.dtype) else str(obj.dtype)
         return ("array", kind, tuple(obj.shape[1:]), hasher.digest())
     if spec.encoding_type(obj) != spec.DATAFRAME:
@@ -849,7 +827,7 @@ def _write_varm_array(parent: Any, name: str, obj: Any, take: np.ndarray, block_
     out = create_dataset(parent, name, shape=shape, dtype=obj.dtype, **kw)
     spec.set_encoding(out, spec.STRING_ARRAY if text else spec.ARRAY)
     for start in range(0, len(take), block_rows):
-        out[start:start + block_rows, ...] = _aligned_rows(obj, take[start:start + block_rows])
+        out[start:start + block_rows, ...] = aligned_rows(obj, take[start:start + block_rows])
 
 
 def _write_varm(

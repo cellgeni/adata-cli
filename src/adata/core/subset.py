@@ -19,6 +19,7 @@ from rich.progress import (
 )
 
 from adata.elements import spec
+from adata.elements.strings import is_string_dtype
 from adata.elements.write import set_shape_attr, write_mapping
 from adata.core.select import read_names, select_indices
 from adata.elements.read import (
@@ -36,10 +37,13 @@ from adata.storage import (
     fit_chunks,
     is_dataset,
     is_group,
+    is_legacy_categorical,
+    is_legacy_dataframe,
     is_zarr_group,
     is_zarr_array,
     open_store,
     with_compression,
+    write_legacy_categorical,
     zarr_format_of,
 )
 from adata.util.path import same_path
@@ -151,6 +155,28 @@ def _take_rows(obj: Any, indices: Optional[np.ndarray]) -> Any:
     return parts[0] if len(parts) == 1 else np.concatenate(parts)
 
 
+def aligned_rows(obj: Any, rows: np.ndarray) -> np.ndarray:
+    """`obj[rows]`, for rows in any order: one block of an output's rows.
+
+    Rows in order are read as the one slab they span; rows out of order, or
+    scattered, by index, which both backends take only sorted, then put back
+    in the output's order. The caller bounds memory by the block it asks for.
+    """
+    order = np.argsort(rows, kind="stable")
+    wanted = rows[order]
+    lo, hi = int(wanted[0]), int(wanted[-1]) + 1
+    if hi - lo <= 2 * len(rows):
+        block = np.asarray(obj[lo:hi, ...])[wanted - lo]
+    elif is_zarr_array(obj):
+        block = np.asarray(obj.oindex[(wanted,) + (slice(None),) * (obj.ndim - 1)])
+    else:
+        block = np.asarray(obj[wanted, ...])
+    out = np.empty_like(block)
+    out[order] = block
+    # h5py writes text only from str objects, not numpy's `<U`.
+    return decode_str_array(out).astype(object) if is_string_dtype(out.dtype) else out
+
+
 def _copy_rows(
     src_ds: Any,
     dst_parent: Any,
@@ -191,9 +217,22 @@ def subset_axis_group(
     """
     target_backend = _target_backend(dst)
     copy_attrs(src.attrs, dst.attrs, target_backend=target_backend)
+    # anndata 0.7's categoricals point into `__categories` by object
+    # reference, which cannot leave the file: they are written as current
+    # `categorical` groups, and the frame as the current version.
+    legacy = is_legacy_dataframe(src)
+    if legacy:
+        dst.attrs["encoding-version"] = "0.2.0"
 
     for key in src.keys():
         obj = src[key]
+
+        if legacy and key == "__categories":
+            continue
+        if legacy and is_legacy_categorical(obj):
+            codes = None if indices is None else np.asarray(_take_rows(obj, indices))
+            write_legacy_categorical(src, key, obj, dst, codes)
+            continue
 
         if is_dataset(obj):
             _copy_rows(obj, dst, key, indices)
@@ -787,12 +826,16 @@ def _write_targets(
     *,
     chunk_rows: int,
     console: Console,
+    skip: Set[str] = frozenset(),
+    verb: str = "Subsetting",
 ) -> None:
     """Write every element of `src`, narrowed, into each target's store.
 
     Matrices are read once and shared out among the targets; the rest -- the
     dataframes, `uns`, anything unrecognised -- is small or row-proportional,
     and is written target by target with the single-output helpers.
+    `skip` names top-level elements the caller writes itself (a MuData
+    export keeps obs, obsm, obsp and uns once, for all modalities).
     """
     tasks: List[str] = []
     if "obs" in src:
@@ -824,6 +867,8 @@ def _write_targets(
         tasks.extend(f"copy:{k}" for k in passthrough)
 
     labels = {v: k for k, v in _TASK_LABELS.items()}
+    tasks = [t for t in tasks if labels.get(t.split(":", 1)[0], t.split(":", 1)[0]) not in skip
+             and not (t.startswith("copy:") and t.split(":", 1)[1] in skip)]
 
     with Progress(
         SpinnerColumn(finished_text="[green]✓[/]"),
@@ -832,7 +877,7 @@ def _write_targets(
         transient=False,
     ) as progress:
         for task in tasks:
-            task_id = progress.add_task(f"[cyan]Subsetting {task}...[/]", total=None)
+            task_id = progress.add_task(f"[cyan]{verb} {task}...[/]", total=None)
             if task in ("obs", "var"):
                 for target in targets:
                     subset_axis_group(
@@ -881,7 +926,7 @@ def _write_targets(
                 )
             progress.update(
                 task_id,
-                description=f"[green]Subsetting {task}[/]",
+                description=f"[green]{verb} {task}[/]",
                 completed=1,
                 total=1,
             )

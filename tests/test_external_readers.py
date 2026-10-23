@@ -911,3 +911,114 @@ def test_a_pandas_15_cistopic_pickle_converts_under_pandas_2_too(tmp_path):
     assert version.startswith("2.2")
     problems = _run(_PYCISTOPIC_ENV, _COMPARE_CISTOPIC, str(path), str(out), python="3.11")
     assert problems == [], problems
+
+
+# ---------------------------------------------------------------------------
+# MuData. mudata itself writes the file we read, and reads the file we write.
+
+_MUDATA = ["mudata", "anndata", "scipy"]
+
+# Write a MuData with mudata: two modalities sharing some cells, in another
+# order, columns pulled into the global obs, a global embedding and graph.
+_WRITE_MUDATA = r"""
+import json, sys, warnings
+warnings.filterwarnings("ignore")
+import numpy as np, pandas as pd, anndata as ad, mudata as md, scipy.sparse as sp
+rng = np.random.default_rng(0)
+cells = [f"c{i}" for i in range(50)]
+rna = ad.AnnData(sp.random(50, 7, density=0.3, format="csr", random_state=0, dtype=np.float32),
+                 obs=pd.DataFrame({"n_genes": rng.integers(1, 9, 50)}, index=cells),
+                 var=pd.DataFrame(index=[f"g{j}" for j in range(7)]))
+rna.obsm["X_pca"] = rng.normal(size=(50, 3))
+atac_cells = cells[12:][::-1]
+atac = ad.AnnData(sp.random(38, 5, density=0.3, format="csr", random_state=1, dtype=np.float32),
+                  obs=pd.DataFrame({"tss": rng.random(38)}, index=atac_cells),
+                  var=pd.DataFrame(index=[f"p{j}" for j in range(5)]))
+m = md.MuData({"rna": rna, "atac": atac})
+m.pull_obs()
+m.obs["leiden"] = pd.Categorical(rng.choice(["a", "b"], m.n_obs))
+m.obsm["X_wnn_umap"] = rng.normal(size=(m.n_obs, 2))
+m.obsp["wnn"] = sp.random(m.n_obs, m.n_obs, density=0.1, format="csr", random_state=2)
+m.write(sys.argv[1])
+print("RESULT " + json.dumps({"mods": list(m.mod), "obs": list(m.obs.columns)}))
+"""
+
+# Compare our per-modality h5ads with what mudata reads, global parts taken
+# onto each modality's cells by name.
+_COMPARE_MUDATA_IMPORT = r"""
+import json, sys, warnings
+warnings.filterwarnings("ignore")
+import numpy as np, anndata as ad, mudata as md
+m = md.read_h5mu(sys.argv[1])
+problems = []
+for mod in m.mod:
+    ref, got = m[mod], ad.read_h5ad(sys.argv[2].replace("MOD", mod))
+    rows = [m.obs_names.get_loc(n) for n in ref.obs_names]
+    if list(got.obs_names) != list(ref.obs_names) or list(got.var_names) != list(ref.var_names):
+        problems.append(f"{mod}: names differ")
+    if (got.X != ref.X).nnz:
+        problems.append(f"{mod}: X differs")
+    for column in ref.obs.columns:
+        if list(got.obs[column]) != list(ref.obs[column]):
+            problems.append(f"{mod}: own obs {column} differs")
+    if list(got.obs["leiden"]) != list(m.obs["leiden"].iloc[rows]):
+        problems.append(f"{mod}: global leiden differs")
+    if not np.allclose(got.obsm["X_wnn_umap"], m.obsm["X_wnn_umap"][rows]):
+        problems.append(f"{mod}: global X_wnn_umap differs")
+    if abs(got.obsp["wnn"] - m.obsp["wnn"][rows][:, rows]).max() != 0:
+        problems.append(f"{mod}: global graph differs")
+    pulled = [c for c in got.obs.columns if ":" in c]
+    if pulled:
+        problems.append(f"{mod}: pulled columns came along: {pulled}")
+print("RESULT " + json.dumps(problems))
+"""
+
+# Read our .h5mu with mudata, warnings as errors (a file without the
+# userblock warns), and compare each modality with the AnnData's subset.
+_COMPARE_MUDATA_EXPORT = r"""
+import json, sys, warnings
+import numpy as np, anndata as ad, mudata as md
+a = ad.read_h5ad(sys.argv[1])
+with warnings.catch_warnings():
+    warnings.simplefilter("error", UserWarning)
+    m = md.read_h5mu(sys.argv[2])
+problems = []
+if list(m.mod) != ["rna", "atac"]:
+    problems.append(f"modalities {list(m.mod)}")
+for mod, kind in (("rna", "Gene Expression"), ("atac", "Peaks")):
+    sub, got = a[:, a.var["feature_types"] == kind], m[mod]
+    if list(got.var_names) != list(sub.var_names) or (got.X != sub.X).nnz:
+        problems.append(f"{mod} differs")
+if list(m.obs_names) != list(a.obs_names) or list(m.obs["leiden"]) != list(a.obs["leiden"]):
+    problems.append("global obs differs")
+if not np.allclose(m.obsm["X_umap"], a.obsm["X_umap"]):
+    problems.append("global obsm differs")
+print("RESULT " + json.dumps(problems))
+"""
+
+
+def test_a_mudata_imports_as_mudata_reads_it(tmp_path):
+    source = tmp_path / "mu.h5mu"
+    written = _run(_MUDATA, _WRITE_MUDATA, str(source))
+    assert "rna:n_genes" in written["obs"], "mudata pulled the modalities' columns"
+    _convert(str(source), "-o", str(tmp_path / "out.h5ad"))
+    assert _run(_MUDATA, _COMPARE_MUDATA_IMPORT, str(source), str(tmp_path / "out.MOD.h5ad")) == []
+
+
+def test_mudata_reads_what_we_export(tmp_path):
+    import anndata as ad
+    import pandas as pd
+    import scipy.sparse as sp
+
+    rng = np.random.default_rng(0)
+    types = ["Gene Expression"] * 6 + ["Peaks"] * 4
+    obj = ad.AnnData(
+        sp.random(25, 10, density=0.3, format="csr", random_state=0, dtype=np.float32),
+        obs=pd.DataFrame({"leiden": pd.Categorical(rng.choice(["x", "y"], 25))},
+                         index=[f"c{i}" for i in range(25)]),
+        var=pd.DataFrame({"feature_types": pd.Categorical(types)}, index=[f"f{j}" for j in range(10)]),
+    )
+    obj.obsm["X_umap"] = rng.normal(size=(25, 2))
+    obj.write_h5ad(tmp_path / "multi.h5ad")
+    _convert(str(tmp_path / "multi.h5ad"), "-o", str(tmp_path / "multi.h5mu"))
+    assert _run(_MUDATA, _COMPARE_MUDATA_EXPORT, str(tmp_path / "multi.h5ad"), str(tmp_path / "multi.h5mu")) == []

@@ -72,7 +72,8 @@ in.h5ad -o out.zarr` converts a whole store, and `subset`, `split` and
 velocyto's included, matching what scanpy's `read_10x_h5` and `read_10x_mtx`
 read (features named by gene id unless `--var-names gene_symbols`),
 CellBender's `remove-background` output with its latent variables, Parse
-Biosciences split-pipe runs, and looms (velocyto's included), both ways.
+Biosciences split-pipe runs, looms (velocyto's and SCope's included), and
+MuData `.h5mu` files, one AnnData per modality, both ways.
 
 | Element | Read | Write |
 |---|---|---|
