@@ -47,7 +47,8 @@ dataframes, which every copy broke, now come out readable.
 
 ### Fixed
 
-- **Copies of anndata 0.7's dataframes are readable.** Their categoricals
+- **Copies of anndata 0.7's dataframes are readable**
+  ([#72](https://github.com/cellgeni/adata-cli/pull/72)). Their categoricals
   point into `__categories` by an HDF5 object reference, which cannot
   leave the file: `subset` wrote an h5ad that anndata could not read, and
   `subset` or `convert` to Zarr stopped with "Object of type Reference is
