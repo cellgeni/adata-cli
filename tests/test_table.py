@@ -162,3 +162,26 @@ def test_natural_order_matches_natsort():
         "", "A", "A01b", "A1b", "GRCh38", "GRCh37", "mm10", "s10_r2", "s2_r10",
     ]
     assert natural_sorted(values) == natsort.natsorted(sorted(values))
+
+
+def test_a_file_with_no_header_line_reads_with_the_names_given(tmp_path):
+    """Space Ranger 1 writes `tissue_positions_list.csv` with no header."""
+    body = "AAAC-1,1,0,0,1251,1210\nAAAG-1,0,1,1,1260.5,-30\nAAAT-1,1,2,0,1270,1300\n"
+    names = ["barcode", "in_tissue", "array_row", "array_col", "pxl_row_in_fullres", "pxl_col_in_fullres"]
+    path = _write(tmp_path, body)
+
+    got = _read_back(tmp_path, scan_table(path, names=names, block_bytes=16))
+
+    expected = pd.read_csv(path, header=None, names=names).set_index("barcode")
+    expected.index.name = None
+    _same(got, expected)
+    assert table.read_small_table(path, names=names)[1][0][0] == "AAAC-1"
+
+
+def test_on_index_sees_every_index_value_once_and_in_order(tmp_path):
+    path = _write(tmp_path, CSV)
+    seen = []
+
+    scan_table(path, on_index=seen.extend, block_bytes=24)
+
+    assert seen == ["c1", "c2", "c3", "c4"]

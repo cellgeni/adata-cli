@@ -1327,3 +1327,117 @@ def write_h5mu(
         with open(path, "r+b") as raw:
             raw.write(header.ljust(512, b"\0"))
     return MudataTruth(path, mods, obs, obsm, obsp, uns)
+
+
+# ---------------------------------------------------------------------------
+# Space Ranger output for standard Visium
+#
+# As Space Ranger writes it (checked against 10x's SR 1.1 and SR 2.1 sample
+# outputs): the matrix, and in spatial/ every spot's position -- in no
+# particular order, and including spots the filtered matrix leaves out --
+# the scale factors and two PNGs. SR 1 wrote the positions with no header.
+
+
+@dataclass
+class VisiumTruth:
+    outs: Path
+    barcodes: List[str]  # the filtered matrix's, in its order
+    in_tissue: np.ndarray
+    array_row: np.ndarray
+    array_col: np.ndarray
+    spatial: np.ndarray  # [pxl_col, pxl_row], per barcode
+    images: Dict[str, np.ndarray]
+    scalefactors: dict
+    counts: np.ndarray
+
+
+def write_visium_outs(
+    folder: Path,
+    *,
+    version: str = "sr2",
+    n_spots: int = 12,
+    n_extra: int = 5,
+    raw: bool = True,
+    images: bool = True,
+    seed: int = 0,
+) -> VisiumTruth:
+    """An `outs/` folder. `version` is sr1 (no header), sr2, or sr3_float
+    (pixel positions with decimals, as Space Ranger 3 and 4 may write)."""
+    from PIL import Image
+
+    rng = np.random.default_rng(seed)
+    outs = folder / "outs"
+    spatial = outs / "spatial"
+    spatial.mkdir(parents=True)
+    n_features = 6
+    barcodes = [f"AAAC{i:04d}-1" for i in range(n_spots)]
+    extra = [f"TTTG{i:04d}-1" for i in range(n_extra)]
+    counts = rng.integers(0, 5, size=(n_spots, n_features))
+    ids = [f"ENSG{i:05d}" for i in range(n_features)]
+    names = [f"G{i}" for i in range(n_features)]
+    types = ["Gene Expression"] * (n_features - 1) + ["Antibody Capture"]
+
+    def matrix(path: Path, rows: List[str], values: np.ndarray) -> None:
+        write_10x_h5(path, values, barcodes=rows, ids=ids, names=names, types=types)
+        with h5py.File(path, "a") as f:
+            f.attrs["library_ids"] = np.array([b"V1_Test_Section"])
+            f.attrs["chemistry_description"] = "Spatial 3' v1"
+            f.attrs["software_version"] = "spaceranger-2.1.0"
+
+    matrix(outs / "filtered_feature_bc_matrix.h5", barcodes, counts)
+    if raw:
+        matrix(
+            outs / "raw_feature_bc_matrix.h5", barcodes + extra,
+            np.vstack([counts, np.zeros((n_extra, n_features), dtype=counts.dtype)]),
+        )
+
+    every = barcodes + extra
+    n = len(every)
+    in_tissue = np.array([1] * n_spots + [0] * n_extra)
+    array_row = rng.integers(0, 78, n)
+    array_col = rng.integers(0, 128, n)
+    pxl_row = rng.integers(-50, 2000, n).astype(float)
+    pxl_col = rng.integers(0, 2000, n).astype(float)
+    if version == "sr3_float":
+        pxl_row += 0.25
+        pxl_col += 0.5
+    order = rng.permutation(n)
+    lines = []
+    if version != "sr1":
+        lines.append(",".join(
+            ("barcode", "in_tissue", "array_row", "array_col", "pxl_row_in_fullres", "pxl_col_in_fullres")
+        ))
+    fmt = (lambda v: f"{v:g}") if version == "sr3_float" else (lambda v: str(int(v)))
+    for i in order:
+        lines.append(
+            f"{every[i]},{in_tissue[i]},{array_row[i]},{array_col[i]},{fmt(pxl_row[i])},{fmt(pxl_col[i])}"
+        )
+    name = "tissue_positions_list.csv" if version == "sr1" else "tissue_positions.csv"
+    (spatial / name).write_text("\n".join(lines) + "\n")
+
+    scalefactors = {
+        "spot_diameter_fullres": 89.4,
+        "tissue_hires_scalef": 0.17,
+        "fiducial_diameter_fullres": 144.5,
+        "tissue_lowres_scalef": 0.05,
+    }
+    (spatial / "scalefactors_json.json").write_text(json.dumps(scalefactors))
+    pictures: Dict[str, np.ndarray] = {}
+    if images:
+        for key, size in (("hires", (20, 16)), ("lowres", (6, 5))):
+            pixels = rng.integers(0, 256, size=size + (3,), dtype=np.uint8)
+            Image.fromarray(pixels).save(spatial / f"tissue_{key}_image.png")
+            pictures[key] = pixels
+
+    take = slice(0, n_spots)
+    return VisiumTruth(
+        outs=outs,
+        barcodes=barcodes,
+        in_tissue=in_tissue[take],
+        array_row=array_row[take],
+        array_col=array_col[take],
+        spatial=np.stack([pxl_col, pxl_row], axis=1)[take],
+        images=pictures,
+        scalefactors=scalefactors,
+        counts=counts,
+    )

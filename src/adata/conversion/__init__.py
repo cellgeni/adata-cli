@@ -17,7 +17,9 @@ from typing import Dict, FrozenSet, List, Optional
 
 import h5py
 
-from adata.conversion import cellbender, cistopic, hdf5, loom, mtx, mudata, parse, tenx, text
+from adata.conversion import (
+    cellbender, cistopic, hdf5, loom, mtx, mudata, parse, tenx, text, visium,
+)
 from adata.formats import pickled
 from adata.conversion.anndata_copy import AnnDataCopy
 from adata.conversion.base import ConversionPlan, Converter, Format, Options
@@ -102,6 +104,16 @@ FORMATS: Dict[str, Format] = {
         sniff=tenx.sniff,
         importer=tenx.TenxImport(),
         exporter=tenx.TenxExport(),
+    ),
+    # Folders, and before 10x-mtx: a Space Ranger outs/ holds its matrix as
+    # MEX folders too, which 10x-mtx would take for a Cell Ranger 2 genome
+    # layout. A bare .h5 is no folder, so it stays 10x-h5.
+    "visium": Format(
+        name="visium",
+        description="Space Ranger output for standard Visium: matrix, spot positions, images",
+        extensions=(),
+        sniff=visium.sniff,
+        importer=visium.VisiumImport(),
     ),
     "loom": Format(
         name="loom",

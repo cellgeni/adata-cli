@@ -528,6 +528,8 @@ _CONVERT_FLAGS = {
     "sample": "--sample",
     "all_samples": "--all-samples",
     "unfiltered": "--unfiltered",
+    "library_id": "--library-id",
+    "no_images": "--no-images",
     "dense": "--dense",
     "obs_names_attr": "--obs-names-attr",
     "var_names_attr": "--var-names-attr",
@@ -695,7 +697,20 @@ def convert(
     unfiltered: bool = typer.Option(
         False,
         "--unfiltered",
-        help="Parse input: read DGE_unfiltered (every barcode) not DGE_filtered",
+        help="Parse or Visium input: read every barcode (DGE_unfiltered, "
+        "raw_feature_bc_matrix.h5), not only cells",
+    ),
+    library_id: Optional[str] = typer.Option(
+        None,
+        "--library-id",
+        help="Visium input: the key under uns['spatial'] (default: the "
+        "matrix's library id, as scanpy and squidpy use)",
+    ),
+    no_images: bool = typer.Option(
+        False,
+        "--no-images",
+        help="Visium input: leave the tissue images out of uns['spatial'] "
+        "(the scale factors stay)",
     ),
     dense: bool = typer.Option(
         False,
@@ -924,6 +939,8 @@ def convert(
                 sample=sample,
                 all_samples=all_samples,
                 unfiltered=unfiltered,
+                library_id=library_id,
+                no_images=no_images,
                 dense=dense,
                 obs_names_attr=obs_names_attr,
                 var_names_attr=var_names_attr,

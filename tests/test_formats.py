@@ -476,9 +476,9 @@ def test_json_export_to_stdout(store, capsys):
 
 
 def test_json_import_rejects_an_unrepresentable_value(store, temp_dir):
-    from adata.formats.json_data import _write_json_to_group
+    from adata.formats.json_data import write_json_value
 
     path, opener = store
     with opener("a") as root:
         with pytest.raises(ValueError, match="Cannot convert"):
-            _write_json_to_group(root["uns"], "bad", {1, 2})
+            write_json_value(root["uns"], "bad", {1, 2})

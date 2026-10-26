@@ -83,6 +83,8 @@ class TableScan:
     columns: List[Column]
     #: Rows (0-based, after the header) where `select` matched, if asked.
     selected: Optional[np.ndarray] = None
+    #: False for a file with no header line, its names given by the caller.
+    has_header: bool = True
 
     def dtype_of(self, column: Column) -> str:
         """What the column is written as: int64, float64, bool, category or str."""
@@ -158,40 +160,50 @@ def scan_table(
     index: Optional[str] = None,
     delimiter: str = ",",
     select: Optional[Tuple[str, str]] = None,
+    names: Optional[Sequence[str]] = None,
+    on_index: Optional[Callable[[List[str]], None]] = None,
     block_bytes: int = TABLE_BLOCK_BYTES,
 ) -> TableScan:
     """Pass 1: the header, the row count and each column's type.
 
     `index` names the column that becomes the row names (the first, if not
     given). `select=(column, value)` also records the rows where that column
-    holds that value.
+    holds that value. `names` are the columns of a file with no header line,
+    such as Space Ranger 1's `tissue_positions_list.csv`. `on_index` is
+    given each block's index values, in file order, so a caller can match
+    them against something else in the same pass.
     """
     path = Path(path)
     header: Optional[List[str]] = None
+    if names is not None:
+        header = list(names)
     columns: List[Column] = []
     positions: List[int] = []
     pick = -1
     selected: List[np.ndarray] = []
     n_rows = 0
+    at = -1
     for start, rows in _rows(path, delimiter, block_bytes):
-        if header is None:
-            rows = [row for row in rows if row]
-            if not rows:
-                continue
-            header, rows = rows[0], rows[1:]
+        if not columns:
+            if header is None:
+                rows = [row for row in rows if row]
+                if not rows:
+                    continue
+                header, rows = rows[0], rows[1:]
+                start += 1
             if len(set(header)) != len(header):
                 repeated = sorted({h for h in header if header.count(h) > 1})
                 raise ValueError(f"{path.name} repeats the column {', '.join(map(repr, repeated))}.")
             index = header[0] if index is None else index
             if index not in header:
                 raise ValueError(f"{path.name} has no {index!r} column; it has: {', '.join(header)}.")
+            at = header.index(index)
             positions = [i for i, name in enumerate(header) if name != index]
             columns = [Column(header[i]) for i in positions]
             if select is not None:
                 if select[0] not in header:
                     raise ValueError(f"{path.name} has no {select[0]!r} column.")
                 pick = header.index(select[0])
-            start += 1
         _check_widths(path, rows, len(header), start)
         rows = [row for row in rows if row]
         if not rows:
@@ -199,12 +211,18 @@ def scan_table(
         by_field = list(zip(*rows))
         for column, i in zip(columns, positions):
             _narrow(column, list(by_field[i]))
+        if on_index is not None:
+            on_index(list(by_field[at]))
         if pick >= 0:
             hits = np.flatnonzero(np.asarray(by_field[pick], dtype=object) == select[1])
             selected.append(hits + n_rows)
         n_rows += len(rows)
     if header is None:
         raise ValueError(f"{path.name} is empty: it has no header line.")
+    if not columns:
+        # A file of no rows: its header (or the names given) still stands.
+        index = header[0] if index is None else index
+        columns = [Column(name) for name in header if name != index]
     return TableScan(
         path=path,
         delimiter=delimiter,
@@ -212,6 +230,7 @@ def scan_table(
         index=index,
         n_rows=n_rows,
         columns=columns,
+        has_header=names is None,
         selected=(
             np.concatenate(selected) if selected else np.zeros(0, dtype=np.int64)
         ) if select is not None else None,
@@ -239,7 +258,7 @@ def iter_table_blocks(
     """
     at = scan.header.index(scan.index)
     done = 0
-    first = True
+    first = scan.has_header
     for _, block in _rows(scan.path, scan.delimiter, block_bytes):
         block = [row for row in block if row]
         if first and block:
@@ -261,7 +280,9 @@ def iter_table_blocks(
         }
 
 
-def _values(scan: TableScan, column: Column, values: List[str], lookup: Dict[str, int]) -> np.ndarray:
+def column_values(scan: TableScan, column: Column, values: List[str], lookup: Dict[str, int]) -> np.ndarray:
+    """A block of one column's text, as the values `create_columns` stores:
+    numbers, booleans, category codes (-1 for a gap) or strings."""
     kind = scan.dtype_of(column)
     if kind == "int64":
         return np.array(values, dtype=np.int64)
@@ -296,9 +317,43 @@ def write_table(
 
     index = create_dataset(group, "_index", shape=(n,), dtype=string_dtype_for(backend))
     spec.set_encoding(index, spec.STRING_ARRAY)
+    targets, lookups = create_columns(group, scan, n)
+
+    used = {name: np.zeros(len(lookup), dtype=bool) for name, lookup in lookups.items()}
+    written = 0
+    for names, block in iter_table_blocks(scan, rows=rows, block_bytes=block_bytes):
+        end = written + len(names)
+        index[written:end] = np.asarray(names, dtype=object)
+        for column in scan.columns:
+            values = column_values(scan, column, block[column.name], lookups.get(column.name, {}))
+            targets[column.name][written:end] = values
+            if column.name in used:
+                used[column.name][values[values >= 0]] = True
+        written = end
+    if written != n:
+        raise ValueError(f"{scan.path.name} changed while it was read: {written:,} rows, not {n:,}.")
+    if rows is not None:
+        for name, seen in used.items():
+            if not seen.all():
+                drop_unused(group, name, seen, n, block_rows=max(1, block_bytes // 8))
+    return group
+
+
+def create_columns(
+    group: Any, scan: TableScan, n: int, *, exclude: Sequence[str] = ()
+) -> Tuple[Dict[str, Any], Dict[str, Dict[str, int]]]:
+    """Each column of `scan` but those in `exclude`, created at length `n`
+    in `group` as anndata would store it, to be filled a block at a time.
+
+    Returns the arrays by name, and each categorical's category lookup for
+    `column_values`.
+    """
+    backend = "zarr" if is_zarr_group(group) else "hdf5"
     targets: Dict[str, Any] = {}
     lookups: Dict[str, Dict[str, int]] = {}
     for column in scan.columns:
+        if column.name in exclude:
+            continue
         kind = scan.dtype_of(column)
         if kind == "category":
             categories = column.categories or []
@@ -310,28 +365,10 @@ def write_table(
         spec.set_encoding(
             targets[column.name], spec.STRING_ARRAY if kind == "str" else spec.ARRAY
         )
-
-    used = {name: np.zeros(len(lookup), dtype=bool) for name, lookup in lookups.items()}
-    written = 0
-    for names, block in iter_table_blocks(scan, rows=rows, block_bytes=block_bytes):
-        end = written + len(names)
-        index[written:end] = np.asarray(names, dtype=object)
-        for column in scan.columns:
-            values = _values(scan, column, block[column.name], lookups.get(column.name, {}))
-            targets[column.name][written:end] = values
-            if column.name in used:
-                used[column.name][values[values >= 0]] = True
-        written = end
-    if written != n:
-        raise ValueError(f"{scan.path.name} changed while it was read: {written:,} rows, not {n:,}.")
-    if rows is not None:
-        for name, seen in used.items():
-            if not seen.all():
-                _drop_unused(group, name, seen, n, block_rows=max(1, block_bytes // 8))
-    return group
+    return targets, lookups
 
 
-def _drop_unused(group: Any, name: str, used: np.ndarray, n: int, block_rows: int) -> None:
+def drop_unused(group: Any, name: str, used: np.ndarray, n: int, block_rows: int) -> None:
     """Remove categories no written row uses, as anndata does on subsetting."""
     remap = np.full(used.size + 1, -1, dtype=np.int64)  # the last slot maps -1
     remap[:-1][used] = np.arange(int(used.sum()))
@@ -345,10 +382,12 @@ def _drop_unused(group: Any, name: str, used: np.ndarray, n: int, block_rows: in
         codes[lo : lo + block.size] = remap[block]
 
 
-def read_small_table(path: Path, delimiter: str = ",") -> Tuple[List[str], List[List[str]]]:
+def read_small_table(
+    path: Path, delimiter: str = ",", *, names: Optional[Sequence[str]] = None
+) -> Tuple[List[str], List[List[str]]]:
     """The header and every row of a table small enough to hold, such as a
-    gene list."""
-    header: Optional[List[str]] = None
+    gene list. `names` are the columns of a file with no header line."""
+    header: Optional[List[str]] = None if names is None else list(names)
     body: List[List[str]] = []
     for start, rows in _rows(Path(path), delimiter, TABLE_BLOCK_BYTES):
         if header is None:

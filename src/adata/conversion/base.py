@@ -39,10 +39,14 @@ class Options:
     raw: Optional[Path] = None
     min_cell_probability: Optional[float] = None
 
-    # Reading Parse split-pipe output.
+    # Reading Parse split-pipe output (and, --unfiltered, Space Ranger's).
     sample: Optional[str] = None
     all_samples: bool = False
     unfiltered: bool = False
+
+    # Reading Space Ranger output.
+    library_id: Optional[str] = None
+    no_images: bool = False
 
     # Reading a loom.
     dense: bool = False

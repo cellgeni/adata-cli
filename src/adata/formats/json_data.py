@@ -136,17 +136,17 @@ def import_json(
     if name in parent:
         del parent[name]
 
-    _write_json_to_group(parent, name, payload)
+    write_json_value(parent, name, payload)
 
     console.print(f"[green]Imported[/] JSON data into '{obj}'")
 
 
-def _write_json_to_group(parent: Any, name: str, value: Any) -> None:
+def write_json_value(parent: Any, name: str, value: Any) -> None:
     """Write one JSON value as the AnnData element that best represents it."""
     if isinstance(value, dict):
         group = write_mapping(parent, name, replace=True)
         for k, v in value.items():
-            _write_json_to_group(group, k, v)
+            write_json_value(group, k, v)
         return
 
     if value is None:
@@ -194,3 +194,4 @@ def _write_json_list(parent: Any, name: str, value: list) -> None:
         return
 
     write_scalar(parent, name, json.dumps(value), replace=True)
+
