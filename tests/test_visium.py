@@ -333,3 +333,46 @@ def test_hd_without_pyarrow_names_the_extra(tmp_path, monkeypatch):
     message = _refused(hd.outs, "-o", tmp_path / "out.h5ad")
     assert "pip install 'pyadata-cli[spatial]'" in message
     assert not list(tmp_path.glob("out*"))
+
+
+def test_bin_size_with_a_matrix_given_is_refused(tmp_path):
+    """It was ignored: the 8 µm matrix named was read, exit 0."""
+    hd = write_visium_hd_outs(tmp_path / "run")
+    message = _refused(
+        hd.bins[8].outs / "filtered_feature_bc_matrix.h5", "-o", tmp_path / "out.h5ad",
+        "--from", "visium", "--bin-size", "16",
+    )
+    assert "--bin-size picks among the matrices" in message
+
+
+def test_bin_size_zero_is_a_size_the_output_lacks_not_the_default(tmp_path):
+    """0 read as 'not given', and the 8 µm bins were written."""
+    hd = write_visium_hd_outs(tmp_path / "run")
+    assert "has no 0 µm bins" in _refused(hd.outs, "-o", tmp_path / "out.h5ad", "--bin-size", "0")
+
+
+def test_missing_values_in_hd_positions_are_refused_before_writing(tmp_path):
+    """A null in an integer column became an arbitrary number in obs."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    hd = write_visium_hd_outs(tmp_path / "run", sizes=(16,))
+    path = hd.bins[16].outs / "spatial" / "tissue_positions.parquet"
+    table = pq.read_table(path)
+    rows = table.column("array_row").to_pylist()
+    rows[0] = None
+    table = table.set_column(table.schema.get_field_index("array_row"), "array_row", pa.array(rows, pa.uint32()))
+    pq.write_table(table, path)
+
+    message = _refused(hd.outs, "-o", tmp_path / "out.h5ad", "--bin-size", "16")
+
+    assert "tissue_positions.parquet has missing values in array_row (1)" in message
+    assert not list(tmp_path.glob("out*"))
+
+
+def test_a_bin_folder_without_scale_factors_names_what_it_lacks(tmp_path):
+    hd = write_visium_hd_outs(tmp_path / "run", sizes=(16,))
+    (hd.bins[16].outs / "spatial" / "scalefactors_json.json").unlink()
+    message = _refused(hd.outs, "-o", tmp_path / "out.h5ad", "--bin-size", "16")
+    assert "has no spatial/scalefactors_json.json beside the matrix" in message
+    assert "tissue_positions.csv" not in message

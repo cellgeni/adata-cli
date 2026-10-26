@@ -76,13 +76,14 @@ def _is_hd(folder: Path) -> bool:
     return (folder / "binned_outputs").is_dir()
 
 
-def _bin_sizes(outs: Path) -> List[int]:
-    sizes = []
+def _bin_sizes(outs: Path) -> Dict[int, Path]:
+    """Each bin size an HD output holds, in µm, and its folder."""
+    sizes = {}
     for folder in (outs / "binned_outputs").glob("square_*um"):
         digits = folder.name[len("square_"):-len("um")]
         if digits.isdigit() and folder.is_dir():
-            sizes.append(int(digits))
-    return sorted(sizes)
+            sizes[int(digits)] = folder
+    return dict(sorted(sizes.items()))
 
 
 def _matrix_files(folder: Path, name: str) -> List[Path]:
@@ -138,11 +139,12 @@ class _Plan:
 def _bundle(source: Path, options: Options) -> tuple:
     """(the outs folder, the matrix file) for this input."""
     if source.is_file():
-        if "--unfiltered" in options.given:
-            raise ValueError(
-                "--unfiltered picks between the matrices of a Space Ranger outs "
-                f"folder; {source.name} is a matrix already. Give the folder."
-            )
+        for flag in ("--unfiltered", "--bin-size"):
+            if flag in options.given:
+                raise ValueError(
+                    f"{flag} picks among the matrices of a Space Ranger output "
+                    f"folder; {source.name} is a matrix already. Give the folder."
+                )
         return source.parent, source
     outs = _locate(source)
     if outs is None:
@@ -153,13 +155,13 @@ def _bundle(source: Path, options: Options) -> tuple:
         )
     if _is_hd(outs):
         sizes = _bin_sizes(outs)
-        size = options.bin_size or DEFAULT_BIN_UM
+        size = DEFAULT_BIN_UM if options.bin_size is None else options.bin_size
         if size not in sizes:
             raise ValueError(
                 f"This Visium HD output has no {size} µm bins; it has "
                 f"{', '.join(f'{s} µm' for s in sizes) or 'none'}. Pick one with --bin-size."
             )
-        outs = outs / "binned_outputs" / f"square_{size:03d}um"
+        outs = sizes[size]
     elif options.bin_size is not None:
         raise ValueError(
             "--bin-size picks among a Visium HD output's bins; this is "
@@ -228,6 +230,14 @@ def _scan_parquet(path: Path, joiner: BarcodeJoin) -> ParquetTable:
     text = [c for c in POSITION_COLUMNS[1:] if not _numeric_arrow(table.types[c])]
     if text:
         raise ValueError(f"{path.name}: {', '.join(text)} {'is' if len(text) == 1 else 'are'} not numeric.")
+    # Space Ranger marks these not null; an edited file may not be, and a
+    # null cast to int64 would be a made-up number. Missing pixels are NaN.
+    gaps = {c: n for c, n in table.null_counts(POSITION_COLUMNS[:4]).items() if n}
+    if gaps:
+        raise ValueError(
+            f"{path.name} has missing values in "
+            + ", ".join(f"{c} ({n:,})" for c, n in gaps.items()) + "."
+        )
     for _, block in table.blocks(["barcode"]):
         joiner(block["barcode"])
     return table
@@ -255,11 +265,14 @@ class VisiumImport(Converter):
         spatial = outs / "spatial"
         position_file = next((spatial / n for n in _POSITION_FILES if (spatial / n).is_file()), None)
         scalefactor_file = spatial / "scalefactors_json.json"
-        if position_file is None or not scalefactor_file.is_file():
-            raise ValueError(
-                f"{outs} has no spatial/tissue_positions.csv and "
-                "spatial/scalefactors_json.json beside the matrix."
-            )
+        lacking = [
+            what for what, present in (
+                ("tissue positions (spatial/tissue_positions.csv or .parquet)", position_file is not None),
+                ("spatial/scalefactors_json.json", scalefactor_file.is_file()),
+            ) if not present
+        ]
+        if lacking:
+            raise ValueError(f"{outs} has no {' and no '.join(lacking)} beside the matrix.")
 
         with h5py.File(matrix_path, "r") as handle:
             if not tenx.sniff(matrix_path):

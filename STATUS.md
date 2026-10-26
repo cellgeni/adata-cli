@@ -20,7 +20,7 @@ The conversion epic's sub-issues (#21–#30) are all done and ticked in #20.
 
 ## In progress
 
-### Visium HD (`feat/visium-hd`, for 0.18.0)
+### Visium HD (`feat/visium-hd`, for 0.17.1)
 
 Decisions:
 - One bin size per output, `--bin-size` (8 µm by default, as 10x
@@ -37,7 +37,7 @@ Steps:
   guard, a scanpy and pandas comparison
 - [x] Real data: 10x's SR 4.0.1 tiny HD sample at 2, 8 and 16 µm
 - [x] Docs
-- [ ] PR, review, merge; release 0.18.0
+- [ ] PR, review, merge; release 0.17.1
 
 ## Follow-ups noticed
 

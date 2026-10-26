@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, Sequence, Tuple
+from typing import Dict, FrozenSet, Iterator, Sequence, Tuple
 
 import numpy as np
 
@@ -42,6 +42,32 @@ class ParquetTable:
     n_rows: int
     #: Each column's Arrow type, by name, in the file's order.
     types: Dict[str, str]
+    #: Columns the schema says may hold nulls.
+    nullable: FrozenSet[str] = frozenset()
+
+    def null_counts(self, columns: Sequence[str]) -> Dict[str, int]:
+        """Nulls in each column: none for one the schema says cannot hold
+        them, else from the footer's statistics, else counted by a pass."""
+        import pyarrow.parquet as pq
+
+        counts = {c: 0 for c in columns}
+        unknown = []
+        metadata = pq.ParquetFile(self.path).metadata
+        names = [metadata.schema.column(i).name for i in range(metadata.num_columns)]
+        for name in columns:
+            if name not in self.nullable:
+                continue
+            at = names.index(name)
+            stats = [metadata.row_group(g).column(at).statistics for g in range(metadata.num_row_groups)]
+            if all(s is not None and s.has_null_count for s in stats):
+                counts[name] = sum(s.null_count for s in stats)
+            else:
+                unknown.append(name)
+        if unknown:
+            for _, block in self.blocks(unknown):
+                for name in unknown:
+                    counts[name] += int(np.count_nonzero(_is_null(block[name])))
+        return counts
 
     def blocks(
         self, columns: Sequence[str], batch_rows: int = BATCH_ROWS
@@ -72,4 +98,14 @@ def open_table(path: Path) -> ParquetTable:
         path=Path(path),
         n_rows=handle.metadata.num_rows,
         types={field.name: str(field.type) for field in schema},
+        nullable=frozenset(field.name for field in schema if field.nullable),
     )
+
+
+def _is_null(values: np.ndarray) -> np.ndarray:
+    """What `to_numpy` makes of an Arrow null: NaN in floats, None in objects."""
+    if values.dtype.kind == "f":
+        return np.isnan(values)
+    if values.dtype.kind == "O":
+        return np.array([v is None for v in values], dtype=bool)
+    return np.zeros(values.shape, dtype=bool)

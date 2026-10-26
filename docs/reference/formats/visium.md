@@ -12,7 +12,8 @@ A Space Ranger output folder, for standard Visium (55 µm spots, Space Ranger
 and 4): the counts, where each spot or bin sits on the slide, the tissue
 images and the scale factors between them. The result is laid out as
 `squidpy.read.visium` lays it out, so scanpy's and squidpy's spatial plots
-work on it, and CI checks it against squidpy.
+work on it. CI checks standard Visium against squidpy, and Visium HD, which
+squidpy does not read, against scanpy with pandas reading the positions.
 
 Give the `outs/` folder, or the run folder holding it. It is recognised by
 `spatial/` (the positions and `scalefactors_json.json`) beside a
@@ -101,8 +102,8 @@ the filtered matrix holds the bins under tissue. They are read twice, a
 buffered stream of only the columns needed: the barcodes, matched to the
 matrix's as they come, then the numbers, written in the matrix's order. On
 10x's Visium HD tiny sample, the 2 µm bins (330,035 in the matrix) convert in
-3.5 seconds with a 470 MB peak, 610 MB with the 100 MB hires image, where
-pandas alone takes 1.1 GB to read the positions. `--no-images` leaves the
+3.5 seconds with a peak of 470 MB with `--no-images`, and 610 MB with the
+100 MB hires image; pandas alone takes about 1 GB to read the positions. `--no-images` leaves the
 images out.
 
 The cell segmentation Space Ranger 4 adds (`segmented_outputs/`) is not read
