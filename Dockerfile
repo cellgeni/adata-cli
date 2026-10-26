@@ -61,9 +61,10 @@ COPY . .
 # them; that reclaims about 9 MB, the cache being mostly hardlinks into the
 # venv rather than separate copies.
 #
-# The `pickle` extra (pandas, scipy) is in: a pipeline cannot add it to the
-# image later, and without it pycisTopic pickles do not convert.
-RUN uv sync --locked --extra pickle \
+# The `pickle` (pandas, scipy) and `spatial` (pyarrow) extras are in: a
+# pipeline cannot add them to the image later, and without them pycisTopic
+# pickles and Visium HD do not convert.
+RUN uv sync --locked --extra pickle --extra spatial \
     && rm -rf /tmp/.cache /tmp/uv-*.lock \
     && mkdir -p /tmp/.cache \
     && chmod 1777 /tmp/.cache

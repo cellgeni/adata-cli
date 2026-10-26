@@ -41,7 +41,7 @@ from rich.console import Console
 from adata.conversion import tenx
 from adata.conversion.base import ConversionPlan, Converter, Options
 from adata.conversion.features import STRING_STEP, Target, describe_import, write_obs_index, write_var
-from adata.conversion.spatial import BarcodeJoin, Join, Sink, numbers, require_numeric, write_rows
+from adata.conversion.spatial import BarcodeJoin, Join, Sink, table_blocks, numbers, require_numeric, write_rows
 from adata.core.subset import fan_out_sparse_matrix
 from adata.elements import spec
 from adata.elements.read import decode_str_array
@@ -301,7 +301,7 @@ def _write_cells(root: Any, obs: Any, table: _Table) -> List[str]:
         for name, dest in columns.items()
     ]
     sinks.append(Sink(spatial, lambda block: numbers(scan, _CENTROIDS, block)))
-    write_rows(scan, join, sinks, root)
+    write_rows(table_blocks(scan), join, sinks, root)
 
     if join.n_extra:
         # Categories only the left-out cells used go, as anndata's
@@ -329,7 +329,7 @@ def _write_clusters(root: Any, obs: Any, table: _Table) -> None:
     lookup = {c: i for i, c in enumerate(categories)}
     codes = create_categorical(obs, "graphclust", categories, join.n_out)
     write_rows(
-        scan, join,
+        table_blocks(scan), join,
         [Sink(codes, lambda block: np.array([lookup.get(v, -1) for v in block["Cluster"]], dtype=np.int64), -1)],
         root,
     )
@@ -346,7 +346,7 @@ def _write_projection(root: Any, key: str, table: _Table) -> None:
     out = create_dataset(root["obsm"], key, shape=(join.n_out, len(names)), dtype=np.float64)
     spec.set_encoding(out, spec.ARRAY)
     write_rows(
-        scan, join,
+        table_blocks(scan), join,
         [Sink(out, lambda block: numbers(scan, names, block), np.nan)],
         root,
     )

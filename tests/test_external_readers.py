@@ -25,6 +25,7 @@ from typer.testing import CliRunner
 
 from adata.cli import app
 from tests.conftest import (
+    write_visium_hd_outs,
     write_visium_outs,
     write_xenium_bundle,
     write_10x_h5,
@@ -1145,4 +1146,43 @@ def test_xenium_imports_as_10x_s_scanpy_recipe_reads_it(tmp_path, ids, shuffled)
     out = tmp_path / "xenium.h5ad"
     _convert(str(truth.bundle), "-o", str(out), "--var-names", "gene_symbols")
     assert _run(["scanpy"], _COMPARE_XENIUM, str(truth.bundle), str(out)) == []
+
+
+# Visium HD's bins as scanpy users read them, squidpy having no HD reader:
+# the bin folder's matrix, the Parquet positions reindexed to it, and the
+# pixel columns as obsm["spatial"], [col, row] as for standard Visium.
+_COMPARE_VISIUM_HD = r"""
+import json, sys, warnings
+from pathlib import Path
+warnings.filterwarnings("ignore")
+import numpy as np, pandas as pd, anndata as ad, scanpy as sc
+
+folder, h5ad = Path(sys.argv[1]), sys.argv[2]
+ref = sc.read_10x_h5(folder / "filtered_feature_bc_matrix.h5")
+positions = pd.read_parquet(folder / "spatial" / "tissue_positions.parquet").set_index("barcode")
+positions = positions.reindex(ref.obs_names)
+got = ad.read_h5ad(h5ad)
+problems = []
+if list(ref.obs_names) != list(got.obs_names):
+    problems.append("obs_names differ")
+if not np.array_equal(ref.X.toarray(), got.X.toarray()):
+    problems.append("X differs")
+for column in ("in_tissue", "array_row", "array_col"):
+    if not np.array_equal(positions[column].to_numpy().astype(np.int64), got.obs[column].to_numpy()):
+        problems.append(f"obs[{column!r}] differs")
+expected = positions[["pxl_col_in_fullres", "pxl_row_in_fullres"]].to_numpy()
+if not np.array_equal(expected, got.obsm["spatial"]):
+    problems.append("obsm['spatial'] differs")
+scalefactors = json.loads((folder / "spatial" / "scalefactors_json.json").read_text())
+if got.uns["spatial"]["tiny_mouse_brain"]["scalefactors"] != scalefactors:
+    problems.append("scalefactors differ")
+print("RESULT " + json.dumps(problems))
+"""
+
+
+def test_visium_hd_imports_as_scanpy_and_pandas_read_it(tmp_path):
+    hd = write_visium_hd_outs(tmp_path / "run")
+    out = tmp_path / "hd.h5ad"
+    _convert(str(hd.outs), "-o", str(out), "--var-names", "gene_symbols")
+    assert _run(["scanpy", "pyarrow"], _COMPARE_VISIUM_HD, str(hd.bins[8].outs), str(out)) == []
 

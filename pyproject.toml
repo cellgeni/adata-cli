@@ -59,9 +59,15 @@ pickle = [
     "pandas>=2.2",
     "scipy>=1.13",
 ]
+# Reading Visium HD: its bin positions are Parquet only. Imported only by
+# the Visium converter, and only for an HD input.
+spatial = [
+    "pyarrow>=17",
+]
 dev = [
     "pandas>=2.2",
     "scipy>=1.13",
+    "pyarrow>=17",
     "pytest>=8.3.4",
     "pytest-cov>=6.0.0",
     # Turns a hang into a failure with a traceback. Without it a stuck test

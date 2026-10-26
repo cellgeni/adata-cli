@@ -19,7 +19,7 @@ import pytest
 from typer.testing import CliRunner
 
 from adata.cli import app
-from tests.conftest import write_visium_outs
+from tests.conftest import write_visium_hd_outs, write_visium_outs
 
 ad = pytest.importorskip("anndata")
 
@@ -196,11 +196,6 @@ def test_a_repeated_position_is_refused(tmp_path):
     assert "more than one row for 1 of the matrix's barcodes" in _refused(truth.outs, "-o", tmp_path / "out.h5ad")
 
 
-def test_visium_hd_is_refused_by_name(tmp_path):
-    outs = tmp_path / "hd" / "outs"
-    (outs / "binned_outputs" / "square_008um").mkdir(parents=True)
-    message = _refused(outs, "-o", tmp_path / "out.h5ad")
-    assert "Visium HD output, which is not read yet" in message
 
 
 def test_aggr_output_is_refused(tmp_path):
@@ -264,3 +259,120 @@ def test_a_library_id_that_cannot_be_a_key_is_refused(tmp_path, name):
     nested as uns['spatial']['a']['b']."""
     truth = write_visium_outs(tmp_path / "run")
     assert "cannot be a key of uns" in _refused(truth.outs, "-o", tmp_path / "out.h5ad", "--library-id", name)
+
+
+# ---------------------------------------------------------------------------
+# Visium HD
+
+
+def _check(adata, truth) -> None:
+    assert list(adata.obs_names) == truth.barcodes
+    for column in ("in_tissue", "array_row", "array_col"):
+        assert adata.obs[column].dtype == np.int64, column
+        np.testing.assert_array_equal(adata.obs[column], getattr(truth, column))
+    assert adata.obsm["spatial"].dtype == np.float64
+    np.testing.assert_array_equal(adata.obsm["spatial"], truth.spatial)
+    np.testing.assert_array_equal(adata.X.toarray(), truth.counts)
+
+
+@pytest.mark.parametrize("suffix", [".h5ad", ".zarr"])
+def test_an_hd_output_reads_its_8_um_bins_by_default(tmp_path, suffix):
+    hd = write_visium_hd_outs(tmp_path / "run")
+    out = tmp_path / f"out{suffix}"
+
+    result = _ok(hd.outs, "-o", out)
+
+    assert "Visium HD, 8 µm bins" in _out(result)
+    adata = _read(out)
+    truth = hd.bins[8]
+    _check(adata, truth)
+    library = adata.uns["spatial"]["tiny_mouse_brain"]
+    assert library["scalefactors"]["bin_size_um"] == 8.0
+    np.testing.assert_array_equal(library["images"]["hires"], truth.images["hires"])
+
+
+def test_bin_size_picks_another_bin_folder_and_a_bin_folder_reads_alone(tmp_path):
+    hd = write_visium_hd_outs(tmp_path / "run")
+    _ok(hd.outs, "-o", tmp_path / "a.h5ad", "--bin-size", "16")
+    _check(_read(tmp_path / "a.h5ad"), hd.bins[16])
+    _ok(hd.bins[16].outs, "-o", tmp_path / "b.h5ad")
+    _check(_read(tmp_path / "b.h5ad"), hd.bins[16])
+
+
+def test_unfiltered_reads_every_bin_on_the_slide(tmp_path):
+    hd = write_visium_hd_outs(tmp_path / "run", sizes=(16,))
+    _ok(hd.outs, "-o", tmp_path / "out.h5ad", "--bin-size", "16", "--unfiltered")
+    assert _read(tmp_path / "out.h5ad").n_obs == 36
+
+
+def test_a_bin_size_the_output_lacks_names_those_it_has(tmp_path):
+    hd = write_visium_hd_outs(tmp_path / "run")
+    message = _refused(hd.outs, "-o", tmp_path / "out.h5ad", "--bin-size", "2")
+    assert "has no 2 µm bins; it has 8 µm, 16 µm. Pick one with --bin-size" in message
+
+
+def test_bin_size_on_standard_visium_is_refused(tmp_path):
+    truth = write_visium_outs(tmp_path / "run")
+    assert "--bin-size picks among a Visium HD output's bins" in _refused(
+        truth.outs, "-o", tmp_path / "out.h5ad", "--bin-size", "8"
+    )
+
+
+def test_hd_without_pyarrow_names_the_extra(tmp_path, monkeypatch):
+    import builtins
+
+    hd = write_visium_hd_outs(tmp_path / "run")
+    real_import = builtins.__import__
+
+    def no_pyarrow(name, *args, **kwargs):
+        if name.startswith("pyarrow"):
+            raise ImportError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_pyarrow)
+    message = _refused(hd.outs, "-o", tmp_path / "out.h5ad")
+    assert "pip install 'pyadata-cli[spatial]'" in message
+    assert not list(tmp_path.glob("out*"))
+
+
+def test_bin_size_with_a_matrix_given_is_refused(tmp_path):
+    """It was ignored: the 8 µm matrix named was read, exit 0."""
+    hd = write_visium_hd_outs(tmp_path / "run")
+    message = _refused(
+        hd.bins[8].outs / "filtered_feature_bc_matrix.h5", "-o", tmp_path / "out.h5ad",
+        "--from", "visium", "--bin-size", "16",
+    )
+    assert "--bin-size picks among the matrices" in message
+
+
+def test_bin_size_zero_is_a_size_the_output_lacks_not_the_default(tmp_path):
+    """0 read as 'not given', and the 8 µm bins were written."""
+    hd = write_visium_hd_outs(tmp_path / "run")
+    assert "has no 0 µm bins" in _refused(hd.outs, "-o", tmp_path / "out.h5ad", "--bin-size", "0")
+
+
+def test_missing_values_in_hd_positions_are_refused_before_writing(tmp_path):
+    """A null in an integer column became an arbitrary number in obs."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    hd = write_visium_hd_outs(tmp_path / "run", sizes=(16,))
+    path = hd.bins[16].outs / "spatial" / "tissue_positions.parquet"
+    table = pq.read_table(path)
+    rows = table.column("array_row").to_pylist()
+    rows[0] = None
+    table = table.set_column(table.schema.get_field_index("array_row"), "array_row", pa.array(rows, pa.uint32()))
+    pq.write_table(table, path)
+
+    message = _refused(hd.outs, "-o", tmp_path / "out.h5ad", "--bin-size", "16")
+
+    assert "tissue_positions.parquet has missing values in array_row (1)" in message
+    assert not list(tmp_path.glob("out*"))
+
+
+def test_a_bin_folder_without_scale_factors_names_what_it_lacks(tmp_path):
+    hd = write_visium_hd_outs(tmp_path / "run", sizes=(16,))
+    (hd.bins[16].outs / "spatial" / "scalefactors_json.json").unlink()
+    message = _refused(hd.outs, "-o", tmp_path / "out.h5ad", "--bin-size", "16")
+    assert "has no spatial/scalefactors_json.json beside the matrix" in message
+    assert "tissue_positions.csv" not in message

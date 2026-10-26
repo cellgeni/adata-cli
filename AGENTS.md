@@ -10,7 +10,9 @@ point of the tool is that memory is set by `--chunk`, not by the size of the
 input, so code that loads a whole matrix or column is a regression unless it is
 behind an explicit `--in-memory`. pandas and scipy are not dependencies either:
 they come only with the `pickle` extra, for pycisTopic pickles
-(`conversion/cistopic.py`), and are imported there alone.
+(`conversion/cistopic.py`), and are imported there alone. pyarrow likewise
+comes only with the `spatial` extra, for Visium HD's Parquet positions, and
+is imported only in `formats/parquet.py`.
 
 Naming:
 - The PyPI distribution is `pyadata-cli`.

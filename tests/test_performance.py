@@ -981,26 +981,32 @@ def test_cellbender_embedding_is_written_in_blocks(tmp_path):
 
 
 def _spatial_bundle(path: Path, kind: str, n: int, shuffled: bool) -> Path:
-    from tests.conftest import write_visium_outs, write_xenium_bundle
+    from tests.conftest import write_visium_hd_outs, write_visium_outs, write_xenium_bundle
 
     if kind == "visium":
         return write_visium_outs(path, n_spots=n, n_extra=n // 4).outs
+    if kind == "visium-hd":
+        # 16 µm bins on a grid of side ~sqrt(n): every bin on the slide in the
+        # positions, about 60% of them in the matrix.
+        return write_visium_hd_outs(path, sizes=(16,), grid=max(2, int(n ** 0.5))).outs
     return write_xenium_bundle(path, n_cells=n, shuffled=shuffled, extra_cells=n // 8 if shuffled else 0).bundle
 
 
 @pytest.mark.parametrize(
-    "kind,shuffled", [("visium", True), ("xenium", False), ("xenium", True)]
+    "kind,shuffled", [("visium", True), ("visium-hd", True), ("xenium", False), ("xenium", True)]
 )
 def test_spatial_import_work_grows_linearly(tmp_path, kind, shuffled):
     """The positions or cell table are matched to the matrix while scanned,
     and written straight through when in its order (Xenium's own) or through
     the scatter buckets when not: linear either way, never a lookup per row."""
     from adata.commands.convert import convert_store
+    from adata.conversion import Options
 
     def measure(n: int) -> int:
         source = _spatial_bundle(tmp_path / f"sp{kind}{shuffled}{n}", kind, n, shuffled)
+        options = Options(bin_size=16) if kind == "visium-hd" else Options()
         with count_io() as io:
-            convert_store(source, tmp_path / f"osp{kind}{shuffled}{n}.h5ad", QUIET)
+            convert_store(source, tmp_path / f"osp{kind}{shuffled}{n}.h5ad", QUIET, options=options)
         return io.work
 
     assert_grows_linearly(measure, what=f"convert {kind} (shuffled={shuffled})", axis="n_cells")

@@ -152,12 +152,11 @@ A coordinate, centroid or projection column holds text. Missing values are
 fine (they become NaN); a word is not. The file has been edited, or is not
 what its name says.
 
-### `This is Visium HD output, which is not read yet: its positions are Parquet.`
+### `This Visium HD output has no 2 µm bins; it has 8 µm, 16 µm. Pick one with --bin-size.`
 
-Visium HD's bin positions exist only as `tissue_positions.parquet`, which a
-later release will read. Meanwhile, convert one bin size's matrix as a plain
-10x matrix, without positions:
-`adata convert binned_outputs/square_008um/filtered_feature_bc_matrix.h5 -o bins.h5ad`.
+`--bin-size` names a folder under `binned_outputs/` (`square_002um` for 2).
+Space Ranger writes 2, 8 and 16 µm bins, but a copied or trimmed output may
+hold fewer; the message lists those there are.
 
 ### `This matrix holds 2 libraries (A1, B1), as spaceranger aggr writes`
 
@@ -251,6 +250,11 @@ wins alongside those where it loses.
 
 pandas and scipy are not dependencies of `adata`; the `pickle` extra adds
 them, and only pycisTopic pickles need them. The container image has them.
+
+### `Reading Visium HD positions needs pyarrow, which reads its Parquet tables: pip install 'pyadata-cli[spatial]'.`
+
+Visium HD records where each bin sits only as Parquet. The `spatial` extra
+adds pyarrow, which only Visium HD needs; the container image has it.
 
 ## Reading the output elsewhere
 

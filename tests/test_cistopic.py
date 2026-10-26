@@ -244,8 +244,10 @@ def test_repeated_column_labels_keep_the_first_with_a_warning(tmp_path):
     frame, and the conversion failed."""
     truth = write_cistopic_pickle(tmp_path / "obj.pkl", model=False, projections=False)
     cell_data = truth.obj.cell_data
-    truth.obj.cell_data = pd.concat([cell_data, cell_data[["TSS_enrichment"]] * 2], axis=1)
-    truth.path.write_bytes(pickle.dumps(truth.obj, protocol=4))
+    # As pycisTopic's pandas would: object strings, not pandas 3's Arrow ones.
+    with pd.option_context("future.infer_string", False):
+        truth.obj.cell_data = pd.concat([cell_data, cell_data[["TSS_enrichment"]] * 2], axis=1)
+        truth.path.write_bytes(pickle.dumps(truth.obj, protocol=4))
     out = tmp_path / "out.h5ad"
     result = _ok(truth.path, "-o", out)
     assert "Not written: obs column 'TSS_enrichment', a name a dataframe reserves or repeats" in _out(result)

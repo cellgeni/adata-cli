@@ -1114,6 +1114,28 @@ def _pycistopic_classes() -> Dict[str, type]:
     return classes
 
 
+def _as_pycistopic_writes(build):
+    """Build a pickle's frames as pycisTopic's pandas 1.5 did: strings as
+    object columns. pandas 3 with pyarrow installed (the `spatial` extra)
+    makes them ArrowStringArray, which no real pycisTopic pickle holds and
+    the importer's allowlist refuses."""
+    import functools
+
+    @functools.wraps(build)
+    def wrapped(*args, **kwargs):
+        import pandas as pd
+
+        try:
+            context = pd.option_context("future.infer_string", False)
+        except (KeyError, pd.errors.OptionError):  # pandas without the option
+            return build(*args, **kwargs)
+        with context:
+            return build(*args, **kwargs)
+
+    return wrapped
+
+
+@_as_pycistopic_writes
 def write_cistopic_pickle(
     path: Path,
     *,
@@ -1204,6 +1226,7 @@ def write_cistopic_pickle(
     return CistopicTruth(path, obj)
 
 
+@_as_pycistopic_writes
 def write_imputed_pickle(path: Path, *, n_cells: int = 15, n_features: int = 8, seed: int = 0) -> CistopicTruth:
     """A CistopicImputedFeatures: a dense features x cells `mtx`."""
     import pickle
@@ -1543,3 +1566,87 @@ def write_xenium_bundle(
         umap=umap,
         counts=counts,
     )
+
+
+# ---------------------------------------------------------------------------
+# Space Ranger output for Visium HD
+#
+# As Space Ranger 3 and 4 write it (checked against 10x's SR 4.0.1 tiny HD
+# sample): one folder per bin size under binned_outputs/, each laid out as a
+# standard Visium outs/ but with its positions as Parquet -- every bin on
+# the slide, in grid order, where the filtered matrix holds those under
+# tissue in its own order.
+
+
+@dataclass
+class VisiumHDTruth:
+    outs: Path
+    bins: Dict[int, VisiumTruth]  # by bin size in µm
+
+
+def write_visium_hd_outs(folder: Path, *, sizes: Sequence[int] = (8, 16), grid: int = 6, seed: int = 0) -> VisiumHDTruth:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from PIL import Image
+
+    rng = np.random.default_rng(seed)
+    outs = folder / "outs"
+    (outs / "spatial").mkdir(parents=True)
+    n_features = 4
+    ids = [f"ENSMUSG{i:05d}" for i in range(n_features)]
+    names = [f"G{i}" for i in range(n_features)]
+    bins: Dict[int, VisiumTruth] = {}
+    for size in sizes:
+        side = grid * 16 // size
+        where = outs / "binned_outputs" / f"square_{size:03d}um"
+        (where / "spatial").mkdir(parents=True)
+        every = [f"s_{size:03d}um_{r:05d}_{c:05d}-1" for r in range(side) for c in range(side)]
+        rows = np.repeat(np.arange(side), side)
+        cols = np.tile(np.arange(side), side)
+        in_tissue = (rng.random(len(every)) < 0.6).astype(np.uint8)
+        pxl_row = rows * size + rng.random(len(every))
+        pxl_col = cols * size + rng.random(len(every))
+        table = pa.table({
+            "barcode": every,
+            "in_tissue": pa.array(in_tissue, pa.uint8()),
+            "array_row": pa.array(rows, pa.uint32()),
+            "array_col": pa.array(cols, pa.uint32()),
+            "pxl_row_in_fullres": pxl_row,
+            "pxl_col_in_fullres": pxl_col,
+        })
+        pq.write_table(table, where / "spatial" / "tissue_positions.parquet", compression="zstd")
+
+        kept = rng.permutation(np.flatnonzero(in_tissue))
+        counts = rng.integers(0, 4, size=(kept.size, n_features))
+        write_10x_h5(where / "filtered_feature_bc_matrix.h5", counts, barcodes=[every[i] for i in kept], ids=ids, names=names)
+        write_10x_h5(where / "raw_feature_bc_matrix.h5", np.zeros((len(every), n_features), dtype=int), barcodes=every, ids=ids, names=names)
+        for path in (where / "filtered_feature_bc_matrix.h5", where / "raw_feature_bc_matrix.h5"):
+            with h5py.File(path, "a") as f:
+                f.attrs["library_ids"] = np.array([b"tiny_mouse_brain"])
+                f.attrs["chemistry_description"] = "Visium HD v1 - 3'"
+                f.attrs["software_version"] = "spaceranger-4.0.1"
+        scalefactors = {
+            "spot_diameter_fullres": float(size), "bin_size_um": float(size),
+            "microns_per_pixel": 1.0, "tissue_lowres_scalef": 0.1,
+            "fiducial_diameter_fullres": 328.9, "tissue_hires_scalef": 1.0,
+            "regist_target_img_scalef": 1.0,
+        }
+        (where / "spatial" / "scalefactors_json.json").write_text(json.dumps(scalefactors))
+        pictures = {}
+        for key, shape in (("hires", (12, 10)), ("lowres", (4, 3))):
+            pixels = rng.integers(0, 256, size=shape + (3,), dtype=np.uint8)
+            Image.fromarray(pixels).save(where / "spatial" / f"tissue_{key}_image.png")
+            Image.fromarray(pixels).save(outs / "spatial" / f"tissue_{key}_image.png")
+            pictures[key] = pixels
+        bins[size] = VisiumTruth(
+            outs=where,
+            barcodes=[every[i] for i in kept],
+            in_tissue=in_tissue[kept].astype(np.int64),
+            array_row=rows[kept].astype(np.int64),
+            array_col=cols[kept].astype(np.int64),
+            spatial=np.stack([pxl_col, pxl_row], axis=1)[kept],
+            images=pictures,
+            scalefactors=scalefactors,
+            counts=counts,
+        )
+    return VisiumHDTruth(outs=outs, bins=bins)

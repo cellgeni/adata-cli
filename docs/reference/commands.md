@@ -120,6 +120,7 @@ adata convert counts.h5ad -o for_cellbender.h5 --layer counts
 adata convert Solo.out/Gene/filtered -o counts.h5ad
 adata convert counts.h5ad -o counts_mtx --to 10x-mtx
 adata convert spaceranger_run/outs -o section.h5ad
+adata convert visium_hd_run/outs -o bins.h5ad --bin-size 8
 adata convert xenium_bundle -o cells.h5ad
 adata convert splitpipe_out -o parse.h5ad
 adata convert velocyto.loom -o velocyto.h5ad
@@ -146,7 +147,7 @@ adata convert multiome.h5ad -o multiome.h5mu
 | `h5ad` | `.h5ad` | yes | yes |
 | `zarr` | `.zarr` (v2 or v3) | yes | yes |
 | [`10x-h5`](formats/10x-h5.md) | `.h5` | Cell Ranger 2 and 3+; the matrix alone of Space Ranger and Xenium | Cell Ranger 3+ layout |
-| [`visium`](formats/visium.md) | a folder | Space Ranger `outs/`: counts, spot positions, images (standard Visium; not HD yet) | no |
+| [`visium`](formats/visium.md) | a folder | Space Ranger `outs/`: counts, spot or bin positions, images (standard Visium; Visium HD with `pyadata-cli[spatial]`) | no |
 | [`xenium`](formats/xenium.md) | a folder | a Xenium bundle: counts, cells and centroids, Xenium's analysis | no |
 | [`cellbender`](formats/cellbender.md) | `.h5` | CellBender `remove-background` 0.2 and later | no |
 | [`10x-mtx`](formats/10x-mtx.md) | a folder (`--to 10x-mtx`) | Cell Ranger 2 and 3+, STARsolo (velocyto too) | Cell Ranger 3+ layout, gzipped |

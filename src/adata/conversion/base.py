@@ -47,6 +47,7 @@ class Options:
     # Reading Space Ranger output.
     library_id: Optional[str] = None
     no_images: bool = False
+    bin_size: Optional[int] = None
 
     # Reading a loom.
     dense: bool = False
