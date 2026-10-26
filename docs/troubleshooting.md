@@ -105,10 +105,11 @@ Every input's `X` (and each layer) must have the same encoding. The message
 gives the `recast` command that converts an input to match; run it on the odd
 ones out.
 
-### `Column 'clster' not found. Available: ...`
+### `Column(s) clster not found in 'obs'. Available: ...`
 
-A query or `split --by` named a column the axis does not have. The message
-lists those it does; names are case-sensitive.
+A query named a column the axis does not have; `split --by` says the same as
+`Column 'clster' not found in 'obs'`. The message lists the columns there are;
+names are case-sensitive.
 
 ### `The obs query matched no rows.`
 
@@ -122,7 +123,7 @@ text, so in a float column `n == 1` matches nothing where `n == 1.0` matches;
 The ordering operators compare numbers. For text, use `==`, `!=` or `in`. See
 [Query expressions](reference/query.md).
 
-### `First dimension mismatch: input has 2,000 rows, but obs has 2,688 cells.`
+### `First dimension mismatch: input has 2000 rows, but obs has 2688 cells.`
 
 `import` checks an array's length against the axis its path implies:
 `obsm/...` against obs, `varm/...` against var, `X` and layers against both.
@@ -156,15 +157,16 @@ store may be the only copy of your data. See
 
 ### anndata cannot open a Zarr store `adata` wrote
 
-A Zarr store written from an `.h5ad` is Zarr v3, which anndata reads from
-0.12 with zarr-python 3. For an older anndata, write v2:
+A Zarr store written from an input that is not Zarr is v3, which anndata
+reads from 0.12 with zarr-python 3. For an older anndata, write v2:
 
 ```bash
 adata convert data.h5ad -o data.zarr --zarr-format 2
 ```
 
-A Zarr source keeps its own version, so this only arises from `.h5ad` inputs,
-and from `concat` of Zarr inputs of different versions.
+A Zarr source keeps its own version, so this arises from any input that is
+not Zarr (an `.h5ad`, a 10x matrix, a loom, ...), and from `concat` of Zarr
+inputs of different versions.
 
 ### A member added by another tool does not show in anndata
 

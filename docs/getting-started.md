@@ -35,6 +35,9 @@ uv sync
 uv run adata --help
 ```
 
+or with pip, from the checkout: `pip install .` (`pip install -e ".[dev]"` to
+work on it).
+
 Most of this walkthrough needs nothing else. Step 4 shows an optional
 [duckdb](https://duckdb.org) workflow for filters too involved to express with
 `--obs-query`; install it only if you want to follow that part (the container

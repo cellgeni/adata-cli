@@ -354,6 +354,14 @@ def test_every_page_has_a_title_and_a_parent_that_exists(page):
                 f"{_label(page)}: {key} {front[key]!r} is the title of "
                 "several pages, so the sidebar cannot tell which"
             )
+    if "grand_parent" in front:
+        parent = next(
+            fm for fm in FRONT_MATTER.values() if fm.get("title") == front["parent"]
+        )
+        assert parent.get("parent") == front["grand_parent"], (
+            f"{_label(page)}: grand_parent {front['grand_parent']!r} is not "
+            f"the parent of {front['parent']!r}"
+        )
 
 
 # ---------------------------------------------------------------------------

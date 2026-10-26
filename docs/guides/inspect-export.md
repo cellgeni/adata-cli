@@ -72,8 +72,8 @@ adata export image data.h5ad uns/spatial/V1_Adult_Mouse_Brain/images/hires -o hi
 
 ## Piping to other tools
 
-Without `--output`, every export writes to stdout, and status and progress
-go to stderr, so the data stream stays clean:
+Without `--output`, every export but `export image` writes to stdout, and
+status and progress go to stderr, so the data stream stays clean:
 
 ```bash
 adata export dataframe data.h5ad obs | duckdb -c "SELECT cluster, count(*) FROM read_csv('/dev/stdin') GROUP BY 1"

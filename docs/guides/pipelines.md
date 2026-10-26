@@ -82,6 +82,7 @@ run. Check what it holds, remove it, and try again.
 An `adata-tmp` store is always incomplete: delete it. An `adata-old` store is
 the previous output, left because the run died between the two renames: if
 `out.h5ad` is missing, rename `out.adata-old.h5ad` back; otherwise delete it.
+
 {: .note }
 In Nextflow, a retried task starts in a fresh work directory and never sees
 leftovers. They arise when a script writes outside its work directory.
@@ -128,7 +129,7 @@ upgraded:
 - A command on a Zarr store writes the same version.
 - `concat` writes the version its Zarr inputs share; inputs of different
   versions give v3.
-- A Zarr store written from an `.h5ad` is v3.
+- A Zarr store written from an input that is not Zarr, such as an `.h5ad`, is v3.
 - `--zarr-format 2` or `3` chooses, on `create`, `subset`, `split`, `concat`,
   `convert` and `recast`.
 
