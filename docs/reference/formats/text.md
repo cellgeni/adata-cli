@@ -2,7 +2,7 @@
 title: Text tables
 parent: Formats
 grand_parent: Reference
-nav_order: 6
+nav_order: 8
 ---
 
 # Text tables

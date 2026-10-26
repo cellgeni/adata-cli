@@ -66,6 +66,8 @@ Each layer calls only the layers below it:
   - `csr_build.py` builds a CSR matrix from entries in any order, through
     row-range buckets on disk. The transpose uses it, and so does anything
     that reads entries out of order;
+  - `scatter.py` writes rows read in one order (a table beside a matrix) in
+    another, through the same kind of scratch buckets;
   - `query.py` and `select.py` hold the expression language behind
     `--obs-query`.
 - **`elements/`**: the AnnData on-disk spec.
@@ -99,7 +101,11 @@ Each layer calls only the layers below it:
   an output only with `--to`. Order in `FORMATS` matters: the first sniffer
   that matches wins, so a more specific format (`cellbender`, which is also a
   10x matrix) goes before the general one, and an output extension picks the
-  first format that can be written.
+  first format that can be written. The folder formats `visium` and `xenium`
+  go before `10x-mtx`, which would take a Space Ranger `outs/` for a Cell
+  Ranger 2 genome layout. `conversion/spatial.py` matches a table to a
+  matrix's barcodes while `scan_table` reads it (`on_index`), and writes it
+  in the matrix's order.
 - **`formats/`**: the per-file-type halves of `export` and `import`: npy, mtx,
   csv, json and images. `mtx.py` is a streaming Matrix Market codec (two
   passes in, block writes out) shared by `import`/`export sparse` and the

@@ -134,6 +134,46 @@ The input belongs to another store, or is transposed.
 `subset` with no selection would copy the store. Use `convert` to copy, or add
 a selection.
 
+## Visium and Xenium
+
+These are refused before anything is written too.
+
+### `12 of the matrix's 2,702 barcodes have no row in spatial/tissue_positions.csv (the first is 'AAAC...-1')`
+
+The positions and the matrix come from different runs, or the positions
+were edited. Every spot of the matrix needs a position; spots in the
+positions but not the matrix are fine. A Xenium cell missing from
+`cells.csv.gz` is refused the same way.
+
+### `This is Visium HD output, which is not read yet: its positions are Parquet.`
+
+Visium HD's bin positions exist only as `tissue_positions.parquet`, which a
+later release will read. Meanwhile, convert one bin size's matrix as a plain
+10x matrix, without positions:
+`adata convert binned_outputs/square_008um/filtered_feature_bc_matrix.h5 -o bins.h5ad`.
+
+### `This matrix holds 2 libraries (A1, B1), as spaceranger aggr writes`
+
+An aggregated matrix's spots come from several slides, with no one image to
+place them on. Convert each library's own `outs/`, and `adata concat` the
+results if you need them together.
+
+### `... has filtered_feature_bc_matrix/ as a Matrix Market folder but no filtered_feature_bc_matrix.h5`
+
+The positions are read only beside the `.h5` matrix. Convert the folder with
+`--from 10x-mtx` for the counts alone. A Xenium bundle with only
+`cell_feature_matrix/` says the same.
+
+### `... has no cells.csv.gz. It has cells.parquet only, which is not read yet.`
+
+Xenium writes `cells.csv.gz` beside `cells.parquet` in every version so far;
+a bundle trimmed to Parquet cannot be read yet.
+
+### `--unfiltered does not apply when converting xenium to h5ad.`
+
+Xenium has one matrix. `--unfiltered`, `--library-id` and `--no-images` are
+Visium's.
+
 ## Leftovers from an interrupted run
 
 ### `'out.adata-tmp.h5ad' already exists, probably left by an interrupted run. Check what it holds, remove it, and try again.`

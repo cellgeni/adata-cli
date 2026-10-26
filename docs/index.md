@@ -68,10 +68,11 @@ Status goes to stderr and data to stdout, so every command pipes cleanly.
   checks this against stores written by anndata 0.8 to 0.13, and checks that
   each of those releases reads what `adata` writes.
 - **Other formats, through `convert`**: 10x Genomics HDF5 and MTX folders
-  (Cell Ranger, STARsolo, velocyto), CellBender output, Parse Biosciences
-  runs, looms (velocyto's and SCope's), text tables, plain HDF5 matrices,
+  (Cell Ranger, STARsolo, velocyto), Visium and Xenium spatial outputs with
+  their coordinates and images, CellBender output, Parse Biosciences runs,
+  looms (velocyto's and SCope's), text tables, plain HDF5 matrices,
   pycisTopic pickles and MuData. CI checks them against the readers people
-  use for them: scanpy, loompy, anndata, mudata.
+  use for them: scanpy, squidpy, loompy, anndata, mudata.
 - **Outputs that keep the source's choices**: Zarr version, index dtypes,
   chunking and compression carry over unless a flag changes them.
 - **Outputs that appear whole or not at all**: every store is written beside

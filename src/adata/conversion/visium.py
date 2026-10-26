@@ -178,7 +178,7 @@ def _library_id(attrs: Dict[str, Any], outs: Path, options: Options) -> str:
     if len(ids) > 1:
         raise ValueError(
             f"This matrix holds {len(ids)} libraries ({', '.join(ids)}), as "
-            "`spaceranger aggr` writes; their spots share no one image. Convert "
+            "spaceranger aggr writes; their spots share no one image. Convert "
             "each library's own output."
         )
     if ids:
