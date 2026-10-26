@@ -490,6 +490,43 @@ CASES: List[Case] = [
         tags=["headline"],
     ),
     Case(
+        name="import-xenium",
+        question=(
+            "Read a Xenium bundle of the same counts -- the cell matrix, a "
+            "cells.csv.gz of centroids and per-cell counts, and analysis "
+            "clusters -- into an h5ad with obsm['spatial']. adata-cli matches "
+            "the cell table to the matrix as it scans it and streams both; "
+            "10x's scanpy recipe loads the matrix and reads the tables with "
+            "pandas. adata-cli keeps the matrix's own gzip, scanpy writes lzf."
+        ),
+        sidecar="xenium",
+        contenders=[
+            Contender(
+                "adata-cli",
+                argv=["adata", "convert", "{sidecar}", "-o", "{output}"],
+            ),
+            Contender(
+                "scanpy",
+                env="scanpy",
+                script=_py(
+                    "import os, pandas as pd, scanpy as sc\n"
+                    "from pathlib import Path\n"
+                    "bundle = Path(os.environ['BENCH_SIDECAR'])\n"
+                    "obj = sc.read_10x_h5(bundle / 'cell_feature_matrix.h5', gex_only=False)\n"
+                    "cells = pd.read_csv(bundle / 'cells.csv.gz', index_col='cell_id')\n"
+                    "cells = cells.reindex(obj.obs_names)\n"
+                    "obj.obsm['spatial'] = cells[['x_centroid', 'y_centroid']].to_numpy()\n"
+                    "obj.obs = cells.drop(columns=['x_centroid', 'y_centroid'])\n"
+                    "clusters = pd.read_csv(bundle / 'analysis/clustering/"
+                    "gene_expression_graphclust/clusters.csv', index_col='Barcode')\n"
+                    "obj.obs['graphclust'] = clusters['Cluster'].astype(str)"
+                    ".reindex(obj.obs_names).astype('category')\n"
+                    "obj.write_h5ad(OUT, compression=COMPRESSION)\n"
+                ),
+            ),
+        ],
+    ),
+    Case(
         name="import-csv",
         question=(
             "Read a dense count table, a CSV of the first 10,000 cells, into an "
