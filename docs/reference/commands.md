@@ -326,7 +326,9 @@ adata export array data.h5ad obsm/X_umap > umap.npy
 adata export dict data.h5ad uns -o metadata.json
 ```
 
-Omit `--output` to write to stdout. Writing to a file streams in chunks;
+Omit `--output` to write to stdout; `export image` writes PNG there, and
+otherwise takes its format from the output's extension. Writing to a file
+streams in chunks;
 stdout is not seekable, so `export array` holds the array in memory on that
 path.
 

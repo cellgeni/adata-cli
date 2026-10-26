@@ -1397,16 +1397,22 @@ def export_image(
     ),
     entry: str = typer.Argument(..., help="Entry path to export (2D or 3D array)"),
     output: Optional[Path] = typer.Option(
-        None, "--output", "-o", help="Output image file (.png, .jpg, .tiff)"
+        None,
+        "--output",
+        "-o",
+        help="Output image file (.png, .jpg, .tiff); defaults to PNG on stdout",
     ),
 ) -> None:
     """
     Export an image-like array to PNG/JPG/TIFF format.
 
-    The array should be 2D (H,W) or 3D (H,W,C) with C in {1,3,4}.
+    The array should be 2D (H,W) or 3D (H,W,C) with C in {1,3,4}. The
+    format follows the output's extension; without --output the image goes
+    to stdout as PNG.
 
     Examples:
         adata export image data.h5ad uns/spatial/image -o tissue.png
+        adata export image data.h5ad uns/spatial/image > tissue.png
     """
 
     try:

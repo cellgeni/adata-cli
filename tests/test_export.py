@@ -272,3 +272,26 @@ class TestExportValidation:
         )
         # Should succeed as it's detected as dict
         assert result.exit_code == 0
+
+
+class TestExportImage:
+    def test_without_an_output_the_image_goes_to_stdout_as_png(self, temp_dir):
+        """Every other export writes to stdout without --output; `export image`
+        crashed instead, with "'NoneType' object has no attribute 'parent'",
+        because it took the output path for granted.
+        """
+        import io
+
+        from PIL import Image
+
+        pixels = (np.arange(4 * 6 * 3) % 256).astype("uint8").reshape(4, 6, 3)
+        path = temp_dir / "img.h5ad"
+        with h5py.File(path, "w") as f:
+            f.create_group("uns").create_dataset("img", data=pixels)
+
+        result = runner.invoke(app, ["export", "image", str(path), "uns/img"])
+
+        assert result.exit_code == 0, result.output
+        image = Image.open(io.BytesIO(result.stdout_bytes))
+        assert image.format == "PNG"
+        assert np.array_equal(np.asarray(image), pixels)
