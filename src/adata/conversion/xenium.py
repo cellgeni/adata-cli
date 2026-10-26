@@ -15,6 +15,9 @@ The AnnData produced:
   spatialdata-io places it; `obsm["X_umap"]` and `obsm["X_pca"]` from
   `analysis/`.
 
+Xenium ships `analysis/` packed as `analysis.tar.gz`; the three tables used
+are read from it when it has not been unpacked.
+
 The cell table can hold a million rows. It is matched to the matrix's
 barcodes while it is scanned, and Xenium writes both in the same order, so
 it is then written straight through; a table in another order goes through
@@ -23,6 +26,9 @@ it is then written straight through; a table in another order goes through
 
 from __future__ import annotations
 
+import shutil
+import tarfile
+import tempfile
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -83,6 +89,9 @@ class _Plan:
     clusters: Optional[_Table]
     projections: Dict[str, _Table] = field(default_factory=dict)
     zarr_format: Optional[int] = None
+    #: Where tables taken out of analysis.tar.gz wait to be written; removed
+    #: when the plan is.
+    unpacked: Optional[tempfile.TemporaryDirectory] = None
 
 
 def _bundle(source: Path) -> Path:
@@ -96,6 +105,26 @@ def _bundle(source: Path) -> Path:
             )
         raise ValueError(f"{bundle} has no cell_feature_matrix.h5.")
     return bundle
+
+
+def _unpack_analysis(archive: Path) -> tempfile.TemporaryDirectory:
+    """The analysis tables this reads, out of Xenium's analysis.tar.gz.
+
+    Only those members, each copied to a path built here rather than the
+    one the archive names, so the archive cannot write anywhere else.
+    """
+    holder = tempfile.TemporaryDirectory(prefix="adata-xenium-")
+    wanted = {str(Path("analysis") / p): p for p in (_CLUSTERS, *_PROJECTIONS.values())}
+    with tarfile.open(archive, "r:*") as tar:
+        for member in tar:
+            relative = wanted.get(member.name.lstrip("./"))
+            if relative is None or not member.isfile():
+                continue
+            target = Path(holder.name) / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with tar.extractfile(member) as source, open(target, "wb") as out:
+                shutil.copyfileobj(source, out)
+    return holder
 
 
 def _scan(path: Path, index: str, barcodes: Any) -> _Table:
@@ -126,6 +155,10 @@ class XeniumImport(Converter):
             raise ValueError(f"{bundle} has no cells.csv.gz.{parquet}")
 
         analysis = bundle / "analysis"
+        unpacked = None
+        if not analysis.is_dir() and (bundle / "analysis.tar.gz").is_file():
+            unpacked = _unpack_analysis(bundle / "analysis.tar.gz")
+            analysis = Path(unpacked.name)
         warnings: List[str] = []
         with h5py.File(matrix_path, "r") as handle:
             if not tenx.sniff(matrix_path):
@@ -164,13 +197,7 @@ class XeniumImport(Converter):
                     "they are left empty."
                 )
         if not analysis.is_dir():
-            if (bundle / "analysis.tar.gz").is_file():
-                warnings.append(
-                    "Xenium's analysis is still packed in analysis.tar.gz: unpack it "
-                    "beside it to bring its clusters, UMAP and PCA in."
-                )
-            else:
-                warnings.append("No analysis/ folder: no clusters, UMAP or PCA to bring in.")
+            warnings.append("No analysis/ or analysis.tar.gz: no clusters, UMAP or PCA to bring in.")
 
         described = describe_import(matrix.n_barcodes, matrix.n_features, matrix.feature_types, targets)
         return ConversionPlan(
@@ -191,6 +218,7 @@ class XeniumImport(Converter):
                 clusters=clusters,
                 projections=projections,
                 zarr_format=(options.zarr_format or 3) if dst_format == "zarr" else None,
+                unpacked=unpacked,
             ),
         )
 

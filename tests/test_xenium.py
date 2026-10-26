@@ -121,17 +121,40 @@ def test_cells_missing_from_the_analysis_are_left_empty(tmp_path):
 def test_no_analysis_is_a_warning(tmp_path):
     truth = write_xenium_bundle(tmp_path / "xenium", analysis=False)
     result = _ok(truth.bundle, "-o", tmp_path / "out.h5ad")
-    assert "No analysis/ folder" in _out(result)
+    assert "No analysis/ or analysis.tar.gz" in _out(result)
     adata = _read(tmp_path / "out.h5ad")
     assert "graphclust" not in adata.obs and "X_umap" not in adata.obsm
 
 
-def test_a_packed_analysis_says_to_unpack_it(tmp_path):
-    truth = write_xenium_bundle(tmp_path / "xenium")
+def test_the_analysis_is_read_from_the_archive_xenium_ships_it_in(tmp_path):
+    """Xenium packs analysis/ as analysis.tar.gz, so a bundle as downloaded
+    has no analysis/ folder at all."""
+    truth = write_xenium_bundle(tmp_path / "xenium", missing_in_analysis=2)
     shutil.make_archive(str(truth.bundle / "analysis"), "gztar", truth.bundle, "analysis")
     shutil.rmtree(truth.bundle / "analysis")
+
     result = _ok(truth.bundle, "-o", tmp_path / "out.h5ad")
-    assert "still packed in analysis.tar.gz" in _out(result)
+
+    assert "analysis: clusters, X_umap" in _out(result)
+    adata = _read(tmp_path / "out.h5ad")
+    assert adata.obs["graphclust"].astype(object).fillna("").tolist() == list(truth.clusters)
+    np.testing.assert_allclose(adata.obsm["X_umap"], truth.umap)
+
+
+def test_an_archive_cannot_write_outside_its_temporary_folder(tmp_path):
+    """Members are copied to paths built from the names this wants, never
+    extracted where the archive says."""
+    import io
+    import tarfile
+
+    truth = write_xenium_bundle(tmp_path / "xenium", analysis=False)
+    with tarfile.open(truth.bundle / "analysis.tar.gz", "w:gz") as tar:
+        data = b"Barcode,Cluster\n"
+        info = tarfile.TarInfo("../../escaped.csv")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    _ok(truth.bundle, "-o", tmp_path / "out.h5ad")
+    assert not list(tmp_path.rglob("escaped.csv"))
 
 
 def test_feature_type_keeps_the_cells_and_their_positions(tmp_path):
