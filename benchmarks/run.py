@@ -187,6 +187,8 @@ def _build_sidecar(case: Case, inputs: List[Path], workdir: Path) -> Optional[Pa
         return _build_mtx_sidecar(case, inputs, workdir)
     if case.sidecar == "dense-csv":
         return _build_dense_csv_sidecar(case, inputs, workdir)
+    if case.sidecar == "xenium":
+        return _build_xenium_sidecar(case, inputs, workdir)
     if case.sidecar != "csv":
         return None
     # Named for its input too: a work directory reused across tiers must not
@@ -240,6 +242,74 @@ def _build_dense_csv_sidecar(case: Case, inputs: List[Path], workdir: Path) -> P
             out.write(b"".join(
                 cell.encode() + b"," + line + b"\n" for cell, line in zip(cells[lo:hi], lines)
             ))
+    # Renamed only when whole: a failed build must not be reused as a sidecar.
+    partial.rename(path)
+    return path
+
+
+def _build_xenium_sidecar(case: Case, inputs: List[Path], workdir: Path) -> Path:
+    """A Xenium bundle holding the first input's counts, as XOA lays one out.
+
+    The matrix is exported by adata-cli (integer counts, then the 10x h5),
+    and the cell table and clusters are written in the matrix's order, as
+    Xenium writes them, with made-up centroids and per-cell counts.
+    """
+    import gzip
+
+    import h5py
+    import numpy as np
+
+    from adata.elements.read import element_len, read_str_chunk, resolve_index
+
+    path = workdir / f"{case.name}-{inputs[0].stem}-sidecar"
+    if path.exists():
+        return path
+    partial = path.with_name(path.name + ".partial")
+    if partial.exists():
+        shutil.rmtree(partial)
+    partial.mkdir()
+    counts = workdir / f"{case.name}-{inputs[0].stem}-counts.h5ad"
+    if counts.exists():
+        counts.unlink()
+    for command in (
+        ["adata", "recast", str(inputs[0]), "X", "-o", str(counts), "--dtype", "int32"],
+        ["adata", "convert", str(counts), "-o", str(partial / "cell_feature_matrix.h5"),
+         "--gene-names-column", "gene_symbol", "--feature-types-column",
+         "feature_type", "--force"],
+    ):
+        done = subprocess.run(command, capture_output=True, text=True)
+        if done.returncode != 0:
+            raise RuntimeError(f"could not build the Xenium sidecar:\n{done.stderr or done.stdout}")
+    counts.unlink()
+    (partial / "experiment.xenium").write_text('{"pixel_size": 0.2125, "major_version": 5}')
+
+    rng = np.random.default_rng(0)
+    clusters_dir = partial / "analysis" / "clustering" / "gene_expression_graphclust"
+    clusters_dir.mkdir(parents=True)
+    with h5py.File(inputs[0], "r") as handle, gzip.open(
+        partial / "cells.csv.gz", "wt", compresslevel=6
+    ) as cells, open(clusters_dir / "clusters.csv", "w") as clusters:
+        index, _ = resolve_index(handle["obs"], "obs")
+        n = element_len(index)
+        cells.write(
+            "cell_id,x_centroid,y_centroid,transcript_counts,control_probe_counts,"
+            "cell_area,nucleus_area,segmentation_method\n"
+        )
+        clusters.write("Barcode,Cluster\n")
+        step = 50_000
+        for lo in range(0, n, step):
+            names = read_str_chunk(index, lo, min(lo + step, n), {}, parent_group=handle["obs"])
+            k = len(names)
+            x, y = rng.uniform(0, 8000, k), rng.uniform(0, 8000, k)
+            counts_, probes = rng.integers(0, 500, k), rng.integers(0, 3, k)
+            area, nucleus = rng.uniform(20, 300, k), rng.uniform(5, 60, k)
+            method = rng.choice(["Segmented by boundary stain", "Segmented by nucleus expansion"], k)
+            cluster = rng.integers(1, 20, k)
+            cells.writelines(
+                f"{c},{x[i]:.4f},{y[i]:.4f},{counts_[i]},{probes[i]},{area[i]:.3f},{nucleus[i]:.3f},{method[i]}\n"
+                for i, c in enumerate(names)
+            )
+            clusters.writelines(f"{c},{cluster[i]}\n" for i, c in enumerate(names))
     # Renamed only when whole: a failed build must not be reused as a sidecar.
     partial.rename(path)
     return path

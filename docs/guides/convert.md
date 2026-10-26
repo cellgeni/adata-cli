@@ -18,8 +18,9 @@ to turn a loom into a 10x matrix, convert it to `.h5ad` first, then from that.
 
 ```
 10x HDF5, 10x/STARsolo MTX ─┐                       ┌─► 10x HDF5, 10x MTX
-CellBender, Parse, text     ├─► .h5ad ◄──► .zarr ◄──┤
-loom, HDF5, pycisTopic      │                       ├─► loom (SCope too)
+Visium, Xenium, CellBender  │                       │
+Parse, text, HDF5           ├─► .h5ad ◄──► .zarr ◄──┤
+loom, pycisTopic            │                       ├─► loom (SCope too)
 MuData ─────────────────────┘                       └─► MuData
 ```
 
@@ -38,7 +39,9 @@ no extension.
 
 | You have | Convert with | Read the page |
 |---|---|---|
-| Cell Ranger, Space Ranger or Xenium `*_feature_bc_matrix.h5` | `adata convert in.h5 -o out.h5ad` | [10x HDF5](../reference/formats/10x-h5.md) |
+| Cell Ranger's `*_feature_bc_matrix.h5` | `adata convert in.h5 -o out.h5ad` | [10x HDF5](../reference/formats/10x-h5.md) |
+| A Space Ranger `outs/` folder (standard Visium) | `adata convert outs -o out.h5ad` | [Visium](../reference/formats/visium.md) |
+| A Xenium output bundle | `adata convert bundle -o out.h5ad` | [Xenium](../reference/formats/xenium.md) |
 | CellBender `output.h5` | `adata convert output.h5 -o out.h5ad` | [CellBender](../reference/formats/cellbender.md) |
 | A `matrix.mtx` folder from Cell Ranger, STARsolo or GEO | `adata convert folder -o out.h5ad` | [MTX folders](../reference/formats/10x-mtx.md) |
 | A Parse Biosciences split-pipe run | `adata convert run -o out.h5ad` | [Parse](../reference/formats/parse.md) |

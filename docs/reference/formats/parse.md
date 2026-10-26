@@ -2,7 +2,7 @@
 title: Parse Biosciences
 parent: Formats
 grand_parent: Reference
-nav_order: 4
+nav_order: 6
 ---
 
 # Parse Biosciences split-pipe

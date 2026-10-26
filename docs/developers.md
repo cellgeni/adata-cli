@@ -60,7 +60,9 @@ cli.py ──► commands/ ──► core/, conversion/, formats/ ──► elem
 - **`core/`** holds the algorithms that stream. `subset.py`'s writer serves
   `subset` and `split`, and reads each matrix once for every output.
   `csr_build.py` builds CSR from entries in any order through row-range buckets
-  on disk; the transpose and every out-of-order reader use it.
+  on disk; the transpose and every out-of-order reader use it. `scatter.py`
+  does the same for the rows of a table that comes in another order than the
+  matrix beside it.
 - **`elements/spec.py`** is the single source of truth for `encoding-type` and
   `encoding-version`. `read.py` accepts every layout from anndata 0.7 on;
   `write.py` always writes the current one; `strings.py` reconciles how HDF5
@@ -76,9 +78,13 @@ a converter to another format.
 
 1. Add a `Format` to `FORMATS` in `conversion/__init__.py`, with a content
    sniffer. The first sniffer to match wins, so a specific format
-   (`cellbender`, which is also a 10x matrix) goes before a general one.
+   (`cellbender`, which is also a 10x matrix) goes before a general one, and
+   the folder formats (`visium`, `xenium`) go before `10x-mtx`, which would
+   otherwise claim their MEX subfolders.
 2. Write the converter module; `tenx.py` is the model, and `features.py` holds
-   the feature table every 10x-style format shares.
+   the feature table every 10x-style format shares. A format that pairs a 10x
+   matrix with a table (`visium.py`, `xenium.py`) uses `spatial.py` to match
+   the table to the matrix's barcodes and write it in their order.
 3. Add fixtures shaped like the real tool's output to `tests/conftest.py`, and
    a comparison against the reader people use in
    `tests/test_external_readers.py`.

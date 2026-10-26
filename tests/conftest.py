@@ -1,6 +1,7 @@
 """Pytest configuration and fixtures for adata tests."""
 
 import base64
+import gzip
 import json
 import zlib
 from contextlib import contextmanager
@@ -1327,3 +1328,218 @@ def write_h5mu(
         with open(path, "r+b") as raw:
             raw.write(header.ljust(512, b"\0"))
     return MudataTruth(path, mods, obs, obsm, obsp, uns)
+
+
+# ---------------------------------------------------------------------------
+# Space Ranger output for standard Visium
+#
+# As Space Ranger writes it (checked against 10x's SR 1.1 and SR 2.1 sample
+# outputs): the matrix, and in spatial/ every spot's position -- in no
+# particular order, and including spots the filtered matrix leaves out --
+# the scale factors and two PNGs. SR 1 wrote the positions with no header.
+
+
+@dataclass
+class VisiumTruth:
+    outs: Path
+    barcodes: List[str]  # the filtered matrix's, in its order
+    in_tissue: np.ndarray
+    array_row: np.ndarray
+    array_col: np.ndarray
+    spatial: np.ndarray  # [pxl_col, pxl_row], per barcode
+    images: Dict[str, np.ndarray]
+    scalefactors: dict
+    counts: np.ndarray
+
+
+def write_visium_outs(
+    folder: Path,
+    *,
+    version: str = "sr2",
+    n_spots: int = 12,
+    n_extra: int = 5,
+    raw: bool = True,
+    images: bool = True,
+    seed: int = 0,
+) -> VisiumTruth:
+    """An `outs/` folder. `version` is sr1 (no header), sr2, or sr3_float
+    (pixel positions with decimals, as Space Ranger 3 and 4 may write)."""
+    from PIL import Image
+
+    rng = np.random.default_rng(seed)
+    outs = folder / "outs"
+    spatial = outs / "spatial"
+    spatial.mkdir(parents=True)
+    n_features = 6
+    barcodes = [f"AAAC{i:04d}-1" for i in range(n_spots)]
+    extra = [f"TTTG{i:04d}-1" for i in range(n_extra)]
+    counts = rng.integers(0, 5, size=(n_spots, n_features))
+    ids = [f"ENSG{i:05d}" for i in range(n_features)]
+    names = [f"G{i}" for i in range(n_features)]
+    types = ["Gene Expression"] * (n_features - 1) + ["Antibody Capture"]
+
+    def matrix(path: Path, rows: List[str], values: np.ndarray) -> None:
+        write_10x_h5(path, values, barcodes=rows, ids=ids, names=names, types=types)
+        with h5py.File(path, "a") as f:
+            f.attrs["library_ids"] = np.array([b"V1_Test_Section"])
+            f.attrs["chemistry_description"] = "Spatial 3' v1"
+            f.attrs["software_version"] = "spaceranger-2.1.0"
+
+    matrix(outs / "filtered_feature_bc_matrix.h5", barcodes, counts)
+    if raw:
+        matrix(
+            outs / "raw_feature_bc_matrix.h5", barcodes + extra,
+            np.vstack([counts, np.zeros((n_extra, n_features), dtype=counts.dtype)]),
+        )
+
+    every = barcodes + extra
+    n = len(every)
+    in_tissue = np.array([1] * n_spots + [0] * n_extra)
+    array_row = rng.integers(0, 78, n)
+    array_col = rng.integers(0, 128, n)
+    pxl_row = rng.integers(-50, 2000, n).astype(float)
+    pxl_col = rng.integers(0, 2000, n).astype(float)
+    if version == "sr3_float":
+        pxl_row += 0.25
+        pxl_col += 0.5
+    order = rng.permutation(n)
+    lines = []
+    if version != "sr1":
+        lines.append(",".join(
+            ("barcode", "in_tissue", "array_row", "array_col", "pxl_row_in_fullres", "pxl_col_in_fullres")
+        ))
+    fmt = (lambda v: f"{v:g}") if version == "sr3_float" else (lambda v: str(int(v)))
+    for i in order:
+        lines.append(
+            f"{every[i]},{in_tissue[i]},{array_row[i]},{array_col[i]},{fmt(pxl_row[i])},{fmt(pxl_col[i])}"
+        )
+    name = "tissue_positions_list.csv" if version == "sr1" else "tissue_positions.csv"
+    (spatial / name).write_text("\n".join(lines) + "\n")
+
+    scalefactors = {
+        "spot_diameter_fullres": 89.4,
+        "tissue_hires_scalef": 0.17,
+        "fiducial_diameter_fullres": 144.5,
+        "tissue_lowres_scalef": 0.05,
+    }
+    (spatial / "scalefactors_json.json").write_text(json.dumps(scalefactors))
+    pictures: Dict[str, np.ndarray] = {}
+    if images:
+        for key, size in (("hires", (20, 16)), ("lowres", (6, 5))):
+            pixels = rng.integers(0, 256, size=size + (3,), dtype=np.uint8)
+            Image.fromarray(pixels).save(spatial / f"tissue_{key}_image.png")
+            pictures[key] = pixels
+
+    take = slice(0, n_spots)
+    return VisiumTruth(
+        outs=outs,
+        barcodes=barcodes,
+        in_tissue=in_tissue[take],
+        array_row=array_row[take],
+        array_col=array_col[take],
+        spatial=np.stack([pxl_col, pxl_row], axis=1)[take],
+        images=pictures,
+        scalefactors=scalefactors,
+        counts=counts,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Xenium output bundles
+#
+# As Xenium Onboard Analysis writes them (columns checked against 10x's XOA
+# 1.0.1, 3.0 and 4.0 sample bundles): the cell matrix, cells.csv.gz in the
+# matrix's order, experiment.xenium, and analysis/ CSVs keyed by Barcode.
+# XOA 1 numbered cells; later versions name them like "aaafiiei-1".
+
+
+@dataclass
+class XeniumTruth:
+    bundle: Path
+    cell_ids: List[str]  # the matrix's, in its order
+    columns: Dict[str, np.ndarray]  # cells.csv.gz's other columns, per cell
+    spatial: np.ndarray
+    clusters: Optional[np.ndarray]  # per cell, "" where analysis lacks it
+    umap: Optional[np.ndarray]  # NaN where analysis lacks it
+    counts: np.ndarray
+
+
+def write_xenium_bundle(
+    folder: Path,
+    *,
+    ids: str = "string",
+    n_cells: int = 15,
+    shuffled: bool = False,
+    extra_cells: int = 0,
+    analysis: bool = True,
+    missing_in_analysis: int = 0,
+    seed: int = 0,
+) -> XeniumTruth:
+    rng = np.random.default_rng(seed)
+    folder.mkdir(parents=True)
+    n_features = 5
+    if ids == "int":
+        cell_ids = [str(i + 1) for i in range(n_cells + extra_cells)]
+    else:
+        cell_ids = [
+            "".join("abcdefghijklmnop"[d] for d in rng.integers(0, 16, 8)) + "-1"
+            for _ in range(n_cells + extra_cells)
+        ]
+    counts = rng.integers(0, 6, size=(n_cells, n_features))
+    write_10x_h5(
+        folder / "cell_feature_matrix.h5", counts, barcodes=cell_ids[:n_cells],
+        ids=[f"ENSG{i:05d}" for i in range(n_features - 1)] + ["NegControlProbe_00001"],
+        names=[f"G{i}" for i in range(n_features - 1)] + ["NegControlProbe_00001"],
+        types=["Gene Expression"] * (n_features - 1) + ["Negative Control Probe"],
+    )
+    (folder / "experiment.xenium").write_text(json.dumps({"pixel_size": 0.2125, "major_version": 5}))
+
+    n = n_cells + extra_cells
+    table = {
+        "x_centroid": rng.uniform(0, 5000, n).round(4),
+        "y_centroid": rng.uniform(0, 5000, n).round(4),
+        "transcript_counts": rng.integers(0, 300, n),
+        "control_probe_counts": rng.integers(0, 3, n),
+        "cell_area": rng.uniform(10, 200, n).round(3),
+        "nucleus_area": rng.uniform(5, 50, n).round(3),
+        "segmentation_method": rng.choice(["Segmented by boundary stain", "Segmented by nucleus expansion"], n),
+    }
+    if extra_cells:
+        # A method only the left-out cells use: its category must go.
+        table["segmentation_method"][n_cells:] = "Imported cell segmentation"
+    order = rng.permutation(n) if shuffled else np.arange(n)
+    names = ["cell_id", *table]
+    lines = [",".join(names)]
+    for i in order:
+        values = [cell_ids[i]] + [str(table[k][i]) for k in table]
+        lines.append(",".join(f'"{v}"' if k in ("cell_id", "segmentation_method") else v for k, v in zip(names, values)))
+    (folder / "cells.csv.gz").write_bytes(gzip.compress(("\n".join(lines) + "\n").encode()))
+
+    clusters = umap = None
+    if analysis:
+        listed = rng.permutation(n_cells)[missing_in_analysis:]
+        clusters = np.full(n_cells, "", dtype=object)
+        clusters[listed] = [str(v) for v in rng.integers(1, 12, listed.size)]
+        umap = np.full((n_cells, 2), np.nan)
+        umap[listed] = rng.normal(size=(listed.size, 2)).round(5)
+        path = folder / "analysis" / "clustering" / "gene_expression_graphclust"
+        path.mkdir(parents=True)
+        (path / "clusters.csv").write_text(
+            "Barcode,Cluster\n" + "".join(f"{cell_ids[i]},{clusters[i]}\n" for i in listed)
+        )
+        path = folder / "analysis" / "umap" / "gene_expression_2_components"
+        path.mkdir(parents=True)
+        (path / "projection.csv").write_text(
+            "Barcode,UMAP-1,UMAP-2\n" + "".join(f"{cell_ids[i]},{umap[i, 0]},{umap[i, 1]}\n" for i in listed)
+        )
+
+    keep = slice(0, n_cells)
+    return XeniumTruth(
+        bundle=folder,
+        cell_ids=cell_ids[:n_cells],
+        columns={k: v[keep] for k, v in table.items() if k not in ("x_centroid", "y_centroid")},
+        spatial=np.stack([table["x_centroid"], table["y_centroid"]], axis=1)[keep],
+        clusters=clusters,
+        umap=umap,
+        counts=counts,
+    )

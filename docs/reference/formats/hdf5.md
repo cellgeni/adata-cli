@@ -2,7 +2,7 @@
 title: HDF5 matrices
 parent: Formats
 grand_parent: Reference
-nav_order: 7
+nav_order: 9
 ---
 
 # HDF5 matrices

@@ -528,6 +528,8 @@ _CONVERT_FLAGS = {
     "sample": "--sample",
     "all_samples": "--all-samples",
     "unfiltered": "--unfiltered",
+    "library_id": "--library-id",
+    "no_images": "--no-images",
     "dense": "--dense",
     "obs_names_attr": "--obs-names-attr",
     "var_names_attr": "--var-names-attr",
@@ -695,7 +697,20 @@ def convert(
     unfiltered: bool = typer.Option(
         False,
         "--unfiltered",
-        help="Parse input: read DGE_unfiltered (every barcode) not DGE_filtered",
+        help="Parse or Visium input: read every barcode (DGE_unfiltered, "
+        "raw_feature_bc_matrix.h5), not only cells",
+    ),
+    library_id: Optional[str] = typer.Option(
+        None,
+        "--library-id",
+        help="Visium input: the key under uns['spatial'] (default: the "
+        "matrix's library id, as scanpy and squidpy use)",
+    ),
+    no_images: bool = typer.Option(
+        False,
+        "--no-images",
+        help="Visium input: leave the tissue images out of uns['spatial'] "
+        "(the scale factors stay)",
     ),
     dense: bool = typer.Option(
         False,
@@ -793,7 +808,10 @@ def convert(
     target can express them. CellBender output keeps its latent variables, as
     CellBender's own loader names them. A 10x matrix is read as scanpy's
     read_10x_h5 or read_10x_mtx (gex_only=False) reads it, keeping integer
-    counts, and written as Cell Ranger writes it. MTX folders from Cell
+    counts, and written as Cell Ranger writes it. A Space Ranger outs/
+    folder (standard Visium) keeps its spot positions, images and scale
+    factors where squidpy puts them, and a Xenium bundle its cell table,
+    centroids and Xenium's own clusters, UMAP and PCA. MTX folders from Cell
     Ranger and STARsolo, velocyto's included, and Parse split-pipe output
     are read in two streaming passes, as are text tables (.csv, .tsv, .txt,
     gzipped too), read as anndata's read_csv and read_text read them; a plain
@@ -821,6 +839,8 @@ def convert(
         adata convert counts.h5ad -o for_cellbender.h5 --layer counts
         adata convert Solo.out/Gene/filtered -o counts.h5ad
         adata convert Solo.out/Velocyto/raw -o velocyto.h5ad
+        adata convert spaceranger_run/outs -o section.h5ad
+        adata convert xenium_bundle -o cells.h5ad
         adata convert counts.h5ad -o counts_mtx --to 10x-mtx --layer counts
         adata convert cellbender_output.h5 -o cb.h5ad --raw raw_feature_bc_matrix.h5
         adata convert cellbender_output.h5 -o cells.h5ad --min-cell-probability 0.5
@@ -924,6 +944,8 @@ def convert(
                 sample=sample,
                 all_samples=all_samples,
                 unfiltered=unfiltered,
+                library_id=library_id,
+                no_images=no_images,
                 dense=dense,
                 obs_names_attr=obs_names_attr,
                 var_names_attr=var_names_attr,

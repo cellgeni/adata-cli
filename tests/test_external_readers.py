@@ -25,6 +25,8 @@ from typer.testing import CliRunner
 
 from adata.cli import app
 from tests.conftest import (
+    write_visium_outs,
+    write_xenium_bundle,
     write_10x_h5,
     write_cellbender_h5,
     write_hdf5_matrix,
@@ -1022,3 +1024,125 @@ def test_mudata_reads_what_we_export(tmp_path):
     obj.write_h5ad(tmp_path / "multi.h5ad")
     _convert(str(tmp_path / "multi.h5ad"), "-o", str(tmp_path / "multi.h5mu"))
     assert _run(_MUDATA, _COMPARE_MUDATA_EXPORT, str(tmp_path / "multi.h5ad"), str(tmp_path / "multi.h5mu")) == []
+
+
+# ---------------------------------------------------------------------------
+# spatial: Visium against squidpy's reader, Xenium against 10x's recipe
+
+_COMPARE_VISIUM = r"""
+import json, sys, warnings
+warnings.filterwarnings("ignore")
+import numpy as np, anndata as ad, squidpy as sq
+
+outs, h5ad = sys.argv[1], sys.argv[2]
+ref = sq.read.visium(outs, counts_file="filtered_feature_bc_matrix.h5", load_images=True)
+got = ad.read_h5ad(h5ad)
+problems = []
+if ref.shape != got.shape:
+    problems.append(f"shape {ref.shape} != {got.shape}")
+else:
+    if not np.array_equal(ref.X.toarray(), got.X.toarray()):
+        problems.append("X differs")
+    if list(ref.obs_names) != list(got.obs_names):
+        problems.append("obs_names differ")
+    if list(ref.var_names) != list(got.var_names):
+        problems.append("var_names differ")
+    for column in ("in_tissue", "array_row", "array_col"):
+        if ref.obs[column].dtype != got.obs[column].dtype:
+            problems.append(f"obs[{column!r}] is {got.obs[column].dtype}, not {ref.obs[column].dtype}")
+        if not np.array_equal(ref.obs[column], got.obs[column]):
+            problems.append(f"obs[{column!r}] differs")
+    a, b = ref.obsm["spatial"], got.obsm["spatial"]
+    if a.dtype != b.dtype:
+        problems.append(f"obsm['spatial'] is {b.dtype}, not {a.dtype}")
+    if not np.array_equal(a, b):
+        problems.append("obsm['spatial'] differs")
+    (lib,) = ref.uns["spatial"]
+    if lib not in got.uns["spatial"]:
+        problems.append(f"no library {lib!r}")
+    else:
+        r, g = ref.uns["spatial"][lib], got.uns["spatial"][lib]
+        for name, image in r["images"].items():
+            mine = g["images"].get(name)
+            if mine is None or mine.dtype != image.dtype or not np.array_equal(mine, image):
+                problems.append(f"image {name} differs")
+        if {k: float(v) for k, v in r["scalefactors"].items()} != {k: float(v) for k, v in g["scalefactors"].items()}:
+            problems.append("scalefactors differ")
+        for key in ("chemistry_description", "software_version"):
+            if str(r["metadata"].get(key)) != str(g["metadata"].get(key)):
+                problems.append(f"metadata[{key!r}] differs")
+print("RESULT " + json.dumps(problems))
+"""
+
+
+@pytest.mark.parametrize("version", ["sr1", "sr2", "sr3_float"])
+def test_visium_imports_as_squidpy_reads_it(tmp_path, version):
+    truth = write_visium_outs(tmp_path / "run", version=version)
+    out = tmp_path / "visium.h5ad"
+    # squidpy keeps Gene Expression only and names var by symbol.
+    _convert(
+        str(truth.outs), "-o", str(out),
+        "--feature-type", "Gene Expression", "--var-names", "gene_symbols",
+    )
+    assert _run(["squidpy"], _COMPARE_VISIUM, str(truth.outs), str(out)) == []
+
+
+# 10x's documented recipe for Xenium in scanpy: the matrix, the cell table
+# reindexed to it, the centroids as obsm["spatial"], and the analysis CSVs.
+# spatialdata-io's reader needs the boundaries and morphology images too,
+# which a fixture of this size does not carry.
+_COMPARE_XENIUM = r"""
+import json, sys, warnings
+from pathlib import Path
+warnings.filterwarnings("ignore")
+import numpy as np, pandas as pd, anndata as ad, scanpy as sc
+
+bundle, h5ad = Path(sys.argv[1]), sys.argv[2]
+ref = sc.read_10x_h5(bundle / "cell_feature_matrix.h5", gex_only=False)
+cells = pd.read_csv(bundle / "cells.csv.gz", index_col="cell_id")
+cells.index = cells.index.astype(str)
+cells = cells.reindex(ref.obs_names)
+ref.obsm["spatial"] = cells[["x_centroid", "y_centroid"]].to_numpy()
+ref.obs = cells.drop(columns=["x_centroid", "y_centroid"])
+analysis = bundle / "analysis"
+clusters = pd.read_csv(analysis / "clustering/gene_expression_graphclust/clusters.csv", index_col="Barcode")
+clusters.index = clusters.index.astype(str)
+ref.obs["graphclust"] = clusters["Cluster"].astype(str).reindex(ref.obs_names).astype("category")
+umap = pd.read_csv(analysis / "umap/gene_expression_2_components/projection.csv", index_col="Barcode")
+umap.index = umap.index.astype(str)
+ref.obsm["X_umap"] = umap.reindex(ref.obs_names).to_numpy()
+ref.strings_to_categoricals()
+
+got = ad.read_h5ad(h5ad)
+problems = []
+if ref.shape != got.shape:
+    problems.append(f"shape {ref.shape} != {got.shape}")
+else:
+    if not np.array_equal(ref.X.toarray(), got.X.toarray()):
+        problems.append("X differs")
+    if list(ref.obs_names) != list(got.obs_names):
+        problems.append("obs_names differ")
+    if list(ref.obs.columns) != list(got.obs.columns):
+        problems.append(f"obs columns {list(ref.obs.columns)} != {list(got.obs.columns)}")
+    for column in ref.obs.columns:
+        if column not in got.obs:
+            continue
+        a, b = ref.obs[column], got.obs[column]
+        if str(a.dtype) != str(b.dtype):
+            problems.append(f"obs[{column!r}] is {b.dtype}, not {a.dtype}")
+        elif a.astype(str).tolist() != b.astype(str).tolist():
+            problems.append(f"obs[{column!r}] differs")
+    for key in ("spatial", "X_umap"):
+        if not np.allclose(ref.obsm[key], got.obsm[key], equal_nan=True):
+            problems.append(f"obsm[{key!r}] differs")
+print("RESULT " + json.dumps(problems))
+"""
+
+
+@pytest.mark.parametrize("ids,shuffled", [("int", False), ("string", True)])
+def test_xenium_imports_as_10x_s_scanpy_recipe_reads_it(tmp_path, ids, shuffled):
+    truth = write_xenium_bundle(tmp_path / "xenium", ids=ids, shuffled=shuffled, missing_in_analysis=2)
+    out = tmp_path / "xenium.h5ad"
+    _convert(str(truth.bundle), "-o", str(out), "--var-names", "gene_symbols")
+    assert _run(["scanpy"], _COMPARE_XENIUM, str(truth.bundle), str(out)) == []
+

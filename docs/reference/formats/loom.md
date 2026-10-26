@@ -2,7 +2,7 @@
 title: loom and SCope
 parent: Formats
 grand_parent: Reference
-nav_order: 5
+nav_order: 7
 ---
 
 # loom and SCope looms

@@ -19,10 +19,39 @@ The conversion epic's sub-issues (#21–#30) are all done and ticked in #20.
 
 ## In progress
 
-Nothing. The documentation site is live (#76, released in 0.16.2); the
-spatial work below can resume.
+### Spatial import: standard Visium and Xenium (`feat/spatial`, for 0.17.0)
+
+Decisions:
+- Standard Visium (Space Ranger 1–4) and Xenium (XOA 1–4) first, with no new
+  dependency: both come as CSV, JSON and PNG. Visium HD, whose positions are
+  Parquet only, waits for a `spatial` extra with pyarrow.
+- Laid out as squidpy (Visium) and spatialdata-io's table (Xenium) lay
+  them out; images stay the PNGs' uint8 pixels. Xenium brings its own
+  clusters, UMAP and PCA, read from `analysis.tar.gz` as it ships.
+- A table beside the matrix is matched to its barcodes while scanned
+  (`conversion/spatial.py`), and written straight through when in the
+  matrix's order (Xenium's cells, on every real bundle checked) or through
+  `core/scatter.py` when not.
+
+Steps:
+- [x] `table.py`: headerless files, `on_index`, reusable columns
+- [x] `core/scatter.py`
+- [x] Visium: `visium.py`, flags `--library-id`, `--no-images`, `--unfiltered`
+- [x] Xenium: `xenium.py`, analysis from the folder or the archive
+- [x] Performance guards; squidpy and 10x-recipe comparisons; `import-xenium` benchmark
+- [x] Real data by hand: Visium SR 1.1 and SR 2.1, Xenium XOA 3.0 and 4.0 tiny
+- [x] Docs: two format pages, tables, guide, Troubleshooting, Developers
+- [ ] PR, review, merge; release 0.17.0
 
 ## Follow-ups noticed
+
+- Visium HD bins and Space Ranger 4's cell segmentation, behind a `spatial`
+  extra (pyarrow) for their Parquet positions.
+- Spatial bundles whose matrix is a MEX folder only (refused for now, with a
+  pointer to `--from 10x-mtx`).
+- Space Ranger's own `analysis/` (clusters, UMAP) for Visium, as Xenium's.
+- CellBender's `_write_embeddings` onto `core/scatter.py`, which generalises
+  it.
 
 - Fixed in 0.16.2 (#77): `export image` without `-o` crashed (`'NoneType'
   object has no attribute 'parent'`); it now writes PNG to stdout, as every
@@ -37,7 +66,5 @@ spatial work below can resume.
 
 ## Next candidates (#31)
 
-- Spatial: Visium / Xenium (matrix via 10x h5, coordinates to
-  `obsm["spatial"]`)
 - alevin-fry USA mode, kallisto | bustools
 - Seurat `.h5Seurat`

@@ -90,6 +90,9 @@ _RUN_ATTRS = (
     "original_gem_groups",
     "software_version",
     "version",
+    # Xenium 4's protein values are scaled by this; spatialdata-io divides.
+    "protein_scaling_factor",
+    "protein_metric",
 )
 
 
