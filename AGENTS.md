@@ -74,7 +74,8 @@ Each layer calls only the layers below it:
   - `read.py` accepts every layout from anndata 0.7 to the current one.
   - `write.py` always writes the current one.
   - `strings.py` reconciles how HDF5 and Zarr spell text.
-  - The full spec is in `docs/ELEMENTS_h5ad.md` and `docs/ELEMENTS_zarr.md`.
+  - The full spec is in `docs/reference/spec-h5ad.md` and
+    `docs/reference/spec-zarr.md`.
 - **`storage/`**: hides whether a store is h5py or zarr.
   - `open_store(path, mode, zarr_format=...)` detects the backend from the
     path and returns a `Store`.
@@ -150,13 +151,30 @@ These are easy to break without any test noticing straight away:
 - `tests/test_docs_are_accurate.py` parses every `adata …` line in the README,
   `docs/` and the `--help` examples, and checks it against the real Click tree.
   A new or renamed option has to be documented correctly in
-  `docs/COMMANDS.md`. A new command also needs a section there, an entry in the
-  table of contents and a mention in the app help.
+  `docs/reference/commands.md`. A new command also needs a section there, an
+  entry in the table of contents and a mention in the app help. The same file
+  checks that relative links name a page and an anchor that exist, and that
+  every page has `title` front matter and a `parent` that exists.
 - House style:
   - test names read as sentences
     (`test_a_failed_selection_keeps_an_existing_output`);
   - a regression test's docstring says what used to go wrong;
   - comments explain *why*.
+
+## Documentation
+
+The site (<https://cellgeni.github.io/adata-cli/>) is Just the Docs, built by
+GitHub Pages from `docs/` on `main`. `docs/developers.md` covers the same
+ground as this file, for people; keep the two in step.
+
+- Every page needs `title` and `nav_order` front matter, and `parent` (plus
+  `grand_parent` under `reference/formats/`) to appear in the sidebar.
+- Link between pages as relative `page.md`. Pages are served at `/page/`, so
+  any other relative link breaks: use an absolute URL.
+- A page that moves keeps its old URL with `redirect_from`.
+- `reference/commands.md` keeps one `## \`cmd\`` section per command. What a
+  format maps to and its own flags go on its page in `reference/formats/`.
+- To preview: `cd docs && bundle install && bundle exec jekyll serve`.
 
 ## Status
 
@@ -169,7 +187,8 @@ an item to Released when its tag is out.
 
 - Use a branch `release/X.Y.Z`.
 - Set the version in `pyproject.toml` and in the `pyadata-cli` entry of `uv.lock`.
-- Add a `## X.Y.Z` section to `CHANGELOG.md`, in its style:
+- Add a `## X.Y.Z` section to `docs/changelog.md` (the root `CHANGELOG.md`
+  only points there), in its style:
   - a summary paragraph;
   - whichever of `### Added`, `### Changed` and `### Fixed` apply (0.7.1 has
     only `Fixed`; an empty section is left out);
@@ -181,6 +200,6 @@ an item to Released when its tag is out.
   - `quay-on-tag.yml`, which pushes the Docker image to
     `quay.io/cellgeni/adata-cli`;
   - `benchmark.yml`, which reruns `benchmarks/` and commits the results to
-    `docs/BENCHMARKS.md` and `docs/benchmarks/<tag>.json`.
-- `docs/BENCHMARKS.md` is generated. To change its wording, edit
+    `docs/reference/benchmarks.md` and `docs/benchmarks/<tag>.json`.
+- `docs/reference/benchmarks.md` is generated. To change its wording, edit
   `benchmarks/page_template.md`.

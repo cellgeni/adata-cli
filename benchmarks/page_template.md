@@ -1,3 +1,11 @@
+---
+title: Benchmarks
+parent: Reference
+nav_order: 6
+redirect_from:
+  - /BENCHMARKS.html
+---
+
 # Benchmarks
 
 adata-cli measured against anndata, and against scanpy wherever scanpy has a real
@@ -59,5 +67,5 @@ uv run python -m benchmarks.report results.json
 Tiers are `smoke` (seconds), `ci` (50,000 × 20,000) and `large` (dispatch only, where
 the in-memory baseline is expected to hit the address-space ceiling).
 
-See [TESTING.md](TESTING.md#performance) for how the baselines are kept honest, and
+See [Testing](testing.md#performance) for how the baselines are kept honest, and
 how this differs from the complexity guards that gate every pull request.

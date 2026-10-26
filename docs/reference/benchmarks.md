@@ -1,3 +1,11 @@
+---
+title: Benchmarks
+parent: Reference
+nav_order: 6
+redirect_from:
+  - /BENCHMARKS.html
+---
+
 # Benchmarks
 
 adata-cli measured against anndata, and against scanpy wherever scanpy has a real
@@ -253,21 +261,21 @@ Rows marked `n/a` are operations the baseline does not offer; that is a result, 
 
 | Run | Ref | Tier | Wall time | Peak RSS | Raw |
 |---|---|---|---|---|---|
-| 2026-10-23T17:54:37Z | `0.16.1` | ci | 10.88 s | 180.9 MB | [json](benchmarks/0.16.1.json) |
-| 2026-10-23T15:09:41Z | `0.16.0` | ci | 10.94 s | 177.8 MB | [json](benchmarks/0.16.0.json) |
-| 2026-10-22T19:08:11Z | `0.15.0` | ci | 12.59 s | 177.9 MB | [json](benchmarks/0.15.0.json) |
-| 2026-10-21T16:33:57Z | `0.14.0` | ci | 10.63 s | 172.3 MB | [json](benchmarks/0.14.0.json) |
-| 2026-10-20T23:25:54Z | `0.13.0` | ci | 11.79 s | 179.3 MB | [json](benchmarks/0.13.0.json) |
-| 2026-10-20T15:49:10Z | `0.12.0` | ci | 12.61 s | 172.8 MB | [json](benchmarks/0.12.0.json) |
-| 2026-10-19T19:34:47Z | `0.11.1` | ci | 7.60 s | 174.9 MB | [json](benchmarks/0.11.1.json) |
-| 2026-10-19T17:02:30Z | `0.11.0` | ci | 12.24 s | 176.9 MB | [json](benchmarks/0.11.0.json) |
-| 2026-10-19T10:48:49Z | `0.10.0` | ci | 12.13 s | 172.9 MB | [json](benchmarks/0.10.0.json) |
-| 2026-10-16T11:55:36Z | `0.9.0` | ci | 12.28 s | 176.2 MB | [json](benchmarks/0.9.0.json) |
-| 2026-10-15T23:13:08Z | `0.8.0` | ci | 12.11 s | 172.8 MB | [json](benchmarks/0.8.0.json) |
-| 2026-10-15T14:55:32Z | `0.7.1` | ci | 15.37 s | 172.4 MB | [json](benchmarks/0.7.1.json) |
-| 2026-10-15T12:48:08Z | `0.7.0` | ci | 9.29 s | 170.3 MB | [json](benchmarks/0.7.0.json) |
-| 2026-09-24T15:41:03Z | `0.6.1` | ci | 12.26 s | 177.2 MB | [json](benchmarks/0.6.1.json) |
-| 2026-09-24T10:35:13Z | `0.6.0` | ci | 5.90 s | 176.2 MB | [json](benchmarks/0.6.0.json) |
+| 2026-10-23T17:54:37Z | `0.16.1` | ci | 10.88 s | 180.9 MB | [json](https://github.com/cellgeni/adata-cli/blob/main/docs/benchmarks/0.16.1.json) |
+| 2026-10-23T15:09:41Z | `0.16.0` | ci | 10.94 s | 177.8 MB | [json](https://github.com/cellgeni/adata-cli/blob/main/docs/benchmarks/0.16.0.json) |
+| 2026-10-22T19:08:11Z | `0.15.0` | ci | 12.59 s | 177.9 MB | [json](https://github.com/cellgeni/adata-cli/blob/main/docs/benchmarks/0.15.0.json) |
+| 2026-10-21T16:33:57Z | `0.14.0` | ci | 10.63 s | 172.3 MB | [json](https://github.com/cellgeni/adata-cli/blob/main/docs/benchmarks/0.14.0.json) |
+| 2026-10-20T23:25:54Z | `0.13.0` | ci | 11.79 s | 179.3 MB | [json](https://github.com/cellgeni/adata-cli/blob/main/docs/benchmarks/0.13.0.json) |
+| 2026-10-20T15:49:10Z | `0.12.0` | ci | 12.61 s | 172.8 MB | [json](https://github.com/cellgeni/adata-cli/blob/main/docs/benchmarks/0.12.0.json) |
+| 2026-10-19T19:34:47Z | `0.11.1` | ci | 7.60 s | 174.9 MB | [json](https://github.com/cellgeni/adata-cli/blob/main/docs/benchmarks/0.11.1.json) |
+| 2026-10-19T17:02:30Z | `0.11.0` | ci | 12.24 s | 176.9 MB | [json](https://github.com/cellgeni/adata-cli/blob/main/docs/benchmarks/0.11.0.json) |
+| 2026-10-19T10:48:49Z | `0.10.0` | ci | 12.13 s | 172.9 MB | [json](https://github.com/cellgeni/adata-cli/blob/main/docs/benchmarks/0.10.0.json) |
+| 2026-10-16T11:55:36Z | `0.9.0` | ci | 12.28 s | 176.2 MB | [json](https://github.com/cellgeni/adata-cli/blob/main/docs/benchmarks/0.9.0.json) |
+| 2026-10-15T23:13:08Z | `0.8.0` | ci | 12.11 s | 172.8 MB | [json](https://github.com/cellgeni/adata-cli/blob/main/docs/benchmarks/0.8.0.json) |
+| 2026-10-15T14:55:32Z | `0.7.1` | ci | 15.37 s | 172.4 MB | [json](https://github.com/cellgeni/adata-cli/blob/main/docs/benchmarks/0.7.1.json) |
+| 2026-10-15T12:48:08Z | `0.7.0` | ci | 9.29 s | 170.3 MB | [json](https://github.com/cellgeni/adata-cli/blob/main/docs/benchmarks/0.7.0.json) |
+| 2026-09-24T15:41:03Z | `0.6.1` | ci | 12.26 s | 177.2 MB | [json](https://github.com/cellgeni/adata-cli/blob/main/docs/benchmarks/0.6.1.json) |
+| 2026-09-24T10:35:13Z | `0.6.0` | ci | 5.90 s | 176.2 MB | [json](https://github.com/cellgeni/adata-cli/blob/main/docs/benchmarks/0.6.0.json) |
 
 ## How peak memory is measured
 
@@ -297,5 +305,5 @@ uv run python -m benchmarks.report results.json
 Tiers are `smoke` (seconds), `ci` (50,000 × 20,000) and `large` (dispatch only, where
 the in-memory baseline is expected to hit the address-space ceiling).
 
-See [TESTING.md](TESTING.md#performance) for how the baselines are kept honest, and
+See [Testing](testing.md#performance) for how the baselines are kept honest, and
 how this differs from the complexity guards that gate every pull request.

@@ -5,7 +5,7 @@ pairs. Every read that inspects an encoding and every write that stamps one
 goes through here, so the spec version the tool targets is stated in exactly
 one place.
 
-See docs/ELEMENTS_h5ad.md and docs/ELEMENTS_zarr.md for the full spec.
+See docs/reference/spec-h5ad.md and docs/reference/spec-zarr.md for the full spec.
 """
 
 from __future__ import annotations

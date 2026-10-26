@@ -9,6 +9,7 @@ shows up the moment anyone reads the page.
 
 from __future__ import annotations
 
+import json
 import sys
 
 import pytest
@@ -161,7 +162,7 @@ def test_maxrss_is_normalised_to_bytes():
 def test_publishing_keeps_the_page_prose():
     """A republish must not reduce the docs page to bare tables.
 
-    `publish` rewrites `docs/BENCHMARKS.md` in full on every tag. An earlier
+    `publish` rewrites `docs/reference/benchmarks.md` in full on every tag. An earlier
     version wrote only the rendered results, which would have thrown away
     everything explaining what the numbers mean the first time it ran.
     """
@@ -179,6 +180,44 @@ def test_publishing_keeps_the_page_prose():
     assert "Running it yourself" in page, "the trailing sections were dropped"
     assert page.count("\n# ") + page.startswith("# ") == 1, (
         "the published page must have exactly one H1"
+    )
+
+
+def test_publishing_writes_the_reference_page_the_site_serves(tmp_path):
+    """The page moved from `docs/BENCHMARKS.md` into `docs/reference/` when
+    the docs became a Just the Docs site; a publish that still wrote the old
+    path would leave the sidebar's page frozen at the last release. Its link
+    to each run's JSON must be absolute: with `permalink: pretty` the page is
+    served at `/reference/benchmarks/`, where `benchmarks/x.json` 404s.
+    """
+    from benchmarks.report import publish
+
+    payload = {
+        "ref": "9.9.9", "tier": "smoke", "tier_shape": [1, 1, 0.05],
+        "var_heavy_shape": [1, 1], "page_cache_dropped": True,
+        "memory_limit_bytes": 1, "repeats": 1, "platform": "x",
+        "python": "3", "versions": {}, "generated": "now",
+        "results": [{
+            "case": "concat-inner", "contender": "adata-cli", "status": "ok",
+            "wall_s": 1.0, "maxrss_bytes": 100_000_000,
+            "output_bytes": 1, "output_files": 1,
+        }],
+    }
+    results = tmp_path / "results.json"
+    results.write_text(json.dumps(payload))
+
+    page = publish(payload, results, tmp_path / "docs")
+
+    assert page == tmp_path / "docs" / "reference" / "benchmarks.md"
+    assert (tmp_path / "docs" / "benchmarks" / "9.9.9.json").exists()
+    text = page.read_text()
+    assert text.startswith("---\ntitle: Benchmarks\nparent: Reference\n"), (
+        "without front matter the page drops out of the sidebar"
+    )
+    assert "redirect_from:\n  - /BENCHMARKS.html" in text
+    assert (
+        "[json](https://github.com/cellgeni/adata-cli/blob/main/docs/"
+        "benchmarks/9.9.9.json)" in text
     )
 
 

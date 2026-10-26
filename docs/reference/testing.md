@@ -1,9 +1,17 @@
+---
+title: "Testing"
+parent: Reference
+nav_order: 7
+redirect_from:
+  - /TESTING.html
+---
+
 # Testing
 
 ```bash
 uv sync --extra dev
 uv run pytest                      # everything
-uv run pytest -m "not integration" # fast: no environment building, ~40s
+uv run pytest -m "not integration" # no environment building, ~2.5 min
 uv run pytest -m perf              # just the tracing complexity guards
 uv run pytest -m integration       # anndata releases, scanpy and PyTables
 ```
@@ -312,7 +320,7 @@ Note also that 202 MB is not flat in input size — obs columns are read whole, 
 dense block is `--chunk` x n_var. The benchmark exists to keep that curve visible
 rather than to assert a claim the code does not yet meet.
 
-Results are published to `docs/BENCHMARKS.md` and `docs/benchmarks/<tag>.json`
+Results are published to [Benchmarks](benchmarks.md) and `docs/benchmarks/<tag>.json`
 on every tag, and appended to the GitHub release notes if a release exists.
 Artifacts expire; the docs page is the durable series.
 

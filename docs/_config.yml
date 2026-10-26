@@ -1,11 +1,61 @@
-# GitHub Pages configuration. Plain Jekyll with a built-in theme -- no
-# generator to install, and the docs stay readable on github.com as markdown.
+# GitHub Pages configuration for the adata-cli documentation.
+# Source is set in Settings -> Pages to "Deploy from a branch": main, /docs.
+
+# Just the Docs gives a sidebar, search and callouts with no build step of our own:
+# GitHub Pages fetches the theme through jekyll-remote-theme. Pinned so a theme
+# release cannot change the site under us.
+remote_theme: just-the-docs/just-the-docs@v0.10.1
+plugins:
+  - jekyll-remote-theme
+  - jekyll-include-cache   # needed by the theme
+  - jekyll-relative-links  # links between pages are written as page.md
+  - jekyll-redirect-from   # the flat pages' old URLs (/COMMANDS.html, ...) still resolve
+
 title: adata-cli
 description: Streaming CLI for huge AnnData .h5ad and .zarr stores
-theme: jekyll-theme-cayman
-show_downloads: false
+url: https://cellgeni.github.io
+baseurl: /adata-cli
+# Pages at /page/ rather than /page.html
+permalink: pretty
 
-# Site-relative links in the markdown files keep working on github.com too.
+search_enabled: true
+heading_anchors: true
+
+aux_links:
+  "adata-cli on GitHub":
+    - "https://github.com/cellgeni/adata-cli"
+aux_links_new_tab: true
+
+back_to_top: true
+back_to_top_text: "Back to top"
+
+gh_edit_link: true
+gh_edit_link_text: "Edit this page on GitHub"
+gh_edit_repository: "https://github.com/cellgeni/adata-cli"
+gh_edit_branch: "main"
+gh_edit_source: docs
+gh_edit_view_mode: "tree"
+
+# Callouts used across the pages: {: .note }, {: .warning }, {: .important }
+callouts:
+  note:
+    color: blue
+  important:
+    title: Important
+    color: yellow
+  warning:
+    color: red
+
+# GitHub Pages would pick the theme's default layout on its own (jekyll-default-layout);
+# setting it here makes local builds match and keeps pages free of a layout line
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
+
+# Tooling, not pages. The benchmark JSONs in benchmarks/ are served as they are.
 exclude:
   - Gemfile
   - Gemfile.lock
+  - vendor

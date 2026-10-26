@@ -18,7 +18,33 @@ The conversion epic's sub-issues (#21–#30) are all done and ticked in #20.
 
 ## In progress
 
-Nothing. #20's sub-issues are all ticked; #31 stays open for the formats below.
+### Documentation site (`docs/site`)
+
+The docs restyled as cellgeni's pipeline docs (nf-cellbender,
+nf-reprocessing-public-10x): Just the Docs from `docs/` on `main`, a short
+README. The spatial (Visium/Xenium) work below waits for it.
+
+Decisions:
+- Pages moved with `git mv` in a commit of their own, so history follows them;
+  each old URL (`/COMMANDS.html` and five more) has a `redirect_from`, and a
+  custom redirect layout keeps the `#anchor`, sending the old command
+  reference's format anchors to their new pages.
+- `reference/commands.md` keeps one section per command; each `convert`
+  format has its own page under `reference/formats/`.
+- The changelog lives in `docs/changelog.md`; the root `CHANGELOG.md` points
+  there.
+- The docs test resolves links as Jekyll does under `permalink: pretty`: a
+  relative link must name a page's `.md`, and its anchor must exist. It also
+  checks the front matter the sidebar needs.
+
+Steps:
+- [x] Theme config, Gemfile, pages moved with front matter and redirects
+- [x] COMMANDS split into `reference/commands.md` and nine format pages
+- [x] Home, six guides, Troubleshooting, Developers
+- [x] Docs tests, benchmark generator (`docs/reference/benchmarks.md`), pointers
+- [x] README rewritten
+- [x] Local `github-pages` build in Docker; html-proofer clean
+- [ ] PR, review, merge; check the live site and the old URLs' redirects
 
 ## Follow-ups noticed
 

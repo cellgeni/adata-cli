@@ -89,7 +89,7 @@ jobs:
           git fetch origin main
           git checkout -B main origin/main
           uv run python -m benchmarks.report results.json --docs docs --publish
-          git add docs/BENCHMARKS.md docs/benchmarks
+          git add docs/reference/benchmarks.md docs/benchmarks
           if git diff --cached --quiet; then
             echo "nothing to publish"; exit 0
           fi

@@ -1,46 +1,49 @@
+---
+title: Home
+nav_order: 1
+permalink: /
+---
+
 # adata-cli
 
-Explore and edit huge AnnData stores (`.h5ad` and `.zarr`) from the command
-line, without loading them into memory and without a Python session.
+`adata` explores and edits AnnData stores (`.h5ad` and `.zarr`) from the
+command line, without loading them into memory and without a Python session.
+It inspects, filters, splits, concatenates, recasts and converts them, and
+moves single elements in and out as CSV, JSON, `.npy`, `.mtx` or images.
 
-`adata-cli` implements the AnnData on-disk spec directly against `h5py` and
-`zarr`. It has no dependency on `anndata`, `pandas` or `scipy`, which is what
-lets it stream stores far larger than RAM — and what makes it useful in a
-container or a pipeline step where installing the scientific stack would be
-overkill.
+It implements the AnnData on-disk spec directly against h5py and zarr, with no
+dependency on anndata, pandas or scipy. Commands stream: memory follows
+`--chunk` rather than the size of the store, so stores larger than RAM are
+fine (the [benchmarks](reference/benchmarks.md) show how closely, and where
+loading the whole file is faster). The tool is small enough to drop into a
+container or a pipeline step where the scientific stack would be overkill.
+
+```
+.h5ad / .zarr ──► view, ls ──► export (CSV, JSON, npy, mtx, image) ──► your tools
+      │                                                                    │
+      ├──► subset, split, concat, recast ──► .h5ad / .zarr                 │
+      └──► convert ◄──► 10x, MTX, loom, MuData, ...        import ◄────────┘
+```
 
 ## Install
 
 ```bash
 pip install pyadata-cli
+pip install 'pyadata-cli[pickle]'   # also read pycisTopic pickles (adds pandas, scipy)
 ```
 
 The command is `adata`. The distribution is named `pyadata-cli` because
-`adata-cli` was already taken on PyPI by an unrelated project.
+`adata-cli` was already taken on PyPI by an unrelated project. Python 3.12 or
+later.
 
-Or run it without installing anything:
+Or use the container, which has the `pickle` extra and duckdb in it:
 
 ```bash
-docker run --rm -it -v /path/to/data:/data \
-    quay.io/cellgeni/adata-cli:latest adata view /data/your_file.h5ad
+docker run --rm -v "$PWD":/data quay.io/cellgeni/adata-cli:latest \
+    adata view /data/data.h5ad
 ```
 
-## Documentation
-
-- **[Get started](GET_STARTED.md)** — a hands-on walkthrough: inspect a store,
-  export metadata, filter it, write a subset.
-- **[Command reference](COMMANDS.md)** — every command and flag.
-- **[Element spec: HDF5](ELEMENTS_h5ad.md)** — how each AnnData element is laid
-  out in `.h5ad`, and what this tool does with it.
-- **[Element spec: Zarr](ELEMENTS_zarr.md)** — the same for `.zarr`, including
-  the v2/v3 differences.
-- **[Testing](TESTING.md)** — how the suite is organised, how compatibility is
-  verified against six real anndata releases, and the complexity guards that
-  keep cost regressions out.
-- **[Benchmarks](BENCHMARKS.md)** — peak memory and wall time against anndata
-  and scanpy, remeasured and republished on every release.
-
-## At a glance
+## Quick start
 
 ```bash
 adata view data.h5ad                   # what's in it
@@ -54,39 +57,39 @@ adata concat per_sample/*.h5ad -o merged.h5ad --join outer --label sample
 adata convert data.h5ad -o data.zarr
 adata convert filtered_feature_bc_matrix.h5 -o counts.h5ad
 adata recast  data.h5ad X -o small.h5ad --dtype float32
-
-adata create new.h5ad --n-obs 5000 --n-var 2000
-adata import sparse new.h5ad X counts.mtx --inplace
 ```
 
-## Format support
+Status goes to stderr and data to stdout, so every command pipes cleanly.
 
-Every AnnData on-disk layout is readable, from anndata 0.7.x through the
-current spec; everything written is in the current spec. This is verified in
-CI against stores written by anndata 0.8, 0.9, 0.10, 0.11, 0.12 and 0.13, in
-both formats. Both backends are supported in both directions: `adata convert
-in.h5ad -o out.zarr` converts a whole store, and `subset`, `split` and
-`concat` convert as they write when the output's backend differs.
-`convert` also reads and writes 10x Genomics HDF5 matrices (Cell Ranger's
-`*_feature_bc_matrix.h5`) and 10x / STARsolo Matrix Market folders,
-velocyto's included, matching what scanpy's `read_10x_h5` and `read_10x_mtx`
-read (features named by gene id unless `--var-names gene_symbols`),
-CellBender's `remove-background` output with its latent variables, Parse
-Biosciences split-pipe runs, looms (velocyto's and SCope's included), and
-MuData `.h5mu` files, one AnnData per modality, both ways.
+## What it reads and writes
 
-| Element | Read | Write |
-|---|---|---|
-| `anndata`, `raw`, `dict` | yes | yes |
-| `dataframe` (0.2.0 and legacy 0.1.0) | yes | 0.2.0 |
-| `array` | yes | yes |
-| `csr_matrix` / `csc_matrix` | yes | yes |
-| `categorical` (incl. `ordered`, legacy layouts) | yes | yes |
-| `string-array` | yes | yes |
-| `nullable-integer` / `-boolean` / `-string-array` | yes | yes |
-| `numeric-scalar`, `string`, `null` | yes | yes |
-| `awkward-array` | shown by `view`/`ls` | no |
+- **Every AnnData on-disk layout**, from anndata 0.7 to the current spec, in
+  HDF5 and in Zarr v2 and v3; everything written is in the current spec. CI
+  checks this against stores written by anndata 0.8 to 0.13, and checks that
+  each of those releases reads what `adata` writes.
+- **Other formats, through `convert`**: 10x Genomics HDF5 and MTX folders
+  (Cell Ranger, STARsolo, velocyto), CellBender output, Parse Biosciences
+  runs, looms (velocyto's and SCope's), text tables, plain HDF5 matrices,
+  pycisTopic pickles and MuData. CI checks them against the readers people
+  use for them: scanpy, loompy, anndata, mudata.
+- **Outputs that keep the source's choices**: Zarr version, index dtypes,
+  chunking and compression carry over unless a flag changes them.
+- **Outputs that appear whole or not at all**: every store is written beside
+  its destination and moved into place only when complete.
 
-## Source
+## Where next
 
-[github.com/cellgeni/adata-cli](https://github.com/cellgeni/adata-cli)
+| Page | Read it when |
+|---|---|
+| [Getting started](getting-started.md) | You are using `adata` for the first time |
+| [Inspect and export](guides/inspect-export.md) | You want to see what a store holds, or get a table or matrix out of it |
+| [Subset and split](guides/subset-split.md) | You want some of the cells or genes, or one store per sample |
+| [Concatenate](guides/concat.md) | You have several stores to join into one |
+| [Change dtype, layout or density](guides/recast.md) | A store is larger than it needs to be, or a tool wants CSC |
+| [Convert formats](guides/convert.md) | Your data is in, or needs to be in, another format |
+| [Pipelines and containers](guides/pipelines.md) | You are running `adata` in Nextflow, Docker or Singularity |
+| [Commands](reference/commands.md) | You need every flag of a command |
+| [Formats](reference/formats/index.md) | You need to know what each format maps to |
+| [Troubleshooting](troubleshooting.md) | A command stopped with an error |
+| [Developers](developers.md) | You are changing the code |
+| [Changelog](changelog.md) | You want to know what changed between releases |

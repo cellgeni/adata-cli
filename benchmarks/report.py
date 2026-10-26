@@ -3,7 +3,7 @@
 Two sinks, and the docs page is the authoritative one: artifacts expire, and
 a single absolute number with nothing to compare it to is close to
 uninterpretable. `docs/benchmarks/<ref>.json` keeps the series, and
-`docs/BENCHMARKS.md` renders the latest run plus a history table. Both are in
+`docs/reference/benchmarks.md` renders the latest run plus a history table. Both are in
 git and both are already served by GitHub Pages, so no extra machinery.
 
     uv run python -m benchmarks.report results.json
@@ -20,8 +20,9 @@ from typing import Dict, List, Optional
 
 from benchmarks.cases import by_name
 
-#: Links out of `docs/` cannot be relative: GitHub Pages serves that
-#: directory as the site root, so `../` and bare directory paths 404.
+#: Links to anything but another page cannot be relative: GitHub Pages serves
+#: `docs/` as the site root, so `../` 404s, and with `permalink: pretty` the
+#: page itself lives at `/reference/benchmarks/`, one level below its file.
 REPO = "https://github.com/cellgeni/adata-cli"
 
 
@@ -215,7 +216,8 @@ def history_table(docs: Path) -> str:
         lines.append(
             f"| {generated} | `{ref}` | {tier} | "
             f"{f'{wall:.2f} s' if wall else '-'} | "
-            f"{_bytes(rss) if rss else '-'} | [json](benchmarks/{filename}) |"
+            f"{_bytes(rss) if rss else '-'} | "
+            f"[json]({REPO}/blob/main/docs/benchmarks/{filename}) |"
         )
     return "\n".join(lines) + "\n"
 
@@ -254,7 +256,8 @@ def publish(payload: Dict, results: Path, docs: Path) -> Path:
     shutil.copyfile(results, store / f"{ref}.json")
 
     previous = _previous(store, skip=f"{ref}.json")
-    page = docs / "BENCHMARKS.md"
+    page = docs / "reference" / "benchmarks.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
     page.write_text(
         build_page(render(payload, previous) + "\n" + history_table(docs))
     )
@@ -281,7 +284,7 @@ def main() -> int:  # pragma: no cover - CLI entry
     parser.add_argument(
         "--publish",
         action="store_true",
-        help="write docs/benchmarks/<ref>.json and rewrite docs/BENCHMARKS.md",
+        help="write docs/benchmarks/<ref>.json and rewrite docs/reference/benchmarks.md",
     )
     parser.add_argument("--out", type=Path, help="also write the markdown here")
     args = parser.parse_args()
