@@ -1114,6 +1114,28 @@ def _pycistopic_classes() -> Dict[str, type]:
     return classes
 
 
+def _as_pycistopic_writes(build):
+    """Build a pickle's frames as pycisTopic's pandas 1.5 did: strings as
+    object columns. pandas 3 with pyarrow installed (the `spatial` extra)
+    makes them ArrowStringArray, which no real pycisTopic pickle holds and
+    the importer's allowlist refuses."""
+    import functools
+
+    @functools.wraps(build)
+    def wrapped(*args, **kwargs):
+        import pandas as pd
+
+        try:
+            context = pd.option_context("future.infer_string", False)
+        except (KeyError, pd.errors.OptionError):  # pandas without the option
+            return build(*args, **kwargs)
+        with context:
+            return build(*args, **kwargs)
+
+    return wrapped
+
+
+@_as_pycistopic_writes
 def write_cistopic_pickle(
     path: Path,
     *,
@@ -1204,6 +1226,7 @@ def write_cistopic_pickle(
     return CistopicTruth(path, obj)
 
 
+@_as_pycistopic_writes
 def write_imputed_pickle(path: Path, *, n_cells: int = 15, n_features: int = 8, seed: int = 0) -> CistopicTruth:
     """A CistopicImputedFeatures: a dense features x cells `mtx`."""
     import pickle

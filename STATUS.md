@@ -20,13 +20,29 @@ The conversion epic's sub-issues (#21–#30) are all done and ticked in #20.
 
 ## In progress
 
-Nothing. Spatial (standard Visium and Xenium) is out in 0.17.0; Visium HD
-is first among the follow-ups below.
+### Visium HD (`feat/visium-hd`, for 0.18.0)
+
+Decisions:
+- One bin size per output, `--bin-size` (8 µm by default, as 10x
+  recommends); a bin folder given directly reads as it is.
+- pyarrow comes with a new `spatial` extra, in the image too, and is
+  imported only by `formats/parquet.py`.
+- The Parquet positions are read as a buffered stream, a set of columns per
+  pass; the join holds barcodes as bytes; images are written in strips as
+  they are read. 2 µm on 10x's tiny sample: 3.5 s, 470 MB without images.
+
+Steps:
+- [x] `formats/parquet.py`, HD in `visium.py`, `--bin-size`
+- [x] Tests: HD fixture, flags and refusals, the missing extra, a performance
+  guard, a scanpy and pandas comparison
+- [x] Real data: 10x's SR 4.0.1 tiny HD sample at 2, 8 and 16 µm
+- [x] Docs
+- [ ] PR, review, merge; release 0.18.0
 
 ## Follow-ups noticed
 
-- Visium HD bins and Space Ranger 4's cell segmentation, behind a `spatial`
-  extra (pyarrow) for their Parquet positions.
+- Space Ranger 4's cell segmentation (`segmented_outputs/`): cells as
+  GeoJSON polygons, mapped to bins by `barcode_mappings.parquet`.
 - Spatial bundles whose matrix is a MEX folder only (refused for now, with a
   pointer to `--from 10x-mtx`).
 - Space Ranger's own `analysis/` (clusters, UMAP) for Visium, as Xenium's.

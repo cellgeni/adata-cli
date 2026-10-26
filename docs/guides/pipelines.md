@@ -13,7 +13,7 @@ nav_order: 6
 ## The container image
 
 Every release is published as `quay.io/cellgeni/adata-cli:<version>`, and the
-latest as `:latest`. The image has the `pickle` extra and
+latest as `:latest`. The image has the `pickle` and `spatial` extras and
 [duckdb](https://duckdb.org) in it, and sets no entrypoint, as Nextflow
 needs, so name the command:
 

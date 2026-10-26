@@ -19,9 +19,10 @@ uv run adata --help
 uv run pytest -m "not integration"     # the unit suite CI gates on, a few minutes
 ```
 
-The tool itself depends on h5py, zarr, numpy, Pillow, Typer and Rich.
-anndata, pandas and scipy come with the `dev` extra, as the reference the
-tests check against; scanpy, loompy, mudata and older anndata releases are
+The tool itself depends on h5py, zarr, numpy, Pillow, Typer and Rich; the
+`pickle` extra adds pandas and scipy, and the `spatial` extra pyarrow.
+anndata, pandas, scipy and pyarrow come with the `dev` extra, as the
+reference the tests check against; scanpy, loompy, mudata and older anndata releases are
 installed by the `integration` tests in environments of their own.
 
 ## Repository layout

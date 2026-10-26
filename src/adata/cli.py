@@ -816,8 +816,9 @@ def convert(
     CellBender's own loader names them. A 10x matrix is read as scanpy's
     read_10x_h5 or read_10x_mtx (gex_only=False) reads it, keeping integer
     counts, and written as Cell Ranger writes it. A Space Ranger outs/
-    folder (standard Visium) keeps its spot positions, images and scale
-    factors where squidpy puts them, and a Xenium bundle its cell table,
+    folder keeps its spot positions, images and scale factors where squidpy
+    puts them; a Visium HD one is read at the bin size --bin-size names
+    (needs pyadata-cli[spatial]); and a Xenium bundle its cell table,
     centroids and Xenium's own clusters, UMAP and PCA. MTX folders from Cell
     Ranger and STARsolo, velocyto's included, and Parse split-pipe output
     are read in two streaming passes, as are text tables (.csv, .tsv, .txt,
@@ -847,6 +848,7 @@ def convert(
         adata convert Solo.out/Gene/filtered -o counts.h5ad
         adata convert Solo.out/Velocyto/raw -o velocyto.h5ad
         adata convert spaceranger_run/outs -o section.h5ad
+        adata convert visium_hd_run/outs -o bins.h5ad --bin-size 8
         adata convert xenium_bundle -o cells.h5ad
         adata convert counts.h5ad -o counts_mtx --to 10x-mtx --layer counts
         adata convert cellbender_output.h5 -o cb.h5ad --raw raw_feature_bc_matrix.h5

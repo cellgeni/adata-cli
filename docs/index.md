@@ -30,13 +30,14 @@ container or a pipeline step where the scientific stack would be overkill.
 ```bash
 pip install pyadata-cli
 pip install 'pyadata-cli[pickle]'   # also read pycisTopic pickles (adds pandas, scipy)
+pip install 'pyadata-cli[spatial]'  # also read Visium HD (adds pyarrow)
 ```
 
 The command is `adata`. The distribution is named `pyadata-cli` because
 `adata-cli` was already taken on PyPI by an unrelated project. Python 3.12 or
 later.
 
-Or use the container, which has the `pickle` extra and duckdb in it:
+Or use the container, which has both extras and duckdb in it:
 
 ```bash
 docker run --rm -v "$PWD":/data quay.io/cellgeni/adata-cli:latest \

@@ -7,8 +7,9 @@ nav_order: 4
 
 # Visium (Space Ranger)
 
-A Space Ranger output folder for standard Visium (55 µm spots), from Space
-Ranger 1 to 4: the counts, where each spot sits on the slide, the tissue
+A Space Ranger output folder, for standard Visium (55 µm spots, Space Ranger
+1 to 4) and for [Visium HD](#visium-hd) (2, 8 and 16 µm bins, Space Ranger 3
+and 4): the counts, where each spot or bin sits on the slide, the tissue
 images and the scale factors between them. The result is laid out as
 `squidpy.read.visium` lays it out, so scanpy's and squidpy's spatial plots
 work on it, and CI checks it against squidpy.
@@ -67,7 +68,42 @@ longest side.
 Refused, with the reason:
 
 - output of `spaceranger aggr`, whose matrix holds several libraries;
-- Visium HD (`binned_outputs/`), whose positions are Parquet and are not
-  read yet. Each bin's `filtered_feature_bc_matrix.h5` converts as a
-  [10x HDF5 file](10x-h5.md) meanwhile;
 - a folder with the matrix as Matrix Market only, with no `.h5`.
+
+## Visium HD
+
+Space Ranger 3 and 4 write a Visium HD run's counts at three bin sizes, each
+in its own folder under `binned_outputs/` (`square_002um`, `square_008um`,
+`square_016um`), laid out as a standard Visium `outs/` but with the
+positions as `spatial/tissue_positions.parquet`. Give the `outs/` folder and
+`--bin-size` picks the bins, 8 µm by default as 10x recommends for
+analysis; or give a bin folder itself.
+
+```bash
+pip install 'pyadata-cli[spatial]'    # pyarrow, which reads the Parquet positions
+
+adata convert outs -o bins_8um.h5ad
+adata convert outs -o bins_2um.h5ad --bin-size 2
+adata convert outs/binned_outputs/square_016um -o bins_16um.h5ad
+```
+
+| Flag | Meaning |
+|---|---|
+| `--bin-size` | The bins to read, in µm (default 8; refused for standard Visium) |
+
+The result is laid out as above: `in_tissue`, `array_row` and `array_col` in
+obs, `obsm["spatial"]` in full-resolution pixels (float64, as Space Ranger
+records them), and the bin folder's own images and scale factors, which
+carry `bin_size_um` and `microns_per_pixel`, in `uns["spatial"]`.
+
+The positions list every bin on the slide, about 11 million at 2 µm, where
+the filtered matrix holds the bins under tissue. They are read twice, a
+buffered stream of only the columns needed: the barcodes, matched to the
+matrix's as they come, then the numbers, written in the matrix's order. On
+10x's Visium HD tiny sample, the 2 µm bins (330,035 in the matrix) convert in
+3.5 seconds with a 470 MB peak, 610 MB with the 100 MB hires image, where
+pandas alone takes 1.1 GB to read the positions. `--no-images` leaves the
+images out.
+
+The cell segmentation Space Ranger 4 adds (`segmented_outputs/`) is not read
+yet; its matrix converts as a [10x HDF5 file](10x-h5.md).

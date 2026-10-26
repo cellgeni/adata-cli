@@ -21,8 +21,9 @@ adata convert filtered_feature_bc_matrix.h5 -o counts.h5ad
 ```
 
 The command is `adata`; the distribution is `pyadata-cli`, because `adata-cli` was
-taken on PyPI. `pip install 'pyadata-cli[pickle]'` adds pycisTopic pickles. The
-container image is `quay.io/cellgeni/adata-cli`:
+taken on PyPI. `pip install 'pyadata-cli[pickle]'` adds pycisTopic pickles, and
+`'pyadata-cli[spatial]'` Visium HD. The container image, with both, is
+`quay.io/cellgeni/adata-cli`:
 
 ```bash
 docker run --rm -v "$PWD":/data quay.io/cellgeni/adata-cli:latest adata view /data/data.h5ad
