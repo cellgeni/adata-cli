@@ -8,6 +8,34 @@ nav_order: 7
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
+## 0.16.2
+
+`export image` writes to stdout without `--output`, as every other export
+does, and the documentation is a site with a sidebar and search, guides
+and a troubleshooting page.
+
+### Changed
+
+- **The documentation is a Just the Docs site**
+  ([#76](https://github.com/cellgeni/adata-cli/pull/76)), laid out as
+  cellgeni's pipeline docs: Home, Getting started, six guides (inspect and
+  export, subset and split, concatenate, recast, convert formats,
+  pipelines and containers), Reference, Troubleshooting, Developers and
+  this changelog, at <https://cellgeni.github.io/adata-cli/>.
+  - The command reference keeps one section per command; each format
+    `convert` reads or writes has a page of its own.
+  - Troubleshooting quotes the tool's own error messages, each with its fix.
+  - Old URLs (`/COMMANDS.html` and five more) redirect, `#anchor` included.
+  - The changelog moved to `docs/changelog.md`, and the README is half
+    its length.
+
+### Fixed
+
+- **`export image` without `--output` writes PNG to stdout**
+  ([#77](https://github.com/cellgeni/adata-cli/pull/77)). It crashed with
+  `'NoneType' object has no attribute 'parent'`, where every other export
+  writes to stdout. With `-o`, the format still follows the extension.
+
 ## 0.16.1
 
 `subset`, `split` and the MuData export now narrow categorical columns as
