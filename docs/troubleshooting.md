@@ -143,7 +143,14 @@ These are refused before anything is written too.
 The positions and the matrix come from different runs, or the positions
 were edited. Every spot of the matrix needs a position; spots in the
 positions but not the matrix are fine. A Xenium cell missing from
-`cells.csv.gz` is refused the same way.
+`cells.csv.gz` is refused the same way, and so is a table (positions, cells
+or an analysis table) with a row for none of the matrix's barcodes.
+
+### `tissue_positions.csv: pxl_col_in_fullres holds values that are not numbers.`
+
+A coordinate, centroid or projection column holds text. Missing values are
+fine (they become NaN); a word is not. The file has been edited, or is not
+what its name says.
 
 ### `This is Visium HD output, which is not read yet: its positions are Parquet.`
 

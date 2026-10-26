@@ -22,14 +22,15 @@ adata convert xenium_bundle -o region1.h5ad --feature-type "Gene Expression"
 | `cell_feature_matrix.h5` | `X`, var, as a [10x HDF5 file](10x-h5.md) is read: Gene Expression and the control probes and codewords, each a feature type |
 | `cells.csv.gz`: `cell_id` | the obs names (the matrix's barcodes) |
 | `cells.csv.gz`: `x_centroid`, `y_centroid` | `obsm["spatial"]`, `[x, y]` in microns |
-| `cells.csv.gz`: every other column (`transcript_counts`, `cell_area`, `nucleus_area`, `segmentation_method`, ...) | obs columns, typed as pandas reads them, text as a categorical |
+| `cells.csv.gz`: every other column (`transcript_counts`, `cell_area`, `nucleus_area`, `segmentation_method`, ...) | obs columns, typed as pandas reads them; text as a categorical when it repeats a value, as anndata writes it |
 | `analysis/clustering/gene_expression_graphclust/clusters.csv` | `obs["graphclust"]`, a categorical |
 | `analysis/umap/gene_expression_2_components/projection.csv` | `obsm["X_umap"]` |
 | `analysis/pca/gene_expression_10_components/projection.csv` | `obsm["X_pca"]` |
 | the matrix's run metadata | `uns["cellranger"]` |
 
-Xenium ships `analysis/` packed as `analysis.tar.gz`; the three tables
-above are read straight from it when it has not been unpacked. A cell an
+Xenium ships `analysis/` packed as `analysis.tar.gz`. When it has not been
+unpacked, the three tables above are copied out of it, by name, into a
+temporary folder beside the output, removed when the conversion ends. A cell an
 analysis table lacks is left empty (no cluster, NaN), with a warning
 giving the count.
 

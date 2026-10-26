@@ -41,7 +41,7 @@ from rich.console import Console
 from adata.conversion import tenx
 from adata.conversion.base import ConversionPlan, Converter, Options
 from adata.conversion.features import STRING_STEP, Target, describe_import, write_obs_index, write_var
-from adata.conversion.spatial import BarcodeJoin, Join, Sink, write_rows
+from adata.conversion.spatial import BarcodeJoin, Join, Sink, numbers, require_numeric, write_rows
 from adata.core.subset import fan_out_sparse_matrix
 from adata.elements import spec
 from adata.elements.read import decode_str_array
@@ -95,6 +95,11 @@ class _Plan:
 
 
 def _bundle(source: Path) -> Path:
+    if source.is_file() and source.name != "cell_feature_matrix.h5":
+        raise ValueError(
+            f"--from xenium reads a bundle: give its folder, or its "
+            f"cell_feature_matrix.h5, not {source.name}."
+        )
     bundle = source.parent if source.is_file() else source
     if not (bundle / "cell_feature_matrix.h5").is_file():
         if (bundle / "cell_feature_matrix").is_dir():
@@ -107,13 +112,15 @@ def _bundle(source: Path) -> Path:
     return bundle
 
 
-def _unpack_analysis(archive: Path) -> tempfile.TemporaryDirectory:
+def _unpack_analysis(archive: Path, beside: Path) -> tempfile.TemporaryDirectory:
     """The analysis tables this reads, out of Xenium's analysis.tar.gz.
 
     Only those members, each copied to a path built here rather than the
-    one the archive names, so the archive cannot write anywhere else.
+    one the archive names, so the archive cannot write anywhere else. Into
+    a folder beside the output rather than the system's temporary one,
+    which on a cluster node is often too small for a large run's PCA.
     """
-    holder = tempfile.TemporaryDirectory(prefix="adata-xenium-")
+    holder = tempfile.TemporaryDirectory(prefix=".adata-xenium-", dir=beside)
     wanted = {str(Path("analysis") / p): p for p in (_CLUSTERS, *_PROJECTIONS.values())}
     with tarfile.open(archive, "r:*") as tar:
         for member in tar:
@@ -156,9 +163,11 @@ class XeniumImport(Converter):
 
         analysis = bundle / "analysis"
         unpacked = None
+        packed_but_empty = False
         if not analysis.is_dir() and (bundle / "analysis.tar.gz").is_file():
-            unpacked = _unpack_analysis(bundle / "analysis.tar.gz")
+            unpacked = _unpack_analysis(bundle / "analysis.tar.gz", Path(output).resolve().parent)
             analysis = Path(unpacked.name)
+            packed_but_empty = not any(analysis.rglob("*.csv"))
         warnings: List[str] = []
         with h5py.File(matrix_path, "r") as handle:
             if not tenx.sniff(matrix_path):
@@ -175,9 +184,11 @@ class XeniumImport(Converter):
                     if (analysis / path).is_file():
                         projections[key] = _scan(analysis / path, "Barcode", barcodes)
 
-        missing = [c for c in _CENTROIDS if c not in cells.scan.header]
-        if missing:
-            raise ValueError(f"{cell_file.name} has no {', '.join(missing)} column.")
+        require_numeric(cells.scan, _CENTROIDS)
+        if clusters is not None and "Cluster" not in clusters.scan.header:
+            raise ValueError(f"{_CLUSTERS.name} in analysis has no Cluster column.")
+        for table in projections.values():
+            require_numeric(table.scan, [c.name for c in table.scan.columns])
         cells.join.check(cell_file.name)
         if cells.join.n_extra:
             warnings.append(
@@ -196,7 +207,12 @@ class XeniumImport(Converter):
                     f"{table.join.n_missing:,} cells have no {label} in analysis/; "
                     "they are left empty."
                 )
-        if not analysis.is_dir():
+        if packed_but_empty:
+            warnings.append(
+                "analysis.tar.gz holds none of the clustering, UMAP or PCA tables "
+                "this reads (analysis/clustering/gene_expression_graphclust, ...)."
+            )
+        elif not analysis.is_dir():
             warnings.append("No analysis/ or analysis.tar.gz: no clusters, UMAP or PCA to bring in.")
 
         described = describe_import(matrix.n_barcodes, matrix.n_features, matrix.feature_types, targets)
@@ -284,12 +300,7 @@ def _write_cells(root: Any, obs: Any, table: _Table) -> List[str]:
         )
         for name, dest in columns.items()
     ]
-    sinks.append(Sink(
-        spatial,
-        lambda block: np.stack(
-            [np.asarray(block[c], dtype=np.float64) for c in _CENTROIDS], axis=1
-        ),
-    ))
+    sinks.append(Sink(spatial, lambda block: numbers(scan, _CENTROIDS, block)))
     write_rows(scan, join, sinks, root)
 
     if join.n_extra:
@@ -313,9 +324,7 @@ def _used_codes(codes: Any, n_categories: int, n: int) -> np.ndarray:
 def _write_clusters(root: Any, obs: Any, table: _Table) -> None:
     """Xenium's graph-based clusters, `obs["graphclust"]`, a categorical."""
     scan, join = table.scan, table.join
-    column = next((c for c in scan.columns if c.name == "Cluster"), None)
-    if column is None:
-        raise ValueError(f"{scan.path.name} has no Cluster column.")
+    column = next(c for c in scan.columns if c.name == "Cluster")
     categories = natural_sorted(column.seen or set())
     lookup = {c: i for i, c in enumerate(categories)}
     codes = create_categorical(obs, "graphclust", categories, join.n_out)
@@ -324,6 +333,10 @@ def _write_clusters(root: Any, obs: Any, table: _Table) -> None:
         [Sink(codes, lambda block: np.array([lookup.get(v, -1) for v in block["Cluster"]], dtype=np.int64), -1)],
         root,
     )
+    if join.n_extra:
+        used = _used_codes(codes, len(categories), join.n_out)
+        if not used.all():
+            drop_unused(obs, "graphclust", used, join.n_out, block_rows=STRING_STEP)
 
 
 def _write_projection(root: Any, key: str, table: _Table) -> None:
@@ -334,6 +347,6 @@ def _write_projection(root: Any, key: str, table: _Table) -> None:
     spec.set_encoding(out, spec.ARRAY)
     write_rows(
         scan, join,
-        [Sink(out, lambda block: np.stack([np.asarray(block[c], dtype=np.float64) for c in names], axis=1), np.nan)],
+        [Sink(out, lambda block: numbers(scan, names, block), np.nan)],
         root,
     )

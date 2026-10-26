@@ -18,7 +18,7 @@ import numpy as np
 from adata.conversion.features import STRING_STEP
 from adata.core.scatter import RowScatter
 from adata.elements.read import decode_str_array
-from adata.formats.table import TableScan, iter_table_blocks
+from adata.formats.table import TableScan, column_values, iter_table_blocks
 
 
 @dataclass
@@ -43,6 +43,11 @@ class Join:
             raise ValueError(
                 f"{what} has more than one row for {self.n_repeated:,} of the "
                 "matrix's barcodes."
+            )
+        if self.n_out and self.n_missing == self.n_out:
+            raise ValueError(
+                f"{what} has a row for none of the matrix's {self.n_out:,} barcodes; "
+                "it must come from the same run as the matrix."
             )
         if self.n_missing and not allow_missing:
             raise ValueError(
@@ -148,6 +153,29 @@ def write_rows(scan: TableScan, join: Join, sinks: Sequence[Sink], scratch_paren
         for _, block in iter_table_blocks(scan):
             for column, sink in zip(columns, sinks):
                 column.add(sink.values(block))
+
+
+def require_numeric(scan: TableScan, names: Sequence[str]) -> None:
+    """Refuse, at plan time, a coordinate or projection column that is not
+    all numbers (missing values are allowed, and become NaN)."""
+    kinds = {c.name: scan.dtype_of(c) for c in scan.columns}
+    absent = [n for n in names if n not in kinds]
+    if absent:
+        raise ValueError(f"{scan.path.name} has no {', '.join(absent)} column.")
+    bad = [n for n in names if kinds[n] not in ("int64", "float64")]
+    if bad:
+        raise ValueError(
+            f"{scan.path.name}: {', '.join(bad)} {'holds' if len(bad) == 1 else 'hold'} "
+            "values that are not numbers."
+        )
+
+
+def numbers(scan: TableScan, names: Sequence[str], block: Dict[str, List[str]], dtype: Any = np.float64) -> np.ndarray:
+    """A block's values of numeric columns, side by side, NaN where missing."""
+    by_name = {c.name: c for c in scan.columns}
+    return np.stack(
+        [column_values(scan, by_name[n], block[n], {}).astype(dtype) for n in names], axis=1
+    )
 
 
 def read_image(path: Path) -> np.ndarray:

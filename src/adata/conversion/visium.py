@@ -38,7 +38,7 @@ from rich.console import Console
 from adata.conversion import tenx
 from adata.conversion.base import ConversionPlan, Converter, Options
 from adata.conversion.features import STRING_STEP, Target, describe_import, write_obs_index, write_var
-from adata.conversion.spatial import BarcodeJoin, Join, Sink, read_image, write_rows
+from adata.conversion.spatial import BarcodeJoin, Join, Sink, numbers, read_image, require_numeric, write_rows
 from adata.core.subset import fan_out_sparse_matrix
 from adata.elements.read import decode_str_array
 from adata.elements.write import (
@@ -164,12 +164,17 @@ def _bundle(source: Path, options: Options) -> tuple:
 
 def _has_header(path: Path) -> bool:
     with open_binary(path) as fh:
-        first = fh.readline().decode("utf-8", "replace")
+        first = fh.readline().decode("utf-8-sig", "replace")
     return first.split(",", 1)[0].strip() == "barcode"
 
 
 def _library_id(attrs: Dict[str, Any], outs: Path, options: Options) -> str:
     if options.library_id is not None:
+        if not options.library_id or "/" in options.library_id:
+            raise ValueError(
+                f"--library-id {options.library_id!r} cannot be a key of uns: it "
+                "must be non-empty, with no '/'."
+            )
         return options.library_id
     ids = [
         v.decode("utf-8", "replace") if isinstance(v, bytes) else str(v)
@@ -223,9 +228,7 @@ class VisiumImport(Converter):
             )
             filtered_barcodes = "filtered_barcodes" in group
             join = joiner.finish()
-        missing = [c for c in POSITION_COLUMNS[1:] if c not in positions.header]
-        if missing:
-            raise ValueError(f"{position_file.name} has no {', '.join(missing)} column.")
+        require_numeric(positions, POSITION_COLUMNS[1:])
         join.check(f"spatial/{position_file.name}")
 
         scalefactors = json.loads(scalefactor_file.read_text())
@@ -321,12 +324,7 @@ def _write_obs(root: Any, group: h5py.Group, detail: _Plan) -> None:
         )
         for name, dest in columns.items()
     ]
-    sinks.append(Sink(
-        spatial,
-        lambda block: np.stack(
-            [column_values(scan, by_name[p], block[p], {}) for p in pixels], axis=1
-        ).astype(dtype),
-    ))
+    sinks.append(Sink(spatial, lambda block: numbers(scan, pixels, block, dtype)))
     write_rows(scan, detail.join, sinks, root)
 
     order = list(columns)

@@ -112,9 +112,13 @@ def _rows(
 ) -> Iterator[Tuple[int, List[List[str]]]]:
     """Blocks of parsed rows, each with the file line number of its first."""
     line = 1
+    first = True
     with open_binary(path) as fh:
         for block in iter_line_blocks(fh, block_bytes):
-            reader = csv.reader(io.StringIO(block.decode("utf-8")), delimiter=delimiter, strict=True)
+            # A byte order mark, as Excel saves CSV, is not part of the first field.
+            text = block.decode("utf-8-sig" if first else "utf-8")
+            first = False
+            reader = csv.reader(io.StringIO(text), delimiter=delimiter, strict=True)
             rows: List[List[str]] = []
             start = line
             try:

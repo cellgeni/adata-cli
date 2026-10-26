@@ -59,3 +59,16 @@ def test_a_column_fed_fewer_rows_than_planned_is_refused(new_store):
         _feed(scatter.column(dest, np.nan), np.arange(2.0), 1)
         with pytest.raises(ValueError, match="2 source rows were given, where 3"):
             scatter.finish()
+
+
+def test_a_layout_that_keeps_no_row_writes_only_the_fill(new_store):
+    """HDF5 refused the scratch's chunk shape, larger than its empty data,
+    when no source row was kept: an analysis table matching no cell, or an
+    empty matrix beside a table, crashed the write on h5ad alone."""
+    path, opener = new_store()
+    with opener("a") as root:
+        dest = create_dataset(root["uns"], "a", shape=(4,), dtype=np.float64)
+        with RowScatter(np.full(3, -1), 4, root) as scatter:
+            _feed(scatter.column(dest), np.arange(3.0), 2)
+    with opener("r") as root:
+        assert np.isnan(np.asarray(root["uns"]["a"][...])).all()

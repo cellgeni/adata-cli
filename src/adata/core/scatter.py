@@ -88,9 +88,11 @@ class _Column:
         self.dest = dest
         self.fill = _default_fill(dest.dtype) if fill is None else fill
         shape = (layout.n_kept,) + tuple(dest.shape[1:])
+        # HDF5 refuses a chunk larger than the data, so an empty scratch --
+        # no source row kept -- has none.
+        chunks = {"chunks": (min(layout.n_kept, layout.row_step),) + shape[1:]} if layout.n_kept else {}
         self.scratch = create_dataset(
-            layout._scratch, f"c{number}", shape=shape, dtype=dest.dtype,
-            chunks=(min(max(layout.n_kept, 1), layout.row_step),) + shape[1:],
+            layout._scratch, f"c{number}", shape=shape, dtype=dest.dtype, **chunks
         )
         self.cursor = layout.starts[:-1].copy()
         self.done = 0

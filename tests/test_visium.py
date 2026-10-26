@@ -232,3 +232,35 @@ def test_unfiltered_with_a_matrix_given_is_refused(tmp_path):
         "--from", "visium", "--unfiltered",
     )
     assert "is a matrix already" in message
+
+
+def test_a_positions_file_saved_with_a_byte_order_mark_keeps_its_header(tmp_path):
+    """Excel's CSV starts with a BOM, which made the first field
+    '﻿barcode': the header was taken for a data row, and the write
+    failed on 'could not convert string to float'."""
+    truth = write_visium_outs(tmp_path / "run")
+    positions = truth.outs / "spatial" / "tissue_positions.csv"
+    positions.write_bytes(b"\xef\xbb\xbf" + positions.read_bytes())
+    _ok(truth.outs, "-o", tmp_path / "out.h5ad")
+    np.testing.assert_array_equal(_read(tmp_path / "out.h5ad").obsm["spatial"], truth.spatial)
+
+
+def test_a_position_that_is_not_a_number_is_refused_before_writing(tmp_path):
+    """It used to pass the plan and fail in the write, after staging began."""
+    truth = write_visium_outs(tmp_path / "run")
+    positions = truth.outs / "spatial" / "tissue_positions.csv"
+    lines = positions.read_text().splitlines()
+    fields = lines[1].split(",")
+    fields[5] = "left"
+    positions.write_text("\n".join([lines[0], ",".join(fields), *lines[2:]]) + "\n")
+    message = _refused(truth.outs, "-o", tmp_path / "out.h5ad")
+    assert "pxl_col_in_fullres holds values that are not numbers" in message
+    assert not list(tmp_path.glob("out*"))
+
+
+@pytest.mark.parametrize("name", ["", "a/b"])
+def test_a_library_id_that_cannot_be_a_key_is_refused(tmp_path, name):
+    """An empty one stopped with a raw h5py error; one with '/' silently
+    nested as uns['spatial']['a']['b']."""
+    truth = write_visium_outs(tmp_path / "run")
+    assert "cannot be a key of uns" in _refused(truth.outs, "-o", tmp_path / "out.h5ad", "--library-id", name)

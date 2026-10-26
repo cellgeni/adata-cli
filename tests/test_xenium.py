@@ -217,3 +217,70 @@ def test_a_table_in_the_matrix_s_order_is_written_straight_through(tmp_path, shu
     truth = write_xenium_bundle(tmp_path / "xenium", shuffled=shuffled)
     plan = XeniumImport().plan(truth.bundle, tmp_path / "out.h5ad", "xenium", "h5ad", Options())
     assert (plan.detail.cells.join.target is None) is not shuffled
+
+
+def _rewrite(path: Path, edit) -> None:
+    path.write_text(edit(path.read_text()))
+
+
+def test_clusters_matching_no_cell_are_refused_as_another_run_s(tmp_path):
+    """Planned as 'every cell left empty', then crashed the h5ad write."""
+    truth = write_xenium_bundle(tmp_path / "xenium")
+    clusters = truth.bundle / "analysis/clustering/gene_expression_graphclust/clusters.csv"
+    _rewrite(clusters, lambda text: text.replace("-1,", "-2,"))
+    message = _refused(truth.bundle, "-o", tmp_path / "out.h5ad")
+    assert "has a row for none of the matrix's 15 barcodes" in message
+
+
+def test_a_clusters_table_without_its_column_is_refused_before_writing(tmp_path):
+    """It used to fail inside the write, after staging began."""
+    truth = write_xenium_bundle(tmp_path / "xenium")
+    clusters = truth.bundle / "analysis/clustering/gene_expression_graphclust/clusters.csv"
+    _rewrite(clusters, lambda text: text.replace("Barcode,Cluster", "Barcode,cluster", 1))
+    assert "clusters.csv in analysis has no Cluster column" in _refused(truth.bundle, "-o", tmp_path / "out.h5ad")
+    assert not list(tmp_path.glob("out*"))
+
+
+def test_a_missing_centroid_is_nan_and_a_word_is_refused(tmp_path):
+    import gzip
+
+    truth = write_xenium_bundle(tmp_path / "xenium")
+    path = truth.bundle / "cells.csv.gz"
+    lines = gzip.decompress(path.read_bytes()).decode().splitlines()
+    fields = lines[1].split(",")
+    fields[1] = "NA"
+    path.write_bytes(gzip.compress(("\n".join([lines[0], ",".join(fields), *lines[2:]]) + "\n").encode()))
+    _ok(truth.bundle, "-o", tmp_path / "out.h5ad")
+    assert np.isnan(_read(tmp_path / "out.h5ad").obsm["spatial"][0, 0])
+
+    fields[1] = "left"
+    path.write_bytes(gzip.compress(("\n".join([lines[0], ",".join(fields), *lines[2:]]) + "\n").encode()))
+    assert "x_centroid holds values that are not numbers" in _refused(truth.bundle, "-o", tmp_path / "out2.h5ad")
+
+
+def test_clusters_of_cells_the_matrix_lacks_leave_no_category(tmp_path):
+    truth = write_xenium_bundle(tmp_path / "xenium")
+    clusters = truth.bundle / "analysis/clustering/gene_expression_graphclust/clusters.csv"
+    _rewrite(clusters, lambda text: text + "zzzzzzzz-1,99\n")
+    _ok(truth.bundle, "-o", tmp_path / "out.h5ad")
+    assert "99" not in _read(tmp_path / "out.h5ad").obs["graphclust"].cat.categories
+
+
+def test_an_archive_without_the_tables_says_so(tmp_path):
+    """Its empty unpacked folder passed for an analysis folder, and the
+    import went ahead without a word."""
+    import tarfile
+
+    truth = write_xenium_bundle(tmp_path / "xenium")
+    shutil.rmtree(truth.bundle / "analysis")
+    with tarfile.open(truth.bundle / "analysis.tar.gz", "w:gz") as tar:
+        tar.add(truth.bundle / "experiment.xenium", arcname="outs/other.txt")
+    assert "holds none of the clustering, UMAP or PCA tables" in _out(_ok(truth.bundle, "-o", tmp_path / "out.h5ad"))
+    assert not list(tmp_path.glob(".adata-xenium-*"))
+
+
+def test_from_xenium_names_the_matrix_not_another_file(tmp_path):
+    """Any file was taken for its folder, and the matrix beside it read."""
+    truth = write_xenium_bundle(tmp_path / "xenium")
+    message = _refused(truth.bundle / "cells.csv.gz", "-o", tmp_path / "out.h5ad", "--from", "xenium")
+    assert "give its folder, or its cell_feature_matrix.h5" in message
