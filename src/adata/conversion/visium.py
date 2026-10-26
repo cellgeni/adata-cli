@@ -20,7 +20,9 @@ and keeps Gene Expression only. The positions list every spot on the slide,
 a few thousand however large the data, and are matched to the matrix's
 barcodes as they are scanned.
 
-Visium HD is not read yet: its positions are Parquet.
+Visium HD is read too, one bin size at a time (`--bin-size`, 8 µm by
+default): each `binned_outputs/square_NNNum/` folder is laid out as above,
+with its positions as Parquet, which pyarrow reads (the `spatial` extra).
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ import json
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 import h5py
 import numpy as np
@@ -38,7 +40,7 @@ from rich.console import Console
 from adata.conversion import tenx
 from adata.conversion.base import ConversionPlan, Converter, Options
 from adata.conversion.features import STRING_STEP, Target, describe_import, write_obs_index, write_var
-from adata.conversion.spatial import BarcodeJoin, Join, Sink, numbers, read_image, require_numeric, write_rows
+from adata.conversion.spatial import BarcodeJoin, Join, Sink, table_blocks, numbers, write_image, require_numeric, write_rows
 from adata.core.subset import fan_out_sparse_matrix
 from adata.elements.read import decode_str_array
 from adata.elements.write import (
@@ -49,6 +51,7 @@ from adata.elements.write import (
     write_scalar,
 )
 from adata.formats.json_data import write_json_value
+from adata.formats.parquet import ParquetTable, open_table, require_pyarrow
 from adata.formats.table import TableScan, column_values, create_columns, scan_table
 from adata.formats.textio import open_binary
 from adata.storage import create_dataset, is_zarr_path, open_store
@@ -60,15 +63,26 @@ POSITION_COLUMNS = (
     "barcode", "in_tissue", "array_row", "array_col",
     "pxl_row_in_fullres", "pxl_col_in_fullres",
 )
-_POSITION_FILES = ("tissue_positions.csv", "tissue_positions_list.csv")
+_POSITION_FILES = ("tissue_positions.csv", "tissue_positions_list.csv", "tissue_positions.parquet")
+#: The bin size an HD output is read at unless --bin-size says otherwise:
+#: the one 10x recommends for analysis.
+DEFAULT_BIN_UM = 8
 _IMAGES = ("hires", "lowres")
 _FILTERED, _RAW = "filtered_feature_bc_matrix", "raw_feature_bc_matrix"
 
 
 def _is_hd(folder: Path) -> bool:
-    return (folder / "binned_outputs").is_dir() or (
-        folder / "spatial" / "tissue_positions.parquet"
-    ).exists()
+    """A Visium HD `outs/`, whose bins sit one folder per size below it."""
+    return (folder / "binned_outputs").is_dir()
+
+
+def _bin_sizes(outs: Path) -> List[int]:
+    sizes = []
+    for folder in (outs / "binned_outputs").glob("square_*um"):
+        digits = folder.name[len("square_"):-len("um")]
+        if digits.isdigit() and folder.is_dir():
+            sizes.append(int(digits))
+    return sorted(sizes)
 
 
 def _matrix_files(folder: Path, name: str) -> List[Path]:
@@ -99,11 +113,8 @@ def _locate(path: Path) -> Optional[Path]:
 
 
 def sniff(path: Path) -> bool:
-    """A Space Ranger output folder (or the run folder holding its `outs/`).
-
-    Visium HD folders are claimed too, only so that they are refused by name
-    rather than taken for a Cell Ranger 2 MTX layout.
-    """
+    """A Space Ranger output folder (or the run folder holding its `outs/`),
+    a Visium HD one included, or one of its bin folders."""
     path = Path(path)
     return path.is_dir() and not is_zarr_path(path) and _locate(path) is not None
 
@@ -113,8 +124,10 @@ class _Plan:
     matrix: Any
     matrix_path: Path
     targets: List[Target]
-    positions: TableScan
+    #: The CSV positions' scan, or the Parquet ones' footer.
+    positions: Union[TableScan, ParquetTable]
     join: Join
+    bin_um: Optional[int]
     library_id: str
     scalefactors: Dict[str, Any]
     images: Dict[str, Path]
@@ -139,10 +152,18 @@ def _bundle(source: Path, options: Options) -> tuple:
             "*_feature_bc_matrix.h5."
         )
     if _is_hd(outs):
+        sizes = _bin_sizes(outs)
+        size = options.bin_size or DEFAULT_BIN_UM
+        if size not in sizes:
+            raise ValueError(
+                f"This Visium HD output has no {size} µm bins; it has "
+                f"{', '.join(f'{s} µm' for s in sizes) or 'none'}. Pick one with --bin-size."
+            )
+        outs = outs / "binned_outputs" / f"square_{size:03d}um"
+    elif options.bin_size is not None:
         raise ValueError(
-            "This is Visium HD output, which is not read yet: its positions are "
-            "Parquet. Convert one bin's matrix as a 10x matrix in the meantime "
-            "(binned_outputs/square_008um/filtered_feature_bc_matrix.h5)."
+            "--bin-size picks among a Visium HD output's bins; this is "
+            "standard Visium, or one bin size already."
         )
     name = _RAW if options.unfiltered else _FILTERED
     found = _matrix_files(outs, name)
@@ -191,8 +212,35 @@ def _library_id(attrs: Dict[str, Any], outs: Path, options: Options) -> str:
     return outs.parent.name if outs.name == "outs" else outs.name
 
 
+def _bin_um(scalefactors: Dict[str, Any]) -> Optional[int]:
+    """An HD bin folder's bin size, from its scale factors."""
+    size = scalefactors.get("bin_size_um")
+    return int(round(float(size))) if size is not None else None
+
+
+def _scan_parquet(path: Path, joiner: BarcodeJoin) -> ParquetTable:
+    """Visium HD's positions: the footer, then the barcodes, matched as read."""
+    require_pyarrow("Visium HD positions")
+    table = open_table(path)
+    missing = [c for c in POSITION_COLUMNS if c not in table.types]
+    if missing:
+        raise ValueError(f"{path.name} has no {', '.join(missing)} column.")
+    text = [c for c in POSITION_COLUMNS[1:] if not _numeric_arrow(table.types[c])]
+    if text:
+        raise ValueError(f"{path.name}: {', '.join(text)} {'is' if len(text) == 1 else 'are'} not numeric.")
+    for _, block in table.blocks(["barcode"]):
+        joiner(block["barcode"])
+    return table
+
+
+def _numeric_arrow(type_name: str) -> bool:
+    return type_name.startswith(("int", "uint", "float", "double", "halffloat"))
+
+
 class VisiumImport(Converter):
-    options = tenx.TenxImport.options | frozenset({"--unfiltered", "--library-id", "--no-images"})
+    options = tenx.TenxImport.options | frozenset(
+        {"--unfiltered", "--library-id", "--no-images", "--bin-size"}
+    )
 
     def plan(
         self,
@@ -220,18 +268,22 @@ class VisiumImport(Converter):
             library_id = _library_id(matrix.attrs, outs, options)
             group = handle[matrix.group]
             joiner = BarcodeJoin(group["barcodes"])
-            positions = scan_table(
-                position_file,
-                index="barcode",
-                names=None if _has_header(position_file) else POSITION_COLUMNS,
-                on_index=joiner,
-            )
+            if position_file.suffix == ".parquet":
+                positions = _scan_parquet(position_file, joiner)
+            else:
+                positions = scan_table(
+                    position_file,
+                    index="barcode",
+                    names=None if _has_header(position_file) else POSITION_COLUMNS,
+                    on_index=joiner,
+                )
+                require_numeric(positions, POSITION_COLUMNS[1:])
             filtered_barcodes = "filtered_barcodes" in group
             join = joiner.finish()
-        require_numeric(positions, POSITION_COLUMNS[1:])
         join.check(f"spatial/{position_file.name}")
 
         scalefactors = json.loads(scalefactor_file.read_text())
+        bin_um = _bin_um(scalefactors) if position_file.suffix == ".parquet" else None
         images: Dict[str, Path] = {}
         if not options.no_images:
             for name in _IMAGES:
@@ -248,7 +300,8 @@ class VisiumImport(Converter):
             dst_format=dst_format,
             outputs=outputs,
             summary=(
-                f"Space Ranger (Visium) → {dst_format}, {described}, positions from "
+                f"Space Ranger (Visium{f' HD, {bin_um} µm bins' if bin_um else ''}) → "
+                f"{dst_format}, {described}, positions from "
                 f"{position_file.name}, library {library_id!r}"
                 + (f", images {', '.join(images)}" if images else "")
             ),
@@ -259,6 +312,7 @@ class VisiumImport(Converter):
                 targets=targets,
                 positions=positions,
                 join=join,
+                bin_um=bin_um,
                 library_id=library_id,
                 scalefactors=scalefactors,
                 images=images,
@@ -270,7 +324,6 @@ class VisiumImport(Converter):
     def write(self, plan: ConversionPlan, staged: Sequence[Path], console: Console) -> None:
         detail: _Plan = plan.detail
         matrix = detail.matrix
-        images = {name: read_image(path) for name, path in detail.images.items()}
 
         with h5py.File(detail.matrix_path, "r") as handle, ExitStack() as stack:
             group = handle[matrix.group]
@@ -283,7 +336,7 @@ class VisiumImport(Converter):
                     _write_obs(root, group, detail)
                     write_var(root, target)
                     tenx._write_uns(root, matrix)
-                    _write_spatial_uns(root, detail, images)
+                    _write_spatial_uns(root, detail)
 
             with console.status("[cyan]Copying X...[/]"):
                 fan_out_sparse_matrix(
@@ -306,8 +359,42 @@ def _write_obs(root: Any, group: h5py.Group, detail: _Plan) -> None:
     )
     ensure_anndata_skeleton(root)
 
-    scan = detail.positions
     pixels = ("pxl_col_in_fullres", "pxl_row_in_fullres")  # x, y
+    if isinstance(detail.positions, ParquetTable):
+        order = _write_parquet_positions(root, obs, detail, pixels)
+    else:
+        order = _write_csv_positions(root, obs, detail, pixels)
+    if detail.filtered_barcodes:
+        write_dense(obs, "filtered_barcodes", np.asarray(group["filtered_barcodes"][...]).astype(bool))
+        order.append("filtered_barcodes")
+    set_column_order(obs, order)
+
+
+def _write_parquet_positions(root: Any, obs: Any, detail: _Plan, pixels: Sequence[str]) -> List[str]:
+    """Visium HD's positions: ints in obs, float pixels in `obsm["spatial"]`.
+
+    A second read of the file, of these columns only: the barcodes were
+    matched in the first.
+    """
+    n = detail.join.n_out
+    names = list(POSITION_COLUMNS[1:4])
+    columns = {}
+    for name in names:
+        columns[name] = create_dataset(obs, name, shape=(n,), dtype=np.int64)
+        spec.set_encoding(columns[name], spec.ARRAY)
+    spatial = create_dataset(root["obsm"], "spatial", shape=(n, 2), dtype=np.float64)
+    spec.set_encoding(spatial, spec.ARRAY)
+    sinks = [Sink(dest, lambda block, name=name: block[name].astype(np.int64)) for name, dest in columns.items()]
+    sinks.append(Sink(
+        spatial, lambda block: np.stack([block[p].astype(np.float64) for p in pixels], axis=1)
+    ))
+    write_rows(detail.positions.blocks([*names, *pixels]), detail.join, sinks, root)
+    return names
+
+
+def _write_csv_positions(root: Any, obs: Any, detail: _Plan, pixels: Sequence[str]) -> List[str]:
+    n = detail.join.n_out
+    scan = detail.positions
     kinds = {c.name: scan.dtype_of(c) for c in scan.columns}
     columns, lookups = create_columns(obs, scan, n, exclude=pixels)
     dtype = np.int64 if all(kinds[p] == "int64" for p in pixels) else np.float64
@@ -325,22 +412,22 @@ def _write_obs(root: Any, group: h5py.Group, detail: _Plan) -> None:
         for name, dest in columns.items()
     ]
     sinks.append(Sink(spatial, lambda block: numbers(scan, pixels, block, dtype)))
-    write_rows(scan, detail.join, sinks, root)
-
-    order = list(columns)
-    if detail.filtered_barcodes:
-        write_dense(obs, "filtered_barcodes", np.asarray(group["filtered_barcodes"][...]).astype(bool))
-        order.append("filtered_barcodes")
-    set_column_order(obs, order)
+    write_rows(table_blocks(scan), detail.join, sinks, root)
+    return list(columns)
 
 
-def _write_spatial_uns(root: Any, detail: _Plan, images: Dict[str, np.ndarray]) -> None:
-    """`uns["spatial"][library_id]`, as squidpy writes it."""
+def _write_spatial_uns(root: Any, detail: _Plan) -> None:
+    """`uns["spatial"][library_id]`, as squidpy writes it.
+
+    A PNG decodes only whole, so each image is read as it is written and
+    let go before the next: Visium HD's hires image is 6,000 pixels on its
+    longest side, some 100 MB of pixels.
+    """
     library = write_mapping(write_mapping(root["uns"], "spatial"), detail.library_id)
-    if images:
+    if detail.images:
         holder = write_mapping(library, "images")
-        for name, pixels in images.items():
-            write_dense(holder, name, pixels)
+        for name, path in detail.images.items():
+            write_image(holder, name, path)
     write_json_value(library, "scalefactors", detail.scalefactors)
     metadata = write_mapping(library, "metadata")
     for key in ("chemistry_description", "software_version"):

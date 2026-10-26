@@ -11,14 +11,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 from adata.conversion.features import STRING_STEP
 from adata.core.scatter import RowScatter
+from adata.elements import spec
 from adata.elements.read import decode_str_array
 from adata.formats.table import TableScan, column_values, iter_table_blocks
+from adata.storage import create_dataset
 
 
 @dataclass
@@ -64,7 +66,9 @@ class BarcodeJoin:
     own. While each block equals the matrix's next barcodes it only compares
     them; at the first difference it switches to looking each value up in a
     sorted copy of the barcodes, a numpy array rather than a dict, whose
-    per-string overhead is several times the barcode itself.
+    per-string overhead is several times the barcode itself. Barcodes are
+    held as bytes, a quarter of numpy's unicode: Visium HD's 2 µm bins number
+    in the millions.
     """
 
     def __init__(self, barcodes: Any) -> None:
@@ -77,10 +81,10 @@ class BarcodeJoin:
         self._order: Optional[np.ndarray] = None
 
     def _slice(self, lo: int, hi: int) -> np.ndarray:
-        return np.asarray(decode_str_array(np.asarray(self._barcodes[lo:hi])), dtype=str)
+        return _as_bytes(np.asarray(self._barcodes[lo:hi]))
 
-    def __call__(self, values: Sequence[str]) -> None:
-        values = np.asarray(values, dtype=str)
+    def __call__(self, values: Sequence[Any]) -> None:
+        values = _as_bytes(values)
         lo, hi = self._done, self._done + values.size
         if self._in_order:
             if hi <= self.n_out and np.array_equal(self._slice(lo, hi), values):
@@ -96,7 +100,7 @@ class BarcodeJoin:
         self._targets = [np.arange(self._done, dtype=np.int64)]
         wanted = np.concatenate(
             [self._slice(lo, min(lo + STRING_STEP, self.n_out)) for lo in range(0, self.n_out, STRING_STEP)]
-            or [np.zeros(0, dtype=str)]
+            or [np.zeros(0, dtype="S1")]
         )
         self._order = np.argsort(wanted, kind="stable")
         self._ranked = wanted[self._order]
@@ -116,6 +120,7 @@ class BarcodeJoin:
         if self._in_order:
             self._leave_order()
         target = np.concatenate(self._targets) if self._targets else np.zeros(0, dtype=np.int64)
+        self._targets = []  # the blocks, as big again as the target
         counts = np.bincount(target[target >= 0], minlength=self.n_out)
         missing = np.flatnonzero(counts == 0)
         return Join(
@@ -124,8 +129,21 @@ class BarcodeJoin:
             n_extra=int((target < 0).sum()),
             n_missing=int(missing.size),
             n_repeated=int((counts > 1).sum()),
-            example_missing=str(self._slice(missing[0], missing[0] + 1)[0]) if missing.size else "",
+            example_missing=(
+                self._slice(missing[0], missing[0] + 1)[0].decode("utf-8", "replace")
+                if missing.size else ""
+            ),
         )
+
+
+def _as_bytes(values: Any) -> np.ndarray:
+    """Strings, bytes or numbers as a fixed-width bytes array, for comparing."""
+    array = np.asarray(values)
+    if array.dtype.kind == "S":
+        return array
+    if array.dtype.kind == "O" and array.size and isinstance(array.flat[0], bytes):
+        return array.astype("S")
+    return np.char.encode(np.asarray(decode_str_array(array), dtype=str), "utf-8")
 
 
 @dataclass
@@ -134,23 +152,30 @@ class Sink:
     into the block's values; `fill` is what rows the table lacks get."""
 
     dest: Any
-    values: Callable[[Dict[str, List[str]]], np.ndarray]
+    values: Callable[[Dict[str, Any]], np.ndarray]
     fill: Any = None
 
 
-def write_rows(scan: TableScan, join: Join, sinks: Sequence[Sink], scratch_parent: Any) -> None:
-    """Fill each sink from one read of the table, in the matrix's order."""
+def table_blocks(scan: TableScan) -> Iterator[Tuple[int, Dict[str, List[str]]]]:
+    """A CSV table's rows for `write_rows`: (rows in the block, its columns)."""
+    for names, block in iter_table_blocks(scan):
+        yield len(names), block
+
+
+def write_rows(
+    blocks: Iterable[Tuple[int, Dict[str, Any]]], join: Join, sinks: Sequence[Sink], scratch_parent: Any
+) -> None:
+    """Fill each sink from one read of a table's `blocks`, in the matrix's order."""
     if join.target is None:
         lo = 0
-        for names, block in iter_table_blocks(scan):
-            hi = lo + len(names)
+        for n, block in blocks:
             for sink in sinks:
-                sink.dest[lo:hi] = sink.values(block)
-            lo = hi
+                sink.dest[lo : lo + n] = sink.values(block)
+            lo += n
         return
     with RowScatter(join.target, join.n_out, scratch_parent) as scatter:
         columns = [scatter.column(sink.dest, sink.fill) for sink in sinks]
-        for _, block in iter_table_blocks(scan):
+        for _, block in blocks:
             for column, sink in zip(columns, sinks):
                 column.add(sink.values(block))
 
@@ -178,10 +203,29 @@ def numbers(scan: TableScan, names: Sequence[str], block: Dict[str, List[str]], 
     )
 
 
-def read_image(path: Path) -> np.ndarray:
-    """An image's pixels as the file holds them: uint8 for an 8-bit PNG, as
-    squidpy reads them, H x W or H x W x C."""
+#: Image rows copied out of Pillow per write.
+IMAGE_ROWS = 512
+
+
+def write_image(parent: Any, name: str, path: Path) -> None:
+    """An image's pixels as the file holds them, uint8 for an 8-bit PNG as
+    squidpy reads them, H x W or H x W x C, written a strip of rows at a time.
+
+    A PNG decodes only whole, but copying it out in strips spares a second
+    copy of it: Visium HD's hires image is some 100 MB of pixels.
+    """
     from PIL import Image
 
     with Image.open(path) as image:
-        return np.asarray(image)
+        image.load()
+        width, height = image.size
+        out = None
+        for top in range(0, height, IMAGE_ROWS):
+            strip = np.asarray(image.crop((0, top, width, min(top + IMAGE_ROWS, height))))
+            if out is None:
+                out = create_dataset(
+                    parent, name, shape=(height,) + strip.shape[1:], dtype=strip.dtype,
+                    chunks=(min(IMAGE_ROWS, height),) + strip.shape[1:],
+                )
+                spec.set_encoding(out, spec.ARRAY)
+            out[top : top + strip.shape[0]] = strip

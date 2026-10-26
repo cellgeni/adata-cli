@@ -530,6 +530,7 @@ _CONVERT_FLAGS = {
     "unfiltered": "--unfiltered",
     "library_id": "--library-id",
     "no_images": "--no-images",
+    "bin_size": "--bin-size",
     "dense": "--dense",
     "obs_names_attr": "--obs-names-attr",
     "var_names_attr": "--var-names-attr",
@@ -711,6 +712,12 @@ def convert(
         "--no-images",
         help="Visium input: leave the tissue images out of uns['spatial'] "
         "(the scale factors stay)",
+    ),
+    bin_size: Optional[int] = typer.Option(
+        None,
+        "--bin-size",
+        help="Visium HD input: the bin size to read, in µm (default 8; "
+        "Space Ranger writes 2, 8 and 16)",
     ),
     dense: bool = typer.Option(
         False,
@@ -946,6 +953,7 @@ def convert(
                 unfiltered=unfiltered,
                 library_id=library_id,
                 no_images=no_images,
+                bin_size=bin_size,
                 dense=dense,
                 obs_names_attr=obs_names_attr,
                 var_names_attr=var_names_attr,
