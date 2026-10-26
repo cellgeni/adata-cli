@@ -91,7 +91,7 @@ def export_json(
         )
 
 
-def export_image(file: Path, obj: str, out: Path, console: Console) -> None:
+def export_image(file: Path, obj: str, out: Optional[Path], console: Console) -> None:
     with open_store(file, "r") as store:
         export_image_format(store.root, obj=obj, out=out, console=console)
 

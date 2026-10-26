@@ -18,11 +18,16 @@ The conversion epic's sub-issues (#21–#30) are all done and ticked in #20.
 
 ## In progress
 
-### Documentation site (`docs/site`)
+Nothing. The documentation site is live (#76); the spatial work below can
+resume.
+
+## Done since 0.16.1
+
+### Documentation site (#76)
 
 The docs restyled as cellgeni's pipeline docs (nf-cellbender,
 nf-reprocessing-public-10x): Just the Docs from `docs/` on `main`, a short
-README. The spatial (Visium/Xenium) work below waits for it.
+README.
 
 Decisions:
 - Pages moved with `git mv` in a commit of their own, so history follows them;
@@ -44,9 +49,13 @@ Steps:
 - [x] Docs tests, benchmark generator (`docs/reference/benchmarks.md`), pointers
 - [x] README rewritten
 - [x] Local `github-pages` build in Docker; html-proofer clean
-- [ ] PR, review, merge; check the live site and the old URLs' redirects
+- [x] PR, review, merge; check the live site and the old URLs' redirects
 
 ## Follow-ups noticed
+
+- Fixed, for the next release's changelog: `export image` without `-o`
+  crashed (`'NoneType' object has no attribute 'parent'`); it now writes PNG
+  to stdout, as every other export writes there. Found by the docs review.
 
 - Fixed in 0.16.1 (#74): `subset`, `split` and the MuData export kept
   every category of a categorical column, where anndata's subsetting keeps

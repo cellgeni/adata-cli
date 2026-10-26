@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 from PIL import Image
@@ -14,7 +15,11 @@ from adata.storage import is_dataset
 from adata.util.path import norm_path
 
 
-def export_image(root: Any, obj: str, out: Path, console: Console) -> None:
+def export_image(root: Any, obj: str, out: Optional[Path], console: Console) -> None:
+    """Write a 2-D or 3-D array as an image, or as PNG to stdout when `out` is None.
+
+    The format follows the output's extension; stdout has none, so it is PNG.
+    """
     h5obj = _resolve(root, obj)
     if not is_dataset(h5obj):
         raise ValueError("Image export requires a dataset.")
@@ -45,6 +50,10 @@ def export_image(root: Any, obj: str, out: Path, console: Console) -> None:
         arr = arr[:, :, 0]
 
     img = Image.fromarray(arr)
+    if out is None or str(out) == "-":
+        img.save(sys.stdout.buffer, format="PNG")
+        sys.stdout.buffer.flush()
+        return
     out.parent.mkdir(parents=True, exist_ok=True)
     img.save(out)
     console.print(f"[green]Wrote[/] {out}")
