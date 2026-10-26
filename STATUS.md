@@ -7,6 +7,7 @@ moves; the plan of record for the current item is in the section below.
 
 | Version | What | Issues |
 |---|---|---|
+| 0.17.1 | Visium HD, one bin size at a time, with the new `spatial` extra (pyarrow) | #81 |
 | 0.17.0 | `convert` reads Visium (Space Ranger 1–4) and Xenium (XOA 1–4) with positions, images and Xenium's analysis | #79 |
 | 0.16.2 | Documentation site (guides, troubleshooting, a page per format); `export image` writes PNG to stdout without `-o` | #76, #77 |
 | 0.16.1 | `subset`, `split` and the MuData export narrow categoricals (and their colours) as anndata's subsetting does | #74 |
@@ -20,24 +21,8 @@ The conversion epic's sub-issues (#21–#30) are all done and ticked in #20.
 
 ## In progress
 
-### Visium HD (`feat/visium-hd`, for 0.17.1)
-
-Decisions:
-- One bin size per output, `--bin-size` (8 µm by default, as 10x
-  recommends); a bin folder given directly reads as it is.
-- pyarrow comes with a new `spatial` extra, in the image too, and is
-  imported only by `formats/parquet.py`.
-- The Parquet positions are read as a buffered stream, a set of columns per
-  pass; the join holds barcodes as bytes; images are written in strips as
-  they are read. 2 µm on 10x's tiny sample: 3.5 s, 470 MB without images.
-
-Steps:
-- [x] `formats/parquet.py`, HD in `visium.py`, `--bin-size`
-- [x] Tests: HD fixture, flags and refusals, the missing extra, a performance
-  guard, a scanpy and pandas comparison
-- [x] Real data: 10x's SR 4.0.1 tiny HD sample at 2, 8 and 16 µm
-- [x] Docs
-- [ ] PR, review, merge; release 0.17.1
+Nothing. Visium HD is out in 0.17.1, completing the spatial import;
+Space Ranger 4's cell segmentation is first among the follow-ups below.
 
 ## Follow-ups noticed
 
