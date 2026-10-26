@@ -1,3 +1,11 @@
+---
+title: "On-disk spec: h5ad"
+parent: Reference
+nav_order: 4
+redirect_from:
+  - /ELEMENTS_h5ad.html
+---
+
 # AnnData on-disk element specifications — HDF5 (`.h5ad`)
 
 This document describes how *elements* are encoded inside an AnnData **HDF5** container (`.h5ad`).  

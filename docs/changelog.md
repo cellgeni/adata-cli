@@ -1,3 +1,8 @@
+---
+title: Changelog
+nav_order: 7
+---
+
 # Changelog
 
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
@@ -721,7 +726,7 @@ was reported from a pipeline that had to kill twelve tasks after 98 minutes.
   seconds -- h5py and zarr reads, Zarr store traffic, Python allocation and
   executed lines -- and assert that successive increments grow no faster than
   linearly, so nothing here can fail because a CI runner was busy. See
-  [docs/TESTING.md](docs/TESTING.md#performance). Every subcommand is covered:
+  [docs/TESTING.md](reference/testing.md#performance). Every subcommand is covered:
   `ls`, `view`, `create`, all five `export` and all five `import` variants,
   `split` on both axes, and the `concat` options nothing else reached.
   Two claims are now enforced rather than described -- `view` and `ls` read
@@ -731,7 +736,7 @@ was reported from a pipeline that had to kill twelve tasks after 98 minutes.
 - **A comparative benchmark** (`benchmarks/`), run on every tag against
   anndata and against scanpy where scanpy has a real equivalent. Reports peak
   RSS, wall time and output size; publishes to
-  [docs/BENCHMARKS.md](docs/BENCHMARKS.md) and the release notes. Report-only
+  [docs/BENCHMARKS.md](reference/benchmarks.md) and the release notes. Report-only
   -- it never fails a build. Fifteen cases, covering every command with a real
   baseline, including `h5ls -r` for `ls` and the rows where adata-cli is the
   slower of the two.

@@ -2,7 +2,7 @@
 
 Every `adata ...` invocation in the README and docs is extracted and its
 options checked against the real `--help` for that command. This exists
-because COMMANDS.md advertised `--zarr-format` on `split` before the option
+because the command reference advertised `--zarr-format` on `split` before the option
 was implemented: prose drifts from code silently, and nothing else in the
 suite reads the docs.
 """
@@ -47,7 +47,39 @@ def _options(command: click.Command) -> set:
     return names
 
 REPO = Path(__file__).resolve().parent.parent
-DOCS = [REPO / "README.md"] + sorted((REPO / "docs").glob("*.md"))
+SITE = REPO / "docs"
+#: Every page of the site, at any depth: Guides and Reference are folders.
+DOC_PAGES = sorted(SITE.rglob("*.md"))
+DOCS = [REPO / "README.md"] + DOC_PAGES
+
+
+def _label(path: Path) -> str:
+    """A page's name in test ids and messages; several are `index.md`."""
+    return str(path.relative_to(REPO))
+
+
+def _front_matter(text: str) -> Tuple[dict, str]:
+    """Jekyll front matter as a flat dict, and the page body after it.
+
+    Only `key: value` lines are kept; a list such as `redirect_from` is read
+    as its items under that key. Enough for the keys the sidebar uses.
+    """
+    if not text.startswith("---\n"):
+        return {}, text
+    head, _, body = text[4:].partition("\n---\n")
+    found: dict = {}
+    key = None
+    for line in head.splitlines():
+        item = re.match(r"^\s+-\s+(.*)$", line)
+        if item and key:
+            found.setdefault(key, []).append(item.group(1).strip())
+            continue
+        pair = re.match(r"^([A-Za-z_]+):\s*(.*)$", line)
+        if pair:
+            key, value = pair.group(1), pair.group(2).strip().strip('"')
+            if value:
+                found[key] = value
+    return found, body
 
 #: Placeholders that stand in for a real path in the docs.
 _PLACEHOLDER = re.compile(r"^[<{\[]|[>}\]]$")
@@ -69,7 +101,7 @@ def _invocations(path: Path) -> List[Tuple[str, str]]:
             line = re.split(r"\s+#\s", line)[0].strip()
             line = re.split(r"\s*[|>]\s*", line)[0].strip()
             if line.startswith("adata ") and not line.startswith("adata-cli"):
-                found.append((line, path.name))
+                found.append((line, _label(path)))
     return found
 
 
@@ -125,7 +157,10 @@ def _looks_like_a_subcommand(token: str, path: List[str]) -> bool:
 def test_documented_invocations_use_real_commands_and_options(line, source):
     tokens = line.split()
     path = _command_path(tokens)
-    assert path, f"{source}: could not identify a command in {line!r}"
+    # `adata --version`: an option of the app itself, checked against the root.
+    assert path or tokens[1].startswith("-"), (
+        f"{source}: could not identify a command in {line!r}"
+    )
 
     try:
         command = _lookup(path)
@@ -186,7 +221,7 @@ def _prose_claims() -> List[Tuple[str, str, str]]:
             option = match.group(1)
             for command in _COMMAND_IN_PROSE.findall(match.group(2)):
                 if command in _TOP_LEVEL:
-                    claims.append((option, command, doc.name))
+                    claims.append((option, command, _label(doc)))
     return claims
 
 
@@ -218,53 +253,107 @@ def test_options_claimed_in_prose_exist(option, command, source):
 #
 # GitHub Pages serves `docs/` as the site root, so a relative link out of it
 # cannot resolve: `../.github/workflows/benchmark.yml` and a bare
-# `benchmarks/` both went live as 404s on the 0.6.0 release page. Checked
-# offline against the filesystem, so it costs nothing and needs no network.
+# `benchmarks/` both went live as 404s on the 0.6.0 release page. Since the
+# move to Just the Docs with `permalink: pretty`, `guides/subset.md` is served
+# at `/guides/subset/`, one level below its file, so only a link to another
+# page survives: jekyll-relative-links rewrites `page.md` to that page's URL
+# and leaves everything else as written. Checked offline against the
+# filesystem, so it costs nothing and needs no network.
+
+
+def _without_code(text: str) -> str:
+    """The page with fenced blocks blanked: `# comment` is not a heading."""
+    return re.sub(r"^```.*?^```", "", text, flags=re.S | re.M)
 
 
 def _relative_links(text: str):
-    """(link, target) for every relative markdown link, fragments stripped."""
-    for match in re.finditer(r"\]\(([^)\s]+)\)", text):
+    """(link, target, fragment) for every relative markdown link."""
+    for match in re.finditer(r"\]\(([^)\s]+)\)", _without_code(text)):
         link = match.group(1)
-        if link.startswith(("http://", "https://", "mailto:", "#")):
+        if link.startswith(("http://", "https://", "mailto:")):
             continue
-        target = link.split("#", 1)[0]
-        if target:
-            yield link, target
+        target, _, fragment = link.partition("#")
+        yield link, target, fragment
 
 
-DOC_PAGES = sorted((REPO / "docs").glob("*.md"))
+def _heading_ids(page: Path) -> set:
+    """The ids kramdown's GFM parser gives a page's headings.
+
+    Lowercase, every character but a word character, `-`, space or tab
+    dropped, spaces turned into `-`, and a repeat suffixed `-1`, `-2`: the
+    same rule GitHub uses, so an anchor that works here works there too.
+    """
+    _, body = _front_matter(page.read_text())
+    ids, seen = set(), {}
+    for match in re.finditer(r"^#{1,6}\s+(.*?)\s*#*\s*$", _without_code(body), re.M):
+        slug = re.sub(r"[^\w\- \t]", "", match.group(1).lower())
+        slug = slug.replace(" ", "-").replace("\t", "-")
+        seen[slug] = seen.get(slug, -1) + 1
+        ids.add(slug + (f"-{seen[slug]}" if seen[slug] else ""))
+    return ids
 
 
-@pytest.mark.parametrize("page", DOC_PAGES, ids=lambda p: p.name)
+@pytest.mark.parametrize("page", DOC_PAGES, ids=_label)
 def test_every_relative_link_resolves_inside_the_published_site(page):
-    """A relative link must point at something Pages actually serves.
+    """A relative link must name a page the site serves, and an anchor on it.
 
-    Jekyll rewrites `TESTING.md` to `/TESTING.html`, so a `.md` target is
-    fine; anything reached with `../`, or a bare directory with no index,
-    is not, and has to be an absolute URL to GitHub instead.
+    Splitting the command reference into a page per format moved dozens of
+    anchors, and a link to a heading that is gone still loads the page, so
+    nothing but a check like this one notices.
     """
     broken = []
-    for link, target in _relative_links(page.read_text()):
-        resolved = (page.parent / target).resolve()
-        try:
-            inside = resolved.is_relative_to((REPO / "docs").resolve())
-        except AttributeError:  # pragma: no cover - Python < 3.9
-            inside = str(resolved).startswith(str((REPO / "docs").resolve()))
-
-        if not inside:
-            broken.append(f"{link} -- leaves docs/, so Pages cannot serve it")
-        elif not resolved.exists():
-            broken.append(f"{link} -- no such file")
-        elif resolved.is_dir() and not (resolved / "index.md").exists():
-            broken.append(f"{link} -- a directory with no index page")
+    for link, target, fragment in _relative_links(page.read_text()):
+        if not target:
+            resolved = page
+        else:
+            resolved = (page.parent / target).resolve()
+            if not resolved.is_relative_to(SITE.resolve()):
+                broken.append(f"{link} -- leaves docs/, so Pages cannot serve it")
+                continue
+            if resolved.suffix != ".md":
+                broken.append(
+                    f"{link} -- only links to another page's .md are "
+                    "rewritten; this one resolves against the page's pretty URL"
+                )
+                continue
+            if not resolved.exists():
+                broken.append(f"{link} -- no such page")
+                continue
+        if fragment and fragment not in _heading_ids(resolved):
+            broken.append(f"{link} -- no heading with that anchor")
 
     assert not broken, (
-        f"{page.name} has links that 404 on the published site:\n  "
+        f"{_label(page)} has links that 404 on the published site:\n  "
         + "\n  ".join(broken)
-        + "\nUse an absolute https://github.com/... URL for anything outside "
-        "docs/."
+        + "\nUse an absolute https://github.com/... URL for anything that is "
+        "not a page of the site."
     )
+
+
+# ---------------------------------------------------------------------------
+# the sidebar
+#
+# Just the Docs builds its navigation from front matter alone: a page with no
+# `title` is not in the sidebar, and one whose `parent` names no page's title
+# is left out of it, with no warning from the build.
+
+FRONT_MATTER = {page: _front_matter(page.read_text())[0] for page in DOC_PAGES}
+TITLES = [fm.get("title") for fm in FRONT_MATTER.values()]
+
+
+@pytest.mark.parametrize("page", DOC_PAGES, ids=_label)
+def test_every_page_has_a_title_and_a_parent_that_exists(page):
+    front = FRONT_MATTER[page]
+    assert front.get("title"), f"{_label(page)} has no `title` front matter"
+    for key in ("parent", "grand_parent"):
+        if key in front:
+            assert front[key] in TITLES, (
+                f"{_label(page)}: {key} {front[key]!r} is no page's title"
+            )
+            assert TITLES.count(front[key]) == 1, (
+                f"{_label(page)}: {key} {front[key]!r} is the title of "
+                "several pages, so the sidebar cannot tell which"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +361,7 @@ def test_every_relative_link_resolves_inside_the_published_site(page):
 #
 # The tests above check one direction: that everything the docs claim really
 # exists. They say nothing about the reverse, so `convert` shipped in 0.6.0
-# with a section in COMMANDS.md that the table of contents never listed, and
+# with a section in the command reference that the table of contents never listed, and
 # an app help string that named neither it nor `create`. Both were invisible
 # to a suite that only walks from the docs to the code.
 #
@@ -289,13 +378,13 @@ def _visible_commands():
     )
 
 
-COMMANDS_MD = (REPO / "docs" / "COMMANDS.md").read_text()
+COMMANDS_MD = _front_matter((SITE / "reference" / "commands.md").read_text())[1]
 
 
 @pytest.mark.parametrize("name", _visible_commands())
 def test_every_command_has_a_section_in_the_reference(name):
     assert f"## `{name}`" in COMMANDS_MD, (
-        f"`adata {name}` has no `## \\`{name}\\`` section in docs/COMMANDS.md"
+        f"`adata {name}` has no `## \\`{name}\\`` section in docs/reference/commands.md"
     )
 
 
@@ -304,7 +393,8 @@ def test_every_command_is_in_the_table_of_contents(name):
     contents = COMMANDS_MD.split("---", 1)[0]
     assert f"](#{name})" in contents, (
         f"`adata {name}` is missing from the table of contents in "
-        "docs/COMMANDS.md. The link text has no backticks: `- [name](#name)`."
+        "docs/reference/commands.md. The link text has no backticks: "
+        "`- [name](#name)`."
     )
 
 

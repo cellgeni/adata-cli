@@ -1,0 +1,7 @@
+# For previewing the site locally (`bundle exec jekyll serve`); GitHub Pages ignores this file.
+# github-pages pins the Jekyll version and plugins GitHub itself builds with, including
+# jekyll-remote-theme, jekyll-include-cache, jekyll-relative-links and jekyll-redirect-from.
+source "https://rubygems.org"
+
+gem "github-pages", group: :jekyll_plugins
+gem "webrick"  # `jekyll serve` on Ruby 3

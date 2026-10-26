@@ -1,3 +1,11 @@
+---
+title: "On-disk spec: Zarr"
+parent: Reference
+nav_order: 5
+redirect_from:
+  - /ELEMENTS_zarr.html
+---
+
 # AnnData on-disk element specifications — Zarr (`.zarr`)
 
 This document describes how *elements* are encoded inside an AnnData **Zarr** container (`.zarr`).  

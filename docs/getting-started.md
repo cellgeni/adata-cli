@@ -1,26 +1,44 @@
-# Get Started
+---
+title: "Getting started"
+nav_order: 2
+redirect_from:
+  - /GET_STARTED.html
+---
 
-This short walkthrough shows the basic workflow: inspect a store, export metadata, and write a subset.
+# Getting started
+{: .no_toc }
+
+A first session: inspect a store, export its metadata, write a subset, import
+a table back, and convert the result to Zarr. Each step takes seconds on the
+example file.
+
+1. TOC
+{:toc}
 
 ## 1 Install
 
-Using uv (recommended):
+You need Python 3.12 or later.
+
+```bash
+pip install pyadata-cli
+adata --version
+```
+
+The command is `adata`; the distribution is `pyadata-cli`, because
+`adata-cli` was taken on PyPI. To work from a checkout instead, with
+[uv](https://docs.astral.sh/uv/):
+
 ```bash
 git clone https://github.com/cellgeni/adata-cli.git
 cd adata-cli
 uv sync
+uv run adata --help
 ```
 
-With pip:
-```bash
-git clone https://github.com/cellgeni/adata-cli.git
-cd adata-cli
-pip install .
-```
-
-Most of this tutorial needs nothing else. Step 4 shows an optional
+Most of this walkthrough needs nothing else. Step 4 shows an optional
 [duckdb](https://duckdb.org) workflow for filters too involved to express with
-`--obs-query`; install it only if you want to follow that part:
+`--obs-query`; install it only if you want to follow that part (the container
+image already has it):
 
 ```bash
 # macOS
@@ -37,7 +55,7 @@ Let's load an example `.h5ad` file:
 wget -O visium.h5ad https://exampledata.scverse.org/squidpy/figshare/visium_hne_adata.h5ad
 ```
 
-Now run `info` to see the file structure:
+Now run `view` to see what the store holds:
 ```bash
 adata view visium.h5ad
 ```
@@ -183,7 +201,8 @@ You can also import new data into an existing store. For example, let's replace 
 cut -d ',' -f 1-5 cells.csv > cells1to5.csv
 ```
 
-Now import it back into `cortex2.h5ad` with the `_index` column as index:
+Now import it back as `obs`, with the `_index` column as the index, writing a
+new store:
 ```bash
 adata import dataframe visium.h5ad obs cells1to5.csv --index-column _index --output visium_obs1to5.h5ad
 ```
@@ -204,7 +223,7 @@ pct_dropout_by_counts, total_counts, variances, variances_norm
         raw:    X, var
 ```
 
-You can also import the data into existing file:
+Or replace `obs` in the existing store itself:
 ```bash
 adata import dataframe visium.h5ad obs cells1to5.csv --index-column _index --inplace
 ```
@@ -224,3 +243,27 @@ pct_dropout_by_counts, total_counts, variances, variances_norm
         uns:    cluster_colors, hvg, leiden, leiden_colors, neighbors, pca, rank_genes_groups, spatial, umap
         raw:    X, var
 ```
+
+`--inplace` writes the new store beside the old one and swaps it in only once
+it is complete, so an import that fails leaves `visium.h5ad` as it was.
+
+## 6 Convert to Zarr
+
+The same store as Zarr, for tools that read it, or for cloud storage:
+
+```bash
+adata convert visium.h5ad -o visium.zarr
+adata view visium.zarr
+```
+
+Every command takes a `.zarr` directory as readily as an `.h5ad` file. A Zarr
+store written from an `.h5ad` is Zarr v3; pass `--zarr-format 2` for readers
+that predate it, such as anndata before 0.12.
+
+## Where next
+
+- [Guides](guides/index.md): one page per job, from splitting by sample to
+  converting a Cell Ranger output.
+- [Commands](reference/commands.md): every command and flag.
+- [Troubleshooting](troubleshooting.md): what an error message means and
+  what to do about it.
