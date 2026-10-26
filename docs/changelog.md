@@ -8,6 +8,38 @@ nav_order: 7
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
+## 0.17.1
+
+Visium HD joins standard Visium and Xenium: `convert` reads a Space Ranger
+3 or 4 HD output at one bin size, with its bins' positions, images and
+scale factors, through a new optional `spatial` extra (pyarrow) for the
+Parquet positions.
+
+### Added
+
+- **Visium HD** ([#81](https://github.com/cellgeni/adata-cli/pull/81)).
+  `adata convert outs -o bins.h5ad` reads the 8 µm bins, as 10x recommends
+  for analysis; `--bin-size 2` or `16` picks another size, and a bin folder
+  given directly reads as it is. The layout is standard Visium's: obs
+  `in_tissue`, `array_row`, `array_col`; `obsm["spatial"]` in
+  full-resolution pixels; the bin folder's images and scale factors in
+  `uns["spatial"]`. Checked in CI against scanpy with pandas reading the
+  positions, and on 10x's SR 4.0.1 tiny sample at every bin size.
+  - The positions are read as a buffered stream, the barcodes and the
+    numbers in separate passes. On that sample the 2 µm bins (11.2 million
+    positions, 330,035 in the matrix) convert in 3.5 s with a 470 MB peak
+    without images, where pandas alone takes about 1 GB to read them.
+- **The `spatial` extra**: `pip install 'pyadata-cli[spatial]'` adds
+  pyarrow, which only Visium HD needs; the container image has it.
+
+### Changed
+
+- **Images are written a strip of rows at a time**, as they are read, rather
+  than loaded before the write starts: Visium HD's hires image is 6,000
+  pixels, some 100 MB.
+- **Barcodes are matched as bytes**, a quarter of the memory of numpy's
+  unicode, for Visium, Visium HD and Xenium alike.
+
 ## 0.17.0
 
 `convert` reads 10x's spatial outputs with their coordinates: a Space
