@@ -1,6 +1,7 @@
 """Pytest configuration and fixtures for adata tests."""
 
 import base64
+import gzip
 import json
 import zlib
 from contextlib import contextmanager
@@ -1439,5 +1440,106 @@ def write_visium_outs(
         spatial=np.stack([pxl_col, pxl_row], axis=1)[take],
         images=pictures,
         scalefactors=scalefactors,
+        counts=counts,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Xenium output bundles
+#
+# As Xenium Onboard Analysis writes them (columns checked against 10x's XOA
+# 1.0.1, 3.0 and 4.0 sample bundles): the cell matrix, cells.csv.gz in the
+# matrix's order, experiment.xenium, and analysis/ CSVs keyed by Barcode.
+# XOA 1 numbered cells; later versions name them like "aaafiiei-1".
+
+
+@dataclass
+class XeniumTruth:
+    bundle: Path
+    cell_ids: List[str]  # the matrix's, in its order
+    columns: Dict[str, np.ndarray]  # cells.csv.gz's other columns, per cell
+    spatial: np.ndarray
+    clusters: Optional[np.ndarray]  # per cell, "" where analysis lacks it
+    umap: Optional[np.ndarray]  # NaN where analysis lacks it
+    counts: np.ndarray
+
+
+def write_xenium_bundle(
+    folder: Path,
+    *,
+    ids: str = "string",
+    n_cells: int = 15,
+    shuffled: bool = False,
+    extra_cells: int = 0,
+    analysis: bool = True,
+    missing_in_analysis: int = 0,
+    seed: int = 0,
+) -> XeniumTruth:
+    rng = np.random.default_rng(seed)
+    folder.mkdir(parents=True)
+    n_features = 5
+    if ids == "int":
+        cell_ids = [str(i + 1) for i in range(n_cells + extra_cells)]
+    else:
+        cell_ids = [
+            "".join("abcdefghijklmnop"[d] for d in rng.integers(0, 16, 8)) + "-1"
+            for _ in range(n_cells + extra_cells)
+        ]
+    counts = rng.integers(0, 6, size=(n_cells, n_features))
+    write_10x_h5(
+        folder / "cell_feature_matrix.h5", counts, barcodes=cell_ids[:n_cells],
+        ids=[f"ENSG{i:05d}" for i in range(n_features - 1)] + ["NegControlProbe_00001"],
+        names=[f"G{i}" for i in range(n_features - 1)] + ["NegControlProbe_00001"],
+        types=["Gene Expression"] * (n_features - 1) + ["Negative Control Probe"],
+    )
+    (folder / "experiment.xenium").write_text(json.dumps({"pixel_size": 0.2125, "major_version": 5}))
+
+    n = n_cells + extra_cells
+    table = {
+        "x_centroid": rng.uniform(0, 5000, n).round(4),
+        "y_centroid": rng.uniform(0, 5000, n).round(4),
+        "transcript_counts": rng.integers(0, 300, n),
+        "control_probe_counts": rng.integers(0, 3, n),
+        "cell_area": rng.uniform(10, 200, n).round(3),
+        "nucleus_area": rng.uniform(5, 50, n).round(3),
+        "segmentation_method": rng.choice(["Segmented by boundary stain", "Segmented by nucleus expansion"], n),
+    }
+    if extra_cells:
+        # A method only the left-out cells use: its category must go.
+        table["segmentation_method"][n_cells:] = "Imported cell segmentation"
+    order = rng.permutation(n) if shuffled else np.arange(n)
+    names = ["cell_id", *table]
+    lines = [",".join(names)]
+    for i in order:
+        values = [cell_ids[i]] + [str(table[k][i]) for k in table]
+        lines.append(",".join(f'"{v}"' if k in ("cell_id", "segmentation_method") else v for k, v in zip(names, values)))
+    (folder / "cells.csv.gz").write_bytes(gzip.compress(("\n".join(lines) + "\n").encode()))
+
+    clusters = umap = None
+    if analysis:
+        listed = rng.permutation(n_cells)[missing_in_analysis:]
+        clusters = np.full(n_cells, "", dtype=object)
+        clusters[listed] = [str(v) for v in rng.integers(1, 12, listed.size)]
+        umap = np.full((n_cells, 2), np.nan)
+        umap[listed] = rng.normal(size=(listed.size, 2)).round(5)
+        path = folder / "analysis" / "clustering" / "gene_expression_graphclust"
+        path.mkdir(parents=True)
+        (path / "clusters.csv").write_text(
+            "Barcode,Cluster\n" + "".join(f"{cell_ids[i]},{clusters[i]}\n" for i in listed)
+        )
+        path = folder / "analysis" / "umap" / "gene_expression_2_components"
+        path.mkdir(parents=True)
+        (path / "projection.csv").write_text(
+            "Barcode,UMAP-1,UMAP-2\n" + "".join(f"{cell_ids[i]},{umap[i, 0]},{umap[i, 1]}\n" for i in listed)
+        )
+
+    keep = slice(0, n_cells)
+    return XeniumTruth(
+        bundle=folder,
+        cell_ids=cell_ids[:n_cells],
+        columns={k: v[keep] for k, v in table.items() if k not in ("x_centroid", "y_centroid")},
+        spatial=np.stack([table["x_centroid"], table["y_centroid"]], axis=1)[keep],
+        clusters=clusters,
+        umap=umap,
         counts=counts,
     )

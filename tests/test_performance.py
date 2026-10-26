@@ -980,6 +980,45 @@ def test_cellbender_embedding_is_written_in_blocks(tmp_path):
     assert_independent_of(measure, what="convert CellBender write calls", axis="n_barcodes")
 
 
+def _spatial_bundle(path: Path, kind: str, n: int, shuffled: bool) -> Path:
+    from tests.conftest import write_visium_outs, write_xenium_bundle
+
+    if kind == "visium":
+        return write_visium_outs(path, n_spots=n, n_extra=n // 4).outs
+    return write_xenium_bundle(path, n_cells=n, shuffled=shuffled, extra_cells=n // 8 if shuffled else 0).bundle
+
+
+@pytest.mark.parametrize(
+    "kind,shuffled", [("visium", True), ("xenium", False), ("xenium", True)]
+)
+def test_spatial_import_work_grows_linearly(tmp_path, kind, shuffled):
+    """The positions or cell table are matched to the matrix while scanned,
+    and written straight through when in its order (Xenium's own) or through
+    the scatter buckets when not: linear either way, never a lookup per row."""
+    from adata.commands.convert import convert_store
+
+    def measure(n: int) -> int:
+        source = _spatial_bundle(tmp_path / f"sp{kind}{shuffled}{n}", kind, n, shuffled)
+        with count_io() as io:
+            convert_store(source, tmp_path / f"osp{kind}{shuffled}{n}.h5ad", QUIET)
+        return io.work
+
+    assert_grows_linearly(measure, what=f"convert {kind} (shuffled={shuffled})", axis="n_cells")
+
+
+@pytest.mark.parametrize("shuffled", [False, True])
+def test_xenium_cells_are_written_in_blocks_not_per_cell(tmp_path, shuffled):
+    from adata.commands.convert import convert_store
+
+    def measure(n: int) -> int:
+        source = _spatial_bundle(tmp_path / f"xw{shuffled}{n}", "xenium", n, shuffled)
+        with count_io() as io:
+            convert_store(source, tmp_path / f"oxw{shuffled}{n}.h5ad", QUIET)
+        return io.h5_write_calls
+
+    assert_independent_of(measure, what=f"convert Xenium write calls (shuffled={shuffled})", axis="n_cells")
+
+
 def test_split_reads_grow_linearly_in_group_count(tmp_path, monkeypatch):
     """Splitting into k groups must stay linear in k at fixed store size.
 
