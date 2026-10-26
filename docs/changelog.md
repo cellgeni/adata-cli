@@ -8,6 +8,53 @@ nav_order: 7
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
+## 0.17.0
+
+`convert` reads 10x's spatial outputs with their coordinates: a Space
+Ranger folder for standard Visium, with its spot positions, tissue images
+and scale factors where squidpy puts them, and a Xenium bundle, with its
+cell table, centroids and Xenium's own clusters, UMAP and PCA. No new
+dependency; Visium HD, whose positions are Parquet only, comes later.
+
+### Added
+
+- **Visium (Space Ranger 1–4)**
+  ([#79](https://github.com/cellgeni/adata-cli/pull/79)). `adata convert
+  outs -o section.h5ad` gives what `squidpy.read.visium` gives, checked
+  against it in CI: obs `in_tissue`, `array_row`, `array_col`;
+  `obsm["spatial"]` in full-resolution pixels; `uns["spatial"][library]`
+  with the images (uint8, as the PNGs hold them), the scale factors and the
+  metadata.
+  - New flags `--library-id` and `--no-images`; `--unfiltered` reads
+    `raw_feature_bc_matrix.h5`, as it reads Parse's unfiltered matrix.
+  - Space Ranger 1's headerless `tissue_positions_list.csv`, decimal
+    positions, and 10x's downloads named with their sample are read.
+  - Refused before anything is written: a barcode with no position, aggr
+    output, Visium HD, and a folder whose matrix is Matrix Market only.
+- **Xenium (XOA 1–4)**
+  ([#79](https://github.com/cellgeni/adata-cli/pull/79)). `adata convert
+  bundle -o cells.h5ad` puts `cells.csv.gz`'s columns in obs and the
+  centroids in `obsm["spatial"]` (µm), and Xenium's graph-based clusters,
+  UMAP and PCA in `obs["graphclust"]`, `obsm["X_umap"]` and `obsm["X_pca"]`,
+  read from `analysis.tar.gz` as Xenium ships it. Checked against 10x's
+  scanpy recipe in CI.
+  - The cell table is matched to the matrix while it is scanned and
+    written straight through, as Xenium writes both in one order; a table
+    in another order goes through scratch buckets (`core/scatter.py`), so
+    memory stays at a block either way.
+- **An `import-xenium` benchmark case**, against 10x's scanpy recipe.
+
+### Fixed
+
+- **A Space Ranger `outs/` folder was refused**
+  ([#79](https://github.com/cellgeni/adata-cli/pull/79)) as a Cell Ranger 2
+  MTX layout ("pick one with --genome"): its two MEX folders were taken for
+  genomes. A Xenium bundle likewise.
+- **A CSV saved with a byte order mark**, as Excel saves one, kept the
+  mark in its first column's name, so a table looked up by that name was
+  refused as lacking it, or a Visium positions file taken for one with no
+  header.
+
 ## 0.16.2
 
 `export image` writes to stdout without `--output`, as every other export

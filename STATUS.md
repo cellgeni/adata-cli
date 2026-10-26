@@ -7,6 +7,7 @@ moves; the plan of record for the current item is in the section below.
 
 | Version | What | Issues |
 |---|---|---|
+| 0.17.0 | `convert` reads Visium (Space Ranger 1–4) and Xenium (XOA 1–4) with positions, images and Xenium's analysis | #79 |
 | 0.16.2 | Documentation site (guides, troubleshooting, a page per format); `export image` writes PNG to stdout without `-o` | #76, #77 |
 | 0.16.1 | `subset`, `split` and the MuData export narrow categoricals (and their colours) as anndata's subsetting does | #74 |
 | 0.16.0 | MuData `.h5mu` read (each modality, global parts on its cells) and written (split by feature type); copies of anndata 0.7 dataframes readable | #31, #72 |
@@ -19,29 +20,8 @@ The conversion epic's sub-issues (#21–#30) are all done and ticked in #20.
 
 ## In progress
 
-### Spatial import: standard Visium and Xenium (`feat/spatial`, for 0.17.0)
-
-Decisions:
-- Standard Visium (Space Ranger 1–4) and Xenium (XOA 1–4) first, with no new
-  dependency: both come as CSV, JSON and PNG. Visium HD, whose positions are
-  Parquet only, waits for a `spatial` extra with pyarrow.
-- Laid out as squidpy (Visium) and spatialdata-io's table (Xenium) lay
-  them out; images stay the PNGs' uint8 pixels. Xenium brings its own
-  clusters, UMAP and PCA, read from `analysis.tar.gz` as it ships.
-- A table beside the matrix is matched to its barcodes while scanned
-  (`conversion/spatial.py`), and written straight through when in the
-  matrix's order (Xenium's cells, on every real bundle checked) or through
-  `core/scatter.py` when not.
-
-Steps:
-- [x] `table.py`: headerless files, `on_index`, reusable columns
-- [x] `core/scatter.py`
-- [x] Visium: `visium.py`, flags `--library-id`, `--no-images`, `--unfiltered`
-- [x] Xenium: `xenium.py`, analysis from the folder or the archive
-- [x] Performance guards; squidpy and 10x-recipe comparisons; `import-xenium` benchmark
-- [x] Real data by hand: Visium SR 1.1 and SR 2.1, Xenium XOA 3.0 and 4.0 tiny
-- [x] Docs: two format pages, tables, guide, Troubleshooting, Developers
-- [ ] PR, review, merge; release 0.17.0
+Nothing. Spatial (standard Visium and Xenium) is out in 0.17.0; Visium HD
+is first among the follow-ups below.
 
 ## Follow-ups noticed
 
