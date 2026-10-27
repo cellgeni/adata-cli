@@ -68,6 +68,9 @@ dev = [
     "pandas>=2.2",
     "scipy>=1.13",
     "pyarrow>=17",
+    # The oracle for the centroids and areas of segmented cells
+    # (tests/test_geojson.py).
+    "shapely>=2.0",
     "pytest>=8.3.4",
     "pytest-cov>=6.0.0",
     # Turns a hang into a failure with a traceback. Without it a stuck test

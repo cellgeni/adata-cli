@@ -19,7 +19,7 @@ import pytest
 from typer.testing import CliRunner
 
 from adata.cli import app
-from tests.conftest import write_visium_hd_outs, write_visium_outs
+from tests.conftest import write_segmented_outputs, write_visium_hd_outs, write_visium_outs
 
 ad = pytest.importorskip("anndata")
 
@@ -376,3 +376,188 @@ def test_a_bin_folder_without_scale_factors_names_what_it_lacks(tmp_path):
     message = _refused(hd.outs, "-o", tmp_path / "out.h5ad", "--bin-size", "16")
     assert "has no spatial/scalefactors_json.json beside the matrix" in message
     assert "tissue_positions.csv" not in message
+
+
+# ---------------------------------------------------------------------------
+# Visium HD segmented cells (Space Ranger 4)
+
+
+def _check_cells(adata, truth, *, unfiltered=False) -> None:
+    assert list(adata.obs_names) == (truth.raw_barcodes if unfiltered else truth.barcodes)
+    if unfiltered:
+        return
+    np.testing.assert_allclose(adata.obsm["spatial"], truth.spatial, rtol=0, atol=1e-9)
+    np.testing.assert_allclose(adata.obs["cell_area"], truth.cell_area, rtol=1e-12)
+    np.testing.assert_allclose(adata.obs["nucleus_area"], truth.nucleus_area, rtol=1e-12)
+    clusters = adata.obs["graphclust"].astype(object).where(adata.obs["graphclust"].notna(), "")
+    assert list(clusters) == list(truth.clusters)
+    np.testing.assert_array_equal(adata.obsm["X_umap"], truth.umap)
+    np.testing.assert_array_equal(adata.X.toarray(), truth.counts)
+
+
+@pytest.mark.parametrize("suffix", [".h5ad", ".zarr"])
+def test_cells_land_with_their_centroids_areas_and_analysis(tmp_path, suffix):
+    hd = write_visium_hd_outs(tmp_path / "run", sizes=(16,), cells=True)
+    out = tmp_path / f"out{suffix}"
+
+    result = _ok(hd.outs, "-o", out, "--cells")
+
+    assert "Visium HD, segmented cells" in _out(result)
+    assert "1 cells have no nucleus" in _out(result)
+    assert "2 cells have no clusters in analysis/" in _out(result)
+    adata = _read(out)
+    _check_cells(adata, hd.cells)
+    assert list(adata.obs.columns) == ["cell_area", "nucleus_area", "graphclust"]
+    library = adata.uns["spatial"]["tiny_mouse_brain"]
+    assert library["scalefactors"] == hd.cells.scalefactors
+    np.testing.assert_array_equal(library["images"]["hires"], hd.cells.images["hires"])
+    assert library["metadata"]["software_version"] == "spaceranger-4.0.1"
+    assert "cellranger" in adata.uns
+
+
+def test_the_segmented_folder_and_its_matrix_read_as_cells_without_the_flag(tmp_path):
+    hd = write_visium_hd_outs(tmp_path / "run", sizes=(16,), cells=True)
+    _ok(hd.cells.folder, "-o", tmp_path / "a.h5ad")
+    _check_cells(_read(tmp_path / "a.h5ad"), hd.cells)
+    _ok(hd.cells.folder / "filtered_feature_cell_matrix.h5", "-o", tmp_path / "b.h5ad", "--from", "visium")
+    _check_cells(_read(tmp_path / "b.h5ad"), hd.cells)
+
+
+def test_polygons_in_another_order_than_the_matrix_land_on_their_cells(tmp_path):
+    outs = tmp_path / "outs"
+    truth = write_segmented_outputs(outs, shuffled=True, seed=4)
+    _ok(truth.folder, "-o", tmp_path / "out.h5ad")
+    _check_cells(_read(tmp_path / "out.h5ad"), truth)
+
+
+def test_unfiltered_reads_every_segmented_cell(tmp_path):
+    hd = write_visium_hd_outs(tmp_path / "run", sizes=(16,), cells=True)
+    _ok(hd.outs, "-o", tmp_path / "out.h5ad", "--cells", "--unfiltered")
+    adata = _read(tmp_path / "out.h5ad")
+    _check_cells(adata, hd.cells, unfiltered=True)
+    assert adata.obsm["spatial"].shape == (len(hd.cells.raw_barcodes), 2)
+    assert not np.isnan(adata.obs["cell_area"]).any()
+
+
+def test_bins_stay_the_default_and_the_summary_points_at_cells(tmp_path):
+    hd = write_visium_hd_outs(tmp_path / "run", cells=True)
+    result = _ok(hd.outs, "-o", tmp_path / "out.h5ad")
+    assert "8 µm bins" in _out(result)
+    assert "segmented cells too: --cells" in _out(result)
+    _check(_read(tmp_path / "out.h5ad"), hd.bins[8])
+
+
+def test_split_feature_types_puts_the_cells_in_every_output(tmp_path):
+    hd = write_visium_hd_outs(tmp_path / "run", sizes=(16,), cells=True)
+    with h5py.File(hd.cells.folder / "filtered_feature_cell_matrix.h5", "a") as f:
+        types = f["matrix/features/feature_type"][...].astype("S16")
+        types[-1] = b"Antibody Capture"
+        del f["matrix/features/feature_type"]
+        f["matrix/features/feature_type"] = types
+    _ok(hd.outs, "-o", tmp_path / "out.h5ad", "--cells", "--split-feature-types")
+    for name in ("out.Gene_Expression.h5ad", "out.Antibody_Capture.h5ad"):
+        adata = _read(tmp_path / name)
+        np.testing.assert_allclose(adata.obsm["spatial"], hd.cells.spatial, rtol=0, atol=1e-9)
+        assert list(adata.obs.columns) == ["cell_area", "nucleus_area", "graphclust"]
+
+
+def test_without_nuclei_or_analysis_the_cells_still_convert(tmp_path):
+    truth = write_segmented_outputs(tmp_path / "outs")
+    (truth.folder / "nucleus_segmentations.geojson").unlink()
+    import shutil
+    shutil.rmtree(truth.folder / "analysis")
+    result = _ok(truth.folder, "-o", tmp_path / "out.h5ad")
+    assert "obs will have no nucleus_area" in _out(result)
+    adata = _read(tmp_path / "out.h5ad")
+    assert list(adata.obs.columns) == ["cell_area"]
+    np.testing.assert_allclose(adata.obsm["spatial"], truth.spatial, rtol=0, atol=1e-9)
+
+
+def test_cells_on_an_output_without_segmentation_are_refused(tmp_path):
+    hd = write_visium_hd_outs(tmp_path / "run", sizes=(16,))
+    assert "has no segmented cells" in _refused(hd.outs, "-o", tmp_path / "a.h5ad", "--cells")
+    truth = write_visium_outs(tmp_path / "sd")
+    assert "has no segmented cells" in _refused(truth.outs, "-o", tmp_path / "b.h5ad", "--cells")
+    assert not list(tmp_path.glob("*.h5ad"))
+
+
+def test_cells_with_a_bin_size_are_refused(tmp_path):
+    hd = write_visium_hd_outs(tmp_path / "run", sizes=(16,), cells=True)
+    message = _refused(hd.outs, "-o", tmp_path / "out.h5ad", "--cells", "--bin-size", "16")
+    assert "give one" in message
+    message = _refused(hd.cells.folder, "-o", tmp_path / "out.h5ad", "--bin-size", "16")
+    assert "holds cells" in message
+
+
+def test_cells_with_a_cell_matrix_reads_it_and_with_a_bin_matrix_is_refused(tmp_path):
+    """--cells with the cell matrix itself was refused, though that matrix
+    is read as cells anyway."""
+    hd = write_visium_hd_outs(tmp_path / "run", sizes=(16,), cells=True)
+    _ok(hd.cells.folder / "filtered_feature_cell_matrix.h5", "-o", tmp_path / "a.h5ad", "--from", "visium", "--cells")
+    _check_cells(_read(tmp_path / "a.h5ad"), hd.cells)
+    message = _refused(
+        hd.bins[16].outs / "filtered_feature_bc_matrix.h5", "-o", tmp_path / "b.h5ad",
+        "--from", "visium", "--cells",
+    )
+    assert "is a matrix already" in message
+
+
+def test_a_cell_with_no_polygon_is_refused_before_writing(tmp_path):
+    truth = write_segmented_outputs(tmp_path / "outs")
+    path = truth.folder / "cell_segmentations.geojson"
+    collection = json.loads(path.read_text())
+    gone = int(truth.barcodes[3][len("cellid_"):-2])
+    collection["features"] = [f for f in collection["features"] if f["properties"]["cell_id"] != gone]
+    path.write_text(json.dumps(collection))
+
+    message = _refused(truth.folder, "-o", tmp_path / "out.h5ad")
+
+    assert f"1 of the matrix's 12 barcodes have no row in cell_segmentations.geojson (by cell_id) (the first is '{gone}')" in message
+    assert not list(tmp_path.glob("out.*"))
+
+
+def test_a_barcode_that_names_no_cell_is_refused(tmp_path):
+    truth = write_segmented_outputs(tmp_path / "outs")
+    with h5py.File(truth.folder / "filtered_feature_cell_matrix.h5", "a") as f:
+        f["matrix/barcodes"][0] = b"s_008um_0000_001-1"
+    message = _refused(truth.folder, "-o", tmp_path / "out.h5ad")
+    assert "barcode 's_008um_0000_001-1' does not name a segmented cell" in message
+
+
+def test_a_broken_polygon_file_is_refused_before_writing(tmp_path):
+    truth = write_segmented_outputs(tmp_path / "outs")
+    path = truth.folder / "nucleus_segmentations.geojson"
+    path.write_text(path.read_text()[:-40])
+    message = _refused(truth.folder, "-o", tmp_path / "out.h5ad")
+    assert "nucleus_segmentations.geojson: feature" in message and "is not valid JSON" in message
+    assert not list(tmp_path.glob("out.*"))
+
+
+@pytest.mark.parametrize("value", [None, 0, "1"])
+def test_scale_factors_without_microns_per_pixel_are_refused(tmp_path, value):
+    truth = write_segmented_outputs(tmp_path / "outs")
+    path = truth.folder / "spatial" / "scalefactors_json.json"
+    factors = json.loads(path.read_text())
+    if value is None:
+        del factors["microns_per_pixel"]
+    else:
+        factors["microns_per_pixel"] = value
+    path.write_text(json.dumps(factors))
+    assert "has no microns_per_pixel" in _refused(truth.folder, "-o", tmp_path / "out.h5ad")
+
+
+def test_a_segmented_folder_without_polygons_is_not_visium_cells(tmp_path):
+    truth = write_segmented_outputs(tmp_path / "outs")
+    (truth.folder / "cell_segmentations.geojson").unlink()
+    message = _refused(
+        truth.folder / "filtered_feature_cell_matrix.h5", "-o", tmp_path / "out.h5ad", "--from", "visium"
+    )
+    assert "has no cell_segmentations.geojson beside the matrix" in message
+
+
+def test_a_segmented_folder_is_visium_not_unrecognised(tmp_path):
+    """segmented_outputs/ has no tissue positions, so it was not taken for a
+    Space Ranger folder, and nothing else recognised it either."""
+    truth = write_segmented_outputs(tmp_path / "outs")
+    result = _ok(truth.folder, "-o", tmp_path / "out.h5ad")
+    assert "Space Ranger (Visium HD, segmented cells)" in _out(result)

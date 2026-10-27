@@ -143,8 +143,10 @@ These are refused before anything is written too.
 The positions and the matrix come from different runs, or the positions
 were edited. Every spot of the matrix needs a position; spots in the
 positions but not the matrix are fine. A Xenium cell missing from
-`cells.csv.gz` is refused the same way, and so is a table (positions, cells
-or an analysis table) with a row for none of the matrix's barcodes.
+`cells.csv.gz` is refused the same way, as is a Visium HD cell with no
+outline in `cell_segmentations.geojson` (named there by its integer
+`cell_id`), and so is a table (positions, cells, outlines or an analysis
+table) with a row for none of the matrix's barcodes.
 
 ### `tissue_positions.csv: pxl_col_in_fullres holds values that are not numbers.`
 
@@ -157,6 +159,17 @@ what its name says.
 `--bin-size` names a folder under `binned_outputs/` (`square_002um` for 2).
 Space Ranger writes 2, 8 and 16 µm bins, but a copied or trimmed output may
 hold fewer; the message lists those there are.
+
+### `outs has no segmented cells: --cells reads the segmented_outputs/ folder Space Ranger 4 writes for Visium HD.`
+
+Space Ranger segments cells from version 4, for Visium HD only, and only
+when the run had the image it segments from. Standard Visium and Space
+Ranger 3 output have bins or spots only; leave `--cells` out.
+
+### `cell_segmentations.geojson: feature 1234 is not valid JSON (Expecting ',' delimiter).`
+
+The GeoJSON was cut short, usually by a copy that did not finish. Copy it
+again from the Space Ranger output.
 
 ### `This matrix holds 2 libraries (A1, B1), as spaceranger aggr writes`
 

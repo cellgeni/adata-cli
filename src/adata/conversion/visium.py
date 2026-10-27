@@ -23,15 +23,25 @@ barcodes as they are scanned.
 Visium HD is read too, one bin size at a time (`--bin-size`, 8 µm by
 default): each `binned_outputs/square_NNNum/` folder is laid out as above,
 with its positions as Parquet, which pyarrow reads (the `spatial` extra).
+
+Or as cells (`--cells`, or the folder given itself): Space Ranger 4
+segments the tissue into cells in `segmented_outputs/`, with a cells x
+features matrix, each cell's outline and its nucleus's as GeoJSON polygons
+in full-resolution pixels, the images and scale factors, and its own
+`analysis/`. Each cell's centroid goes in `obsm["spatial"]`, where squidpy
+plots spots, its area and its nucleus's in obs (`cell_area`,
+`nucleus_area`, in µm² as Xenium gives them), and the clusters, UMAP and
+PCA as for Xenium. The outlines themselves are not kept.
 """
 
 from __future__ import annotations
 
 import json
 from contextlib import ExitStack
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 import h5py
 import numpy as np
@@ -40,7 +50,20 @@ from rich.console import Console
 from adata.conversion import tenx
 from adata.conversion.base import ConversionPlan, Converter, Options
 from adata.conversion.features import STRING_STEP, Target, describe_import, write_obs_index, write_var
-from adata.conversion.spatial import BarcodeJoin, Join, Sink, table_blocks, numbers, write_image, require_numeric, write_rows
+from adata.conversion.spatial import (
+    Analysis,
+    BarcodeJoin,
+    Join,
+    Sink,
+    check_analysis,
+    numbers,
+    require_numeric,
+    scan_analysis,
+    table_blocks,
+    write_analysis,
+    write_image,
+    write_rows,
+)
 from adata.core.subset import fan_out_sparse_matrix
 from adata.elements.read import decode_str_array
 from adata.elements.write import (
@@ -50,6 +73,7 @@ from adata.elements.write import (
     write_mapping,
     write_scalar,
 )
+from adata.formats.geojson import polygon_stats
 from adata.formats.json_data import write_json_value
 from adata.formats.parquet import ParquetTable, open_table, require_pyarrow
 from adata.formats.table import TableScan, column_values, create_columns, scan_table
@@ -69,6 +93,13 @@ _POSITION_FILES = ("tissue_positions.csv", "tissue_positions_list.csv", "tissue_
 DEFAULT_BIN_UM = 8
 _IMAGES = ("hires", "lowres")
 _FILTERED, _RAW = "filtered_feature_bc_matrix", "raw_feature_bc_matrix"
+#: Space Ranger 4's segmented cells: the folder, its matrices and polygons.
+_SEGMENTED = "segmented_outputs"
+_CELL_FILTERED, _CELL_RAW = "filtered_feature_cell_matrix", "raw_feature_cell_matrix"
+_CELL_POLYGONS, _NUCLEUS_POLYGONS = "cell_segmentations.geojson", "nucleus_segmentations.geojson"
+_CELL_BARCODE = re.compile(r"cellid_(\d+)-\d+")
+#: Polygons' measures handed to the writer at a time.
+_POLYGON_STEP = 1 << 16
 
 
 def _is_hd(folder: Path) -> bool:
@@ -86,6 +117,18 @@ def _bin_sizes(outs: Path) -> Dict[int, Path]:
     return dict(sorted(sizes.items()))
 
 
+def _is_segmented(folder: Path) -> bool:
+    """A `segmented_outputs/` folder: cell polygons beside a cell matrix."""
+    return (
+        (folder / _CELL_POLYGONS).is_file()
+        and (folder / "spatial" / "scalefactors_json.json").is_file()
+        and any(
+            _matrix_files(folder, name) or (folder / name).is_dir()
+            for name in (_CELL_FILTERED, _CELL_RAW)
+        )
+    )
+
+
 def _matrix_files(folder: Path, name: str) -> List[Path]:
     """`<name>.h5` in the folder, or one prefixed with the sample name, as
     10x's downloads are (`V1_Mouse_Brain_filtered_feature_bc_matrix.h5`)."""
@@ -100,7 +143,7 @@ def _locate(path: Path) -> Optional[Path]:
     for folder in (path, path / "outs"):
         if not folder.is_dir():
             continue
-        if _is_hd(folder):
+        if _is_hd(folder) or _is_segmented(folder):
             return folder
         spatial = folder / "spatial"
         if (spatial / "scalefactors_json.json").is_file() and any(
@@ -115,7 +158,8 @@ def _locate(path: Path) -> Optional[Path]:
 
 def sniff(path: Path) -> bool:
     """A Space Ranger output folder (or the run folder holding its `outs/`),
-    a Visium HD one included, or one of its bin folders."""
+    a Visium HD one included, or one of its bin folders, or its segmented
+    cells."""
     path = Path(path)
     return path.is_dir() and not is_zarr_path(path) and _locate(path) is not None
 
@@ -125,27 +169,63 @@ class _Plan:
     matrix: Any
     matrix_path: Path
     targets: List[Target]
-    #: The CSV positions' scan, or the Parquet ones' footer.
-    positions: Union[TableScan, ParquetTable]
-    join: Join
-    bin_um: Optional[int]
     library_id: str
     scalefactors: Dict[str, Any]
     images: Dict[str, Path]
     filtered_barcodes: bool
     zarr_format: Optional[int]
+    #: The CSV positions' scan, or the Parquet ones' footer; None for cells.
+    positions: Optional[Union[TableScan, ParquetTable]] = None
+    join: Optional[Join] = None
+    bin_um: Optional[int] = None
+    #: Segmented cells: the cells' polygons, their nuclei's, and analysis/.
+    cells: Optional["_Polygons"] = None
+    nuclei: Optional["_Polygons"] = None
+    analysis: Analysis = field(default_factory=Analysis)
 
 
-def _bundle(source: Path, options: Options) -> tuple:
-    """(the outs folder, the matrix file) for this input."""
+@dataclass
+class _Polygons:
+    """A GeoJSON's polygons, measured, in file order, matched to the matrix."""
+
+    path: Path
+    join: Join
+    #: In µm².
+    area: np.ndarray
+    #: Centroids, [x, y] in full-resolution pixels; None for nuclei.
+    spatial: Optional[np.ndarray] = None
+
+    def blocks(self) -> Iterator[Tuple[int, Dict[str, np.ndarray]]]:
+        for lo in range(0, self.area.size, _POLYGON_STEP):
+            hi = min(lo + _POLYGON_STEP, self.area.size)
+            block = {"area": self.area[lo:hi]}
+            if self.spatial is not None:
+                block["spatial"] = self.spatial[lo:hi]
+            yield hi - lo, block
+
+
+@dataclass
+class _Bundle:
+    folder: Path
+    matrix: Path
+    #: Space Ranger 4's segmented cells, rather than spots or bins.
+    cells: bool = False
+    #: Bins were read from an output that has segmented cells too.
+    cells_beside: bool = False
+
+
+def _bundle(source: Path, options: Options) -> _Bundle:
+    """The folder read, and its matrix file, for this input."""
     if source.is_file():
-        for flag in ("--unfiltered", "--bin-size"):
+        cells = source.name.endswith("_cell_matrix.h5") or (source.parent / _CELL_POLYGONS).is_file()
+        # --cells only says what a cell matrix is already.
+        for flag in ("--unfiltered", "--bin-size") + (() if cells else ("--cells",)):
             if flag in options.given:
                 raise ValueError(
                     f"{flag} picks among the matrices of a Space Ranger output "
                     f"folder; {source.name} is a matrix already. Give the folder."
                 )
-        return source.parent, source
+        return _Bundle(source.parent, source, cells=cells)
     outs = _locate(source)
     if outs is None:
         raise ValueError(
@@ -153,7 +233,23 @@ def _bundle(source: Path, options: Options) -> tuple:
             "(tissue positions and scalefactors_json.json) beside a "
             "*_feature_bc_matrix.h5."
         )
-    if _is_hd(outs):
+    if options.cells and options.bin_size is not None:
+        raise ValueError("--cells reads the segmented cells and --bin-size a size of bins; give one.")
+    cells = _is_segmented(outs)
+    if options.cells and not cells:
+        if _is_hd(outs) and _is_segmented(outs / _SEGMENTED):
+            outs, cells = outs / _SEGMENTED, True
+        else:
+            raise ValueError(
+                f"{outs} has no segmented cells: --cells reads the "
+                f"{_SEGMENTED}/ folder Space Ranger 4 writes for Visium HD."
+            )
+    cells_beside = False
+    if cells:
+        if options.bin_size is not None:
+            raise ValueError(f"--bin-size picks among a Visium HD output's bins; {outs.name} holds cells.")
+    elif _is_hd(outs):
+        cells_beside = _is_segmented(outs / _SEGMENTED)
         sizes = _bin_sizes(outs)
         size = DEFAULT_BIN_UM if options.bin_size is None else options.bin_size
         if size not in sizes:
@@ -167,7 +263,10 @@ def _bundle(source: Path, options: Options) -> tuple:
             "--bin-size picks among a Visium HD output's bins; this is "
             "standard Visium, or one bin size already."
         )
-    name = _RAW if options.unfiltered else _FILTERED
+    if cells:
+        name = _CELL_RAW if options.unfiltered else _CELL_FILTERED
+    else:
+        name = _RAW if options.unfiltered else _FILTERED
     found = _matrix_files(outs, name)
     if len(found) > 1:
         raise ValueError(
@@ -182,7 +281,7 @@ def _bundle(source: Path, options: Options) -> tuple:
                 "without the positions and images."
             )
         raise ValueError(f"{outs} has no {name}.h5.")
-    return outs, found[0]
+    return _Bundle(outs, found[0], cells=cells, cells_beside=cells_beside)
 
 
 def _has_header(path: Path) -> bool:
@@ -249,7 +348,7 @@ def _numeric_arrow(type_name: str) -> bool:
 
 class VisiumImport(Converter):
     options = tenx.TenxImport.options | frozenset(
-        {"--unfiltered", "--library-id", "--no-images", "--bin-size"}
+        {"--unfiltered", "--library-id", "--no-images", "--bin-size", "--cells"}
     )
 
     def plan(
@@ -261,7 +360,10 @@ class VisiumImport(Converter):
         options: Options,
     ) -> ConversionPlan:
         source = Path(source)
-        outs, matrix_path = _bundle(source, options)
+        bundle = _bundle(source, options)
+        if bundle.cells:
+            return self._plan_cells(source, bundle, output, src_format, dst_format, options)
+        outs, matrix_path = bundle.folder, bundle.matrix
         spatial = outs / "spatial"
         position_file = next((spatial / n for n in _POSITION_FILES if (spatial / n).is_file()), None)
         scalefactor_file = spatial / "scalefactors_json.json"
@@ -297,14 +399,7 @@ class VisiumImport(Converter):
 
         scalefactors = json.loads(scalefactor_file.read_text())
         bin_um = _bin_um(scalefactors) if position_file.suffix == ".parquet" else None
-        images: Dict[str, Path] = {}
-        if not options.no_images:
-            for name in _IMAGES:
-                path = spatial / f"tissue_{name}_image.png"
-                if path.is_file():
-                    images[name] = path
-                else:
-                    warnings.append(f"No spatial/{path.name}; uns['spatial'] will have no {name} image.")
+        images = _images(spatial, options, warnings)
 
         described = describe_import(matrix.n_barcodes, matrix.n_features, matrix.feature_types, targets)
         return ConversionPlan(
@@ -317,6 +412,7 @@ class VisiumImport(Converter):
                 f"{dst_format}, {described}, positions from "
                 f"{position_file.name}, library {library_id!r}"
                 + (f", images {', '.join(images)}" if images else "")
+                + (" (segmented cells too: --cells)" if bundle.cells_beside else "")
             ),
             warnings=warnings,
             detail=_Plan(
@@ -334,6 +430,93 @@ class VisiumImport(Converter):
             ),
         )
 
+    def _plan_cells(
+        self,
+        source: Path,
+        bundle: _Bundle,
+        output: Path,
+        src_format: str,
+        dst_format: str,
+        options: Options,
+    ) -> ConversionPlan:
+        """Space Ranger 4's segmented cells, measured and matched to the matrix
+        here, so that a refusal comes before anything is written."""
+        folder, matrix_path = bundle.folder, bundle.matrix
+        spatial = folder / "spatial"
+        scalefactor_file = spatial / "scalefactors_json.json"
+        lacking = [
+            what for what, present in (
+                (_CELL_POLYGONS, (folder / _CELL_POLYGONS).is_file()),
+                ("spatial/scalefactors_json.json", scalefactor_file.is_file()),
+            ) if not present
+        ]
+        if lacking:
+            raise ValueError(f"{folder} has no {' and no '.join(lacking)} beside the matrix.")
+        scalefactors = json.loads(scalefactor_file.read_text())
+        microns_per_pixel = scalefactors.get("microns_per_pixel")
+        if not isinstance(microns_per_pixel, (int, float)) or isinstance(microns_per_pixel, bool) or microns_per_pixel <= 0:
+            raise ValueError(
+                "spatial/scalefactors_json.json has no microns_per_pixel, which "
+                "gives the cells' areas in µm²."
+            )
+
+        with h5py.File(matrix_path, "r") as handle:
+            if not tenx.sniff(matrix_path):
+                raise ValueError(f"{matrix_path.name} is not a 10x HDF5 matrix.")
+            matrix, outputs, targets, warnings = tenx.plan_matrix_import(handle, output, options)
+            library_id = _library_id(matrix.attrs, folder, options)
+            group = handle[matrix.group]
+            ids = _cell_ids(group["barcodes"], matrix_path)
+            cells = _measure(folder / _CELL_POLYGONS, ids, microns_per_pixel, centroids=True)
+            nuclei = None
+            if (folder / _NUCLEUS_POLYGONS).is_file():
+                nuclei = _measure(folder / _NUCLEUS_POLYGONS, ids, microns_per_pixel, centroids=False)
+            del ids
+            analysis = scan_analysis(folder / "analysis", group["barcodes"])
+            filtered_barcodes = "filtered_barcodes" in group
+
+        cells.join.check(f"{_CELL_POLYGONS} (by cell_id)")
+        if nuclei is None:
+            warnings.append(f"No {_NUCLEUS_POLYGONS}; obs will have no nucleus_area.")
+        else:
+            nuclei.join.check(f"{_NUCLEUS_POLYGONS} (by cell_id)", allow_missing=True)
+            if nuclei.join.n_missing:
+                warnings.append(
+                    f"{nuclei.join.n_missing:,} cells have no nucleus in "
+                    f"{_NUCLEUS_POLYGONS}; their nucleus_area is left empty."
+                )
+        check_analysis(analysis, warnings)
+        images = _images(spatial, options, warnings)
+
+        found = analysis.found()
+        described = describe_import(matrix.n_barcodes, matrix.n_features, matrix.feature_types, targets)
+        return ConversionPlan(
+            source=source,
+            src_format=src_format,
+            dst_format=dst_format,
+            outputs=outputs,
+            summary=(
+                f"Space Ranger (Visium HD, segmented cells) → {dst_format}, {described}, "
+                f"centroids and areas from {_CELL_POLYGONS}, library {library_id!r}"
+                + (f", analysis: {', '.join(found)}" if found else "")
+                + (f", images {', '.join(images)}" if images else "")
+            ),
+            warnings=warnings,
+            detail=_Plan(
+                matrix=matrix,
+                matrix_path=matrix_path,
+                targets=targets,
+                library_id=library_id,
+                scalefactors=scalefactors,
+                images=images,
+                filtered_barcodes=filtered_barcodes,
+                zarr_format=(options.zarr_format or 3) if dst_format == "zarr" else None,
+                cells=cells,
+                nuclei=nuclei,
+                analysis=analysis,
+            ),
+        )
+
     def write(self, plan: ConversionPlan, staged: Sequence[Path], console: Console) -> None:
         detail: _Plan = plan.detail
         matrix = detail.matrix
@@ -345,8 +528,13 @@ class VisiumImport(Converter):
                 for path in staged
             ]
             for root, target in zip(roots, detail.targets):
-                with console.status("[cyan]Writing obs, var and the spot positions...[/]"):
-                    _write_obs(root, group, detail)
+                with console.status(
+                    f"[cyan]Writing obs, var and the {'cells' if detail.cells else 'spot positions'}...[/]"
+                ):
+                    if detail.cells is not None:
+                        _write_cell_obs(root, group, detail)
+                    else:
+                        _write_obs(root, group, detail)
                     write_var(root, target)
                     tenx._write_uns(root, matrix)
                     _write_spatial_uns(root, detail)
@@ -359,8 +547,56 @@ class VisiumImport(Converter):
                 )
 
 
-def _write_obs(root: Any, group: h5py.Group, detail: _Plan) -> None:
-    """obs (the barcodes, and the positions' columns), and `obsm["spatial"]`."""
+def _images(spatial: Path, options: Options, warnings: List[str]) -> Dict[str, Path]:
+    images: Dict[str, Path] = {}
+    if not options.no_images:
+        for name in _IMAGES:
+            path = spatial / f"tissue_{name}_image.png"
+            if path.is_file():
+                images[name] = path
+            else:
+                warnings.append(f"No spatial/{path.name}; uns['spatial'] will have no {name} image.")
+    return images
+
+
+def _cell_ids(barcodes: Any, path: Path) -> np.ndarray:
+    """The integer id in each of the matrix's `cellid_<id>-<n>` barcodes,
+    which is what the polygons are keyed by."""
+    n = barcodes.shape[0]
+    ids = np.empty(n, dtype=np.int64)
+    for lo in range(0, n, STRING_STEP):
+        for i, barcode in enumerate(decode_str_array(np.asarray(barcodes[lo : lo + STRING_STEP])), lo):
+            match = _CELL_BARCODE.fullmatch(str(barcode))
+            if match is None:
+                raise ValueError(
+                    f"{path.name}: barcode {str(barcode)!r} does not name a segmented "
+                    "cell, as Space Ranger's cellid_000000001-1 does."
+                )
+            ids[i] = int(match.group(1))
+    return ids
+
+
+def _measure(path: Path, ids: np.ndarray, microns_per_pixel: float, *, centroids: bool) -> _Polygons:
+    """Each polygon's area, and centroid if asked, in one read of the file,
+    matched to the matrix's cells by id as they are read. What is kept is a
+    few numbers a polygon, as a spot's position is: the file is some
+    hundreds of bytes a polygon, and its outlines are not kept."""
+    joiner = BarcodeJoin(ids)
+    points, areas = [], []
+    for block_ids, x, y, area in polygon_stats(path):
+        joiner(block_ids)
+        if centroids:
+            points.append(np.stack([x, y], axis=1))
+        areas.append(area * microns_per_pixel ** 2)
+    join = joiner.finish()
+    return _Polygons(
+        path, join,
+        area=np.concatenate(areas) if areas else np.zeros(0),
+        spatial=(np.concatenate(points) if points else np.zeros((0, 2))) if centroids else None,
+    )
+
+
+def _write_index(root: Any, group: h5py.Group) -> Any:
     barcodes = group["barcodes"]
     n = barcodes.shape[0]
     obs = write_obs_index(
@@ -371,6 +607,46 @@ def _write_obs(root: Any, group: h5py.Group, detail: _Plan) -> None:
         ),
     )
     ensure_anndata_skeleton(root)
+    return obs
+
+
+def _write_cell_obs(root: Any, group: h5py.Group, detail: _Plan) -> None:
+    """obs (the barcodes, the areas, the clusters), `obsm["spatial"]` (the
+    cells' centroids) and the analysis projections."""
+    obs = _write_index(root, group)
+    n = detail.cells.join.n_out
+    spatial = create_dataset(root["obsm"], "spatial", shape=(n, 2), dtype=np.float64)
+    spec.set_encoding(spatial, spec.ARRAY)
+    area = create_dataset(obs, "cell_area", shape=(n,), dtype=np.float64)
+    spec.set_encoding(area, spec.ARRAY)
+    write_rows(
+        detail.cells.blocks(), detail.cells.join,
+        [
+            Sink(spatial, lambda block: block["spatial"]),
+            Sink(area, lambda block: block["area"]),
+        ],
+        root,
+    )
+    order = ["cell_area"]
+    if detail.nuclei is not None:
+        nucleus = create_dataset(obs, "nucleus_area", shape=(n,), dtype=np.float64)
+        spec.set_encoding(nucleus, spec.ARRAY)
+        write_rows(
+            detail.nuclei.blocks(), detail.nuclei.join,
+            [Sink(nucleus, lambda block: block["area"], np.nan)],
+            root,
+        )
+        order.append("nucleus_area")
+    order += write_analysis(root, obs, detail.analysis)
+    if detail.filtered_barcodes:
+        write_dense(obs, "filtered_barcodes", np.asarray(group["filtered_barcodes"][...]).astype(bool))
+        order.append("filtered_barcodes")
+    set_column_order(obs, order)
+
+
+def _write_obs(root: Any, group: h5py.Group, detail: _Plan) -> None:
+    """obs (the barcodes, and the positions' columns), and `obsm["spatial"]`."""
+    obs = _write_index(root, group)
 
     pixels = ("pxl_col_in_fullres", "pxl_row_in_fullres")  # x, y
     if isinstance(detail.positions, ParquetTable):

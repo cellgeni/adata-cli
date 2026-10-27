@@ -42,6 +42,7 @@ no extension.
 | Cell Ranger's `*_feature_bc_matrix.h5` | `adata convert in.h5 -o out.h5ad` | [10x HDF5](../reference/formats/10x-h5.md) |
 | A Space Ranger `outs/` folder (standard Visium) | `adata convert outs -o out.h5ad` | [Visium](../reference/formats/visium.md) |
 | A Visium HD `outs/` folder | `adata convert outs -o out.h5ad --bin-size 8` (needs `pyadata-cli[spatial]`) | [Visium HD](../reference/formats/visium.md#visium-hd) |
+| Space Ranger 4's segmented cells | `adata convert outs -o out.h5ad --cells` | [Segmented cells](../reference/formats/visium.md#segmented-cells) |
 | A Xenium output bundle | `adata convert bundle -o out.h5ad` | [Xenium](../reference/formats/xenium.md) |
 | CellBender `output.h5` | `adata convert output.h5 -o out.h5ad` | [CellBender](../reference/formats/cellbender.md) |
 | A `matrix.mtx` folder from Cell Ranger, STARsolo or GEO | `adata convert folder -o out.h5ad` | [MTX folders](../reference/formats/10x-mtx.md) |

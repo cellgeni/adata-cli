@@ -35,7 +35,7 @@ installed by the `integration` tests in environments of their own.
 | `src/adata/elements/` | The AnnData on-disk spec: encodings, readers for every layout since anndata 0.7, writers of the current one |
 | `src/adata/storage/` | One interface over h5py and zarr |
 | `src/adata/conversion/` | `adata convert`: one module per format, through AnnData |
-| `src/adata/formats/` | The file types of `export` and `import`: npy, Matrix Market, CSV, JSON, images |
+| `src/adata/formats/` | The file types of `export` and `import`: npy, Matrix Market, CSV, JSON, images; and what the converters read: Parquet, GeoJSON polygons |
 | `src/adata/util/` | Output staging, path checks, names |
 | `tests/` | The test suite; [Testing](reference/testing.md) describes it |
 | `benchmarks/` | The comparative benchmark against anndata and scanpy |
@@ -85,7 +85,9 @@ a converter to another format.
 2. Write the converter module; `tenx.py` is the model, and `features.py` holds
    the feature table every 10x-style format shares. A format that pairs a 10x
    matrix with a table (`visium.py`, `xenium.py`) uses `spatial.py` to match
-   the table to the matrix's barcodes and write it in their order.
+   the table to the matrix's barcodes and write it in their order, and to
+   read the `analysis/` folder Xenium and Space Ranger's segmented cells
+   share.
 3. Add fixtures shaped like the real tool's output to `tests/conftest.py`, and
    a comparison against the reader people use in
    `tests/test_external_readers.py`.

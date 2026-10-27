@@ -32,7 +32,7 @@ import tempfile
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, List, Optional, Sequence
 
 import h5py
 import numpy as np
@@ -41,24 +41,31 @@ from rich.console import Console
 from adata.conversion import tenx
 from adata.conversion.base import ConversionPlan, Converter, Options
 from adata.conversion.features import STRING_STEP, Target, describe_import, write_obs_index, write_var
-from adata.conversion.spatial import BarcodeJoin, Join, Sink, table_blocks, numbers, require_numeric, write_rows
+from adata.conversion.spatial import (
+    ANALYSIS_CLUSTERS,
+    ANALYSIS_PROJECTIONS,
+    Analysis,
+    Sink,
+    Table,
+    check_analysis,
+    numbers,
+    require_numeric,
+    scan_analysis,
+    scan_joined,
+    table_blocks,
+    used_codes,
+    write_analysis,
+    write_rows,
+)
 from adata.core.subset import fan_out_sparse_matrix
 from adata.elements import spec
 from adata.elements.read import decode_str_array
-from adata.elements.write import create_categorical, ensure_anndata_skeleton, set_column_order
-from adata.formats.table import TableScan, column_values, create_columns, drop_unused, scan_table
+from adata.elements.write import ensure_anndata_skeleton, set_column_order
+from adata.formats.table import column_values, create_columns, drop_unused
 from adata.storage import create_dataset, is_zarr_path, open_store
-from adata.util.names import natural_sorted
 
 _CENTROIDS = ("x_centroid", "y_centroid")
 _CELL_TABLES = ("cells.csv.gz", "cells.csv")
-
-#: Xenium's analysis outputs: (path under analysis/, where it goes, value columns).
-_CLUSTERS = Path("clustering/gene_expression_graphclust/clusters.csv")
-_PROJECTIONS = {
-    "X_umap": Path("umap/gene_expression_2_components/projection.csv"),
-    "X_pca": Path("pca/gene_expression_10_components/projection.csv"),
-}
 
 
 def sniff(path: Path) -> bool:
@@ -73,21 +80,12 @@ def sniff(path: Path) -> bool:
 
 
 @dataclass
-class _Table:
-    """A table beside the matrix, scanned and matched to its barcodes."""
-
-    scan: TableScan
-    join: Join
-
-
-@dataclass
 class _Plan:
     matrix: Any
     matrix_path: Path
     targets: List[Target]
-    cells: _Table
-    clusters: Optional[_Table]
-    projections: Dict[str, _Table] = field(default_factory=dict)
+    cells: Table
+    analysis: Analysis = field(default_factory=Analysis)
     zarr_format: Optional[int] = None
     #: Where tables taken out of analysis.tar.gz wait to be written; removed
     #: when the plan is.
@@ -121,7 +119,7 @@ def _unpack_analysis(archive: Path, beside: Path) -> tempfile.TemporaryDirectory
     which on a cluster node is often too small for a large run's PCA.
     """
     holder = tempfile.TemporaryDirectory(prefix=".adata-xenium-", dir=beside)
-    wanted = {str(Path("analysis") / p): p for p in (_CLUSTERS, *_PROJECTIONS.values())}
+    wanted = {str(Path("analysis") / p): p for p in (ANALYSIS_CLUSTERS, *ANALYSIS_PROJECTIONS.values())}
     with tarfile.open(archive, "r:*") as tar:
         for member in tar:
             relative = wanted.get(member.name.lstrip("./"))
@@ -132,12 +130,6 @@ def _unpack_analysis(archive: Path, beside: Path) -> tempfile.TemporaryDirectory
             with tar.extractfile(member) as source, open(target, "wb") as out:
                 shutil.copyfileobj(source, out)
     return holder
-
-
-def _scan(path: Path, index: str, barcodes: Any) -> _Table:
-    joiner = BarcodeJoin(barcodes)
-    scan = scan_table(path, index=index, on_index=joiner)
-    return _Table(scan, joiner.finish())
 
 
 class XeniumImport(Converter):
@@ -174,39 +166,18 @@ class XeniumImport(Converter):
                 raise ValueError(f"{matrix_path.name} is not a 10x HDF5 matrix.")
             matrix, outputs, targets, warnings = tenx.plan_matrix_import(handle, output, options)
             barcodes = handle[matrix.group]["barcodes"]
-            cells = _scan(cell_file, "cell_id", barcodes)
-            clusters = None
-            projections: Dict[str, _Table] = {}
-            if analysis.is_dir():
-                if (analysis / _CLUSTERS).is_file():
-                    clusters = _scan(analysis / _CLUSTERS, "Barcode", barcodes)
-                for key, path in _PROJECTIONS.items():
-                    if (analysis / path).is_file():
-                        projections[key] = _scan(analysis / path, "Barcode", barcodes)
+            cells = scan_joined(cell_file, "cell_id", barcodes)
+            tables = scan_analysis(analysis, barcodes)
 
         require_numeric(cells.scan, _CENTROIDS)
-        if clusters is not None and "Cluster" not in clusters.scan.header:
-            raise ValueError(f"{_CLUSTERS.name} in analysis has no Cluster column.")
-        for table in projections.values():
-            require_numeric(table.scan, [c.name for c in table.scan.columns])
         cells.join.check(cell_file.name)
         if cells.join.n_extra:
             warnings.append(
                 f"{cells.join.n_extra:,} cells of {cell_file.name} are not in the "
                 "matrix; they are left out."
             )
-
-        found = []
-        for label, table in [("clusters", clusters), *projections.items()]:
-            if table is None:
-                continue
-            found.append(label)
-            table.join.check(f"analysis {label}", allow_missing=True)
-            if table.join.n_missing:
-                warnings.append(
-                    f"{table.join.n_missing:,} cells have no {label} in analysis/; "
-                    "they are left empty."
-                )
+        check_analysis(tables, warnings)
+        found = tables.found()
         if packed_but_empty:
             warnings.append(
                 "analysis.tar.gz holds none of the clustering, UMAP or PCA tables "
@@ -231,8 +202,7 @@ class XeniumImport(Converter):
                 matrix_path=matrix_path,
                 targets=targets,
                 cells=cells,
-                clusters=clusters,
-                projections=projections,
+                analysis=tables,
                 zarr_format=(options.zarr_format or 3) if dst_format == "zarr" else None,
                 unpacked=unpacked,
             ),
@@ -253,12 +223,8 @@ class XeniumImport(Converter):
                     obs = _write_obs_index(root, group)
                     ensure_anndata_skeleton(root)
                     columns = _write_cells(root, obs, detail.cells)
-                    if detail.clusters is not None:
-                        _write_clusters(root, obs, detail.clusters)
-                        columns.append("graphclust")
+                    columns += write_analysis(root, obs, detail.analysis)
                     set_column_order(obs, columns)
-                    for key, table in detail.projections.items():
-                        _write_projection(root, key, table)
                     write_var(root, target)
                     tenx._write_uns(root, matrix)
 
@@ -282,7 +248,7 @@ def _write_obs_index(root: Any, group: h5py.Group) -> Any:
     )
 
 
-def _write_cells(root: Any, obs: Any, table: _Table) -> List[str]:
+def _write_cells(root: Any, obs: Any, table: Table) -> List[str]:
     """The cell table's columns into obs, its centroids into `obsm["spatial"]`."""
     scan, join = table.scan, table.join
     n = join.n_out
@@ -307,46 +273,7 @@ def _write_cells(root: Any, obs: Any, table: _Table) -> List[str]:
         # Categories only the left-out cells used go, as anndata's
         # subsetting drops them.
         for name in lookups:
-            used = _used_codes(columns[name], len(lookups[name]), n)
+            used = used_codes(columns[name], len(lookups[name]), n)
             if not used.all():
                 drop_unused(obs, name, used, n, block_rows=STRING_STEP)
     return list(columns)
-
-
-def _used_codes(codes: Any, n_categories: int, n: int) -> np.ndarray:
-    used = np.zeros(n_categories, dtype=bool)
-    for lo in range(0, n, STRING_STEP):
-        block = np.asarray(codes[lo : lo + STRING_STEP], dtype=np.int64)
-        used[block[block >= 0]] = True
-    return used
-
-
-def _write_clusters(root: Any, obs: Any, table: _Table) -> None:
-    """Xenium's graph-based clusters, `obs["graphclust"]`, a categorical."""
-    scan, join = table.scan, table.join
-    column = next(c for c in scan.columns if c.name == "Cluster")
-    categories = natural_sorted(column.seen or set())
-    lookup = {c: i for i, c in enumerate(categories)}
-    codes = create_categorical(obs, "graphclust", categories, join.n_out)
-    write_rows(
-        table_blocks(scan), join,
-        [Sink(codes, lambda block: np.array([lookup.get(v, -1) for v in block["Cluster"]], dtype=np.int64), -1)],
-        root,
-    )
-    if join.n_extra:
-        used = _used_codes(codes, len(categories), join.n_out)
-        if not used.all():
-            drop_unused(obs, "graphclust", used, join.n_out, block_rows=STRING_STEP)
-
-
-def _write_projection(root: Any, key: str, table: _Table) -> None:
-    """An analysis projection (UMAP, PCA) into obsm, NaN for a cell it lacks."""
-    scan, join = table.scan, table.join
-    names = [c.name for c in scan.columns]
-    out = create_dataset(root["obsm"], key, shape=(join.n_out, len(names)), dtype=np.float64)
-    spec.set_encoding(out, spec.ARRAY)
-    write_rows(
-        table_blocks(scan), join,
-        [Sink(out, lambda block: numbers(scan, names, block), np.nan)],
-        root,
-    )
