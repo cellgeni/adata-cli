@@ -107,7 +107,8 @@ Each layer calls only the layers below it:
   go before `10x-mtx`, which would take a Space Ranger `outs/` for a Cell
   Ranger 2 genome layout. `conversion/spatial.py` matches a table to a
   matrix's barcodes while `scan_table` reads it (`on_index`), and writes it
-  in the matrix's order.
+  in the matrix's order; it also reads the `analysis/` (clusters, UMAP, PCA)
+  that Xenium and Space Ranger's segmented cells share.
 - **`formats/`**: the per-file-type halves of `export` and `import`: npy, mtx,
   csv, json and images. `mtx.py` is a streaming Matrix Market codec (two
   passes in, block writes out) shared by `import`/`export sparse` and the
@@ -115,7 +116,9 @@ Each layer calls only the layers below it:
   I/O, and `table.py` a streaming CSV reader that types columns as pandas
   does (Parse's cell metadata; meant for #25's delimited tables too), plus
   `write_text_column`, which writes any text column as anndata would
-  (categorical when values repeat); the loom import uses it.
+  (categorical when values repeat); the loom import uses it. `geojson.py`
+  walks a GeoJSON FeatureCollection a feature at a time and measures each
+  polygon's centroid and area (Space Ranger 4's cell outlines).
 - **`util/`**: `staging.py` and `path.py` (below), plus `names.py`.
 
 ## Rules the code depends on

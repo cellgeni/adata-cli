@@ -48,6 +48,7 @@ class Options:
     library_id: Optional[str] = None
     no_images: bool = False
     bin_size: Optional[int] = None
+    cells: bool = False
 
     # Reading a loom.
     dense: bool = False

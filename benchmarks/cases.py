@@ -527,6 +527,49 @@ CASES: List[Case] = [
         ],
     ),
     Case(
+        name="import-visium-cells",
+        question=(
+            "Read Space Ranger 4's segmented cells holding the same counts -- "
+            "the cell matrix, a GeoJSON outline for each cell and its nucleus, "
+            "and analysis clusters -- into an h5ad with each cell's centroid "
+            "in obsm['spatial'] and its areas in obs. adata-cli reads the "
+            "GeoJSON a feature at a time; 10x's Python recipe loads it with "
+            "geopandas. adata-cli keeps the matrix's own gzip, scanpy writes lzf."
+        ),
+        sidecar="visium-cells",
+        contenders=[
+            Contender(
+                "adata-cli",
+                argv=["adata", "convert", "{sidecar}", "-o", "{output}"],
+            ),
+            Contender(
+                "scanpy",
+                env="geopandas",
+                script=_py(
+                    "import json, os, numpy as np, pandas as pd, scanpy as sc, geopandas as gpd\n"
+                    "from pathlib import Path\n"
+                    "folder = Path(os.environ['BENCH_SIDECAR'])\n"
+                    "obj = sc.read_10x_h5(folder / 'filtered_feature_cell_matrix.h5', gex_only=False)\n"
+                    "mpp = json.loads((folder / 'spatial/scalefactors_json.json').read_text())['microns_per_pixel']\n"
+                    "def polygons(name):\n"
+                    "    frame = gpd.read_file(folder / name)\n"
+                    "    frame.index = [f'cellid_{i:09d}-1' for i in frame['cell_id']]\n"
+                    "    return frame.reindex(obj.obs_names)\n"
+                    "cells = polygons('cell_segmentations.geojson')\n"
+                    "obj.obsm['spatial'] = np.stack([cells.centroid.x, cells.centroid.y], axis=1)\n"
+                    "obj.obs['cell_area'] = cells.area.to_numpy() * mpp ** 2\n"
+                    "del cells\n"
+                    "obj.obs['nucleus_area'] = polygons('nucleus_segmentations.geojson').area.to_numpy() * mpp ** 2\n"
+                    "clusters = pd.read_csv(folder / 'analysis/clustering/"
+                    "gene_expression_graphclust/clusters.csv', index_col='Barcode')\n"
+                    "obj.obs['graphclust'] = clusters['Cluster'].astype(str)"
+                    ".reindex(obj.obs_names).astype('category')\n"
+                    "obj.write_h5ad(OUT, compression=COMPRESSION)\n"
+                ),
+            ),
+        ],
+    ),
+    Case(
         name="import-csv",
         question=(
             "Read a dense count table, a CSV of the first 10,000 cells, into an "

@@ -46,6 +46,7 @@ from benchmarks.cases import CASES, Case, Contender
 ENVIRONMENTS: Dict[str, List[str]] = {
     "anndata": ["anndata", "scipy", "pandas", "h5py", "zarr", "dask"],
     "scanpy": ["scanpy", "anndata", "scipy", "pandas", "h5py", "zarr", "dask"],
+    "geopandas": ["scanpy", "geopandas", "anndata", "scipy", "pandas", "h5py"],
 }
 
 
@@ -189,6 +190,8 @@ def _build_sidecar(case: Case, inputs: List[Path], workdir: Path) -> Optional[Pa
         return _build_dense_csv_sidecar(case, inputs, workdir)
     if case.sidecar == "xenium":
         return _build_xenium_sidecar(case, inputs, workdir)
+    if case.sidecar == "visium-cells":
+        return _build_visium_cells_sidecar(case, inputs, workdir)
     if case.sidecar != "csv":
         return None
     # Named for its input too: a work directory reused across tiers must not
@@ -310,6 +313,82 @@ def _build_xenium_sidecar(case: Case, inputs: List[Path], workdir: Path) -> Path
                 for i, c in enumerate(names)
             )
             clusters.writelines(f"{c},{cluster[i]}\n" for i, c in enumerate(names))
+    # Renamed only when whole: a failed build must not be reused as a sidecar.
+    partial.rename(path)
+    return path
+
+
+def _build_visium_cells_sidecar(case: Case, inputs: List[Path], workdir: Path) -> Path:
+    """Space Ranger 4's segmented_outputs/ holding the first input's counts.
+
+    The matrix is exported by adata-cli as for Xenium, its barcodes renamed
+    as Space Ranger names cells (`cellid_000000001-1`). Each cell gets a
+    made-up 16-gon outline and a nucleus inside it, written as Space Ranger
+    writes them: one GeoJSON line, about 600 bytes a cell. Clusters are in
+    analysis/, as for Xenium.
+    """
+    import h5py
+    import numpy as np
+
+    path = workdir / f"{case.name}-{inputs[0].stem}-sidecar"
+    if path.exists():
+        return path
+    partial = path.with_name(path.name + ".partial")
+    if partial.exists():
+        shutil.rmtree(partial)
+    (partial / "spatial").mkdir(parents=True)
+    counts = workdir / f"{case.name}-{inputs[0].stem}-counts.h5ad"
+    if counts.exists():
+        counts.unlink()
+    matrix = partial / "filtered_feature_cell_matrix.h5"
+    for command in (
+        ["adata", "recast", str(inputs[0]), "X", "-o", str(counts), "--dtype", "int32"],
+        ["adata", "convert", str(counts), "-o", str(matrix),
+         "--gene-names-column", "gene_symbol", "--feature-types-column",
+         "feature_type", "--force"],
+    ):
+        done = subprocess.run(command, capture_output=True, text=True)
+        if done.returncode != 0:
+            raise RuntimeError(f"could not build the Visium cells sidecar:\n{done.stderr or done.stdout}")
+    counts.unlink()
+    with h5py.File(matrix, "a") as handle:
+        n = handle["matrix/barcodes"].shape[0]
+        del handle["matrix/barcodes"]
+        handle["matrix/barcodes"] = np.char.mod("cellid_%09d-1", np.arange(1, n + 1)).astype("S")
+        handle.attrs["library_ids"] = np.array([b"bench"])
+    (partial / "spatial" / "scalefactors_json.json").write_text(
+        '{"microns_per_pixel": 0.2738, "tissue_hires_scalef": 0.08, "tissue_lowres_scalef": 0.008}'
+    )
+
+    rng = np.random.default_rng(0)
+    angles = np.linspace(0, 2 * np.pi, 17)[:-1]
+    clusters_dir = partial / "analysis" / "clustering" / "gene_expression_graphclust"
+    clusters_dir.mkdir(parents=True)
+    with open(partial / "cell_segmentations.geojson", "w") as cells, open(
+        partial / "nucleus_segmentations.geojson", "w"
+    ) as nuclei, open(clusters_dir / "clusters.csv", "w") as clusters:
+        for out in (cells, nuclei):
+            out.write('{"type": "FeatureCollection", "features": [')
+        clusters.write("Barcode,Cluster\n")
+        step = 50_000
+        for lo in range(0, n, step):
+            k = min(step, n - lo)
+            centre = rng.uniform(0, 20_000, (k, 2))
+            radius = rng.uniform(15, 40, (k, 1))
+            for out, scale in ((cells, 1.0), (nuclei, 0.4)):
+                xs = (centre[:, :1] + scale * radius * np.cos(angles)).round(1)
+                ys = (centre[:, 1:] + scale * radius * np.sin(angles)).round(1)
+                out.write("".join(
+                    ("" if lo + i == 0 else ", ")
+                    + '{"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [['
+                    + ", ".join(f"[{x}, {y}]" for x, y in zip(xs[i], ys[i]))
+                    + f", [{xs[i][0]}, {ys[i][0]}]]]}}, \"properties\": {{\"cell_id\": {lo + i + 1}}}}}"
+                    for i in range(k)
+                ))
+            cluster = rng.integers(1, 20, k)
+            clusters.writelines(f"cellid_{lo + i + 1:09d}-1,{cluster[i]}\n" for i in range(k))
+        for out in (cells, nuclei):
+            out.write("]}")
     # Renamed only when whole: a failed build must not be reused as a sidecar.
     partial.rename(path)
     return path

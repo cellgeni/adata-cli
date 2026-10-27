@@ -1186,3 +1186,53 @@ def test_visium_hd_imports_as_scanpy_and_pandas_read_it(tmp_path):
     _convert(str(hd.outs), "-o", str(out), "--var-names", "gene_symbols")
     assert _run(["scanpy", "pyarrow"], _COMPARE_VISIUM_HD, str(hd.bins[8].outs), str(out)) == []
 
+
+# Space Ranger 4's segmented cells as 10x's Python tutorial reads them: the
+# cell matrix, the polygons through geopandas, each cell's centroid as
+# obsm["spatial"] and its area (here scaled to µm²), and the analysis CSVs.
+_COMPARE_VISIUM_CELLS = r"""
+import json, sys, warnings
+from pathlib import Path
+warnings.filterwarnings("ignore")
+import numpy as np, pandas as pd, anndata as ad, scanpy as sc, geopandas as gpd
+
+folder, h5ad = Path(sys.argv[1]), sys.argv[2]
+ref = sc.read_10x_h5(folder / "filtered_feature_cell_matrix.h5")
+mpp = json.loads((folder / "spatial" / "scalefactors_json.json").read_text())["microns_per_pixel"]
+
+def polygons(name):
+    frame = gpd.read_file(folder / name)
+    frame.index = [f"cellid_{i:09d}-1" for i in frame["cell_id"]]
+    return frame.reindex(ref.obs_names)
+
+cells, nuclei = polygons("cell_segmentations.geojson"), polygons("nucleus_segmentations.geojson")
+spatial = np.stack([cells.geometry.centroid.x, cells.geometry.centroid.y], axis=1)
+clusters = pd.read_csv(folder / "analysis/clustering/gene_expression_graphclust/clusters.csv", index_col="Barcode")
+umap = pd.read_csv(folder / "analysis/umap/gene_expression_2_components/projection.csv", index_col="Barcode")
+
+got = ad.read_h5ad(h5ad)
+problems = []
+if list(ref.obs_names) != list(got.obs_names):
+    problems.append("obs_names differ")
+if not np.array_equal(ref.X.toarray(), got.X.toarray()):
+    problems.append("X differs")
+if not np.allclose(spatial, got.obsm["spatial"], rtol=0, atol=1e-9):
+    problems.append("obsm['spatial'] differs")
+if not np.allclose(cells.geometry.area * mpp ** 2, got.obs["cell_area"]):
+    problems.append("cell_area differs")
+if not np.allclose(nuclei.geometry.area * mpp ** 2, got.obs["nucleus_area"], equal_nan=True):
+    problems.append("nucleus_area differs")
+expected = clusters["Cluster"].astype(str).reindex(ref.obs_names)
+if expected.fillna("").tolist() != got.obs["graphclust"].astype(object).fillna("").astype(str).tolist():
+    problems.append("graphclust differs")
+if not np.allclose(umap.reindex(ref.obs_names).to_numpy(), got.obsm["X_umap"], equal_nan=True):
+    problems.append("obsm['X_umap'] differs")
+print("RESULT " + json.dumps(problems))
+"""
+
+
+def test_visium_hd_cells_import_as_10x_s_geopandas_recipe_reads_them(tmp_path):
+    hd = write_visium_hd_outs(tmp_path / "run", sizes=(16,), cells=True)
+    out = tmp_path / "cells.h5ad"
+    _convert(str(hd.outs), "-o", str(out), "--cells", "--var-names", "gene_symbols")
+    assert _run(["scanpy", "geopandas"], _COMPARE_VISIUM_CELLS, str(hd.cells.folder), str(out)) == []

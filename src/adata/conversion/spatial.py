@@ -5,11 +5,14 @@ in their own order, beside a 10x matrix whose barcode order AnnData keeps.
 `BarcodeJoin` matches a table to the matrix while the table is scanned, and
 `write_rows` writes it in the matrix's order: straight through when the two
 already agree, as Xenium's do, and through `core.scatter` when not.
+
+Xenium and Space Ranger's segmented cells also share the layout of their
+own `analysis/` (graph-based clusters, UMAP, PCA), read by `scan_analysis`.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
@@ -19,8 +22,10 @@ from adata.conversion.features import STRING_STEP
 from adata.core.scatter import RowScatter
 from adata.elements import spec
 from adata.elements.read import decode_str_array
-from adata.formats.table import TableScan, column_values, iter_table_blocks
+from adata.elements.write import create_categorical
+from adata.formats.table import TableScan, column_values, drop_unused, iter_table_blocks, scan_table
 from adata.storage import create_dataset
+from adata.util.names import natural_sorted
 
 
 @dataclass
@@ -229,3 +234,119 @@ def write_image(parent: Any, name: str, path: Path) -> None:
                 )
                 spec.set_encoding(out, spec.ARRAY)
             out[top : top + strip.shape[0]] = strip
+
+
+#: The analysis tables read, under `analysis/`: the graph-based clusters,
+#: and each projection with the obsm key it goes to.
+ANALYSIS_CLUSTERS = Path("clustering/gene_expression_graphclust/clusters.csv")
+ANALYSIS_PROJECTIONS = {
+    "X_umap": Path("umap/gene_expression_2_components/projection.csv"),
+    "X_pca": Path("pca/gene_expression_10_components/projection.csv"),
+}
+
+
+@dataclass
+class Table:
+    """A table beside the matrix, scanned and matched to its barcodes."""
+
+    scan: TableScan
+    join: Join
+
+
+def scan_joined(path: Path, index: str, barcodes: Any) -> Table:
+    joiner = BarcodeJoin(barcodes)
+    scan = scan_table(path, index=index, on_index=joiner)
+    return Table(scan, joiner.finish())
+
+
+@dataclass
+class Analysis:
+    """The clusters and projections found in an `analysis/` folder."""
+
+    clusters: Optional[Table] = None
+    projections: Dict[str, Table] = field(default_factory=dict)
+
+    def found(self) -> List[str]:
+        return (["clusters"] if self.clusters is not None else []) + list(self.projections)
+
+
+def scan_analysis(folder: Path, barcodes: Any) -> Analysis:
+    """Scan whichever analysis tables `folder` holds, matched to `barcodes`."""
+    analysis = Analysis()
+    if not folder.is_dir():
+        return analysis
+    if (folder / ANALYSIS_CLUSTERS).is_file():
+        analysis.clusters = scan_joined(folder / ANALYSIS_CLUSTERS, "Barcode", barcodes)
+    for key, path in ANALYSIS_PROJECTIONS.items():
+        if (folder / path).is_file():
+            analysis.projections[key] = scan_joined(folder / path, "Barcode", barcodes)
+    return analysis
+
+
+def check_analysis(analysis: Analysis, warnings: List[str]) -> None:
+    """Refuse analysis tables that cannot be written; warn of cells they lack,
+    which are left empty."""
+    if analysis.clusters is not None and "Cluster" not in analysis.clusters.scan.header:
+        raise ValueError(f"{ANALYSIS_CLUSTERS.name} in analysis has no Cluster column.")
+    for table in analysis.projections.values():
+        require_numeric(table.scan, [c.name for c in table.scan.columns])
+    for label, table in [("clusters", analysis.clusters), *analysis.projections.items()]:
+        if table is None:
+            continue
+        table.join.check(f"analysis {label}", allow_missing=True)
+        if table.join.n_missing:
+            warnings.append(
+                f"{table.join.n_missing:,} cells have no {label} in analysis/; "
+                "they are left empty."
+            )
+
+
+def write_analysis(root: Any, obs: Any, analysis: Analysis) -> List[str]:
+    """The clusters into obs, the projections into obsm; the obs columns written."""
+    columns = []
+    if analysis.clusters is not None:
+        _write_clusters(root, obs, analysis.clusters)
+        columns.append("graphclust")
+    for key, table in analysis.projections.items():
+        _write_projection(root, key, table)
+    return columns
+
+
+def used_codes(codes: Any, n_categories: int, n: int) -> np.ndarray:
+    """Which of a categorical's categories its codes use."""
+    used = np.zeros(n_categories, dtype=bool)
+    for lo in range(0, n, STRING_STEP):
+        block = np.asarray(codes[lo : lo + STRING_STEP], dtype=np.int64)
+        used[block[block >= 0]] = True
+    return used
+
+
+def _write_clusters(root: Any, obs: Any, table: Table) -> None:
+    """The graph-based clusters, `obs["graphclust"]`, a categorical."""
+    scan, join = table.scan, table.join
+    column = next(c for c in scan.columns if c.name == "Cluster")
+    categories = natural_sorted(column.seen or set())
+    lookup = {c: i for i, c in enumerate(categories)}
+    codes = create_categorical(obs, "graphclust", categories, join.n_out)
+    write_rows(
+        table_blocks(scan), join,
+        [Sink(codes, lambda block: np.array([lookup.get(v, -1) for v in block["Cluster"]], dtype=np.int64), -1)],
+        root,
+    )
+    if join.n_extra:
+        used = used_codes(codes, len(categories), join.n_out)
+        if not used.all():
+            drop_unused(obs, "graphclust", used, join.n_out, block_rows=STRING_STEP)
+
+
+def _write_projection(root: Any, key: str, table: Table) -> None:
+    """An analysis projection (UMAP, PCA) into obsm, NaN for a cell it lacks."""
+    scan, join = table.scan, table.join
+    names = [c.name for c in scan.columns]
+    out = create_dataset(root["obsm"], key, shape=(join.n_out, len(names)), dtype=np.float64)
+    spec.set_encoding(out, spec.ARRAY)
+    write_rows(
+        table_blocks(scan), join,
+        [Sink(out, lambda block: numbers(scan, names, block), np.nan)],
+        root,
+    )

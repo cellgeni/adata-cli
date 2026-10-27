@@ -9,11 +9,12 @@ nav_order: 4
 
 A Space Ranger output folder, for standard Visium (55 µm spots, Space Ranger
 1 to 4) and for [Visium HD](#visium-hd) (2, 8 and 16 µm bins, Space Ranger 3
-and 4): the counts, where each spot or bin sits on the slide, the tissue
+and 4, and [segmented cells](#segmented-cells), Space Ranger 4): the counts, where each spot or bin sits on the slide, the tissue
 images and the scale factors between them. The result is laid out as
 `squidpy.read.visium` lays it out, so scanpy's and squidpy's spatial plots
 work on it. CI checks standard Visium against squidpy, and Visium HD, which
-squidpy does not read, against scanpy with pandas reading the positions.
+squidpy does not read, against scanpy with pandas reading the positions and
+geopandas the cells' outlines.
 
 Give the `outs/` folder, or the run folder holding it. It is recognised by
 `spatial/` (the positions and `scalefactors_json.json`) beside a
@@ -106,5 +107,53 @@ matrix's as they come, then the numbers, written in the matrix's order. On
 100 MB hires image; pandas alone takes about 1 GB to read the positions. `--no-images` leaves the
 images out.
 
-The cell segmentation Space Ranger 4 adds (`segmented_outputs/`) is not read
-yet; its matrix converts as a [10x HDF5 file](10x-h5.md).
+### Segmented cells
+
+Space Ranger 4 also segments a Visium HD run into cells, in
+`outs/segmented_outputs/`: a cells x features matrix
+(`filtered_feature_cell_matrix.h5`, barcodes like `cellid_000000001-1`),
+each cell's outline and its nucleus's as GeoJSON polygons in
+full-resolution pixels, the images and scale factors, and Space Ranger's own
+`analysis/`. Give the `outs/` folder with `--cells`, or the
+`segmented_outputs/` folder itself. Without `--cells` an HD `outs/` is still
+read as 8 µm bins, and the summary says the cells are there too.
+
+```bash
+adata convert outs -o cells.h5ad --cells
+adata convert outs/segmented_outputs -o cells.h5ad
+adata convert outs -o every_cell.h5ad --cells --unfiltered
+```
+
+| Space Ranger | AnnData |
+|---|---|
+| `filtered_feature_cell_matrix.h5` (`raw_` with `--unfiltered`) | `X`, var, as a [10x HDF5 file](10x-h5.md) is read |
+| `cell_segmentations.geojson` | `obsm["spatial"]`: each outline's centroid, `[x, y]` in full-resolution pixels, weighted by area as shapely's is; `obs["cell_area"]`, in µm² |
+| `nucleus_segmentations.geojson` | `obs["nucleus_area"]`, in µm²; NaN for a cell with no nucleus |
+| `analysis/clustering/gene_expression_graphclust/clusters.csv` | `obs["graphclust"]`, categorical |
+| `analysis/umap/…/projection.csv`, `analysis/pca/…/projection.csv` | `obsm["X_umap"]`, `obsm["X_pca"]` |
+| `spatial/` images, scale factors; the matrix's metadata | `uns["spatial"][library]`, as above |
+
+| Flag | Meaning |
+|---|---|
+| `--cells` | Read the segmented cells, not bins (refused with `--bin-size`, and for an output with no `segmented_outputs/`; a cell matrix given itself is read as cells without it) |
+
+Areas are the polygons' areas in pixels times `microns_per_pixel` squared,
+the unit and names Xenium uses. The outlines themselves are not kept: an
+AnnData has no place squidpy or scanpy would read them from. Nor are
+`barcode_mappings.parquet` (which 2 µm bins fall in which cell) and the
+`graphclust_annotated_*.geojson` copies of the outlines.
+
+The cells' scale factors, kept as Space Ranger wrote them, carry no
+`spot_diameter_fullres`, so plotting needs a size: scanpy takes one,
+`sc.pl.spatial(adata, color="graphclust", spot_size=10)`, but squidpy's
+`spatial_scatter` looks it up in the scale factors whatever else it is
+given, so set one first, in pixels:
+`adata.uns["spatial"][library]["scalefactors"]["spot_diameter_fullres"] = 10`.
+
+The GeoJSON is one line of some hundreds of bytes a cell, a few hundred MB
+for a full slide, which `json.load` and geopandas hold whole. It is read
+here a feature at a time; what is kept is each cell's centroid and area, its
+nucleus's area and where each goes in the matrix, as a spot's position is:
+about 50 bytes a cell, some 35 MB for 700,000 cells, so that a cell with no
+outline is refused before anything is written. Polygons whose cell the matrix
+lacks, the background the filtered matrix leaves out, are passed over.

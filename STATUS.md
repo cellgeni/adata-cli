@@ -21,16 +21,40 @@ The conversion epic's sub-issues (#21–#30) are all done and ticked in #20.
 
 ## In progress
 
-Nothing. Visium HD is out in 0.17.1, completing the spatial import;
-Space Ranger 4's cell segmentation is first among the follow-ups below.
+### Visium HD segmented cells (Space Ranger 4), for 0.17.2
+
+`adata convert outs --cells` (or `segmented_outputs/` given itself) reads
+the cell matrix, each cell's centroid into `obsm["spatial"]`, `cell_area`
+and `nucleus_area` in µm² into obs, and the cells' `analysis/` (graphclust,
+UMAP, PCA). Without `--cells` an HD output is still read as 8 µm bins.
+
+Decisions:
+- Centroids weighted by area (shapely's), in full-resolution pixels, so
+  squidpy plots them over the images; areas in µm², Xenium's names. The
+  outlines are not kept.
+- The GeoJSON (one line, a few hundred MB on a full slide) is read a
+  feature at a time (`formats/geojson.py`); each polygon's three numbers are
+  kept from the one read, so a cell with no outline is refused in the plan.
+- `analysis/` reading moved from `xenium.py` to `spatial.py` and is shared.
+- Spot and bin `analysis/`, and `cell_id` on 2 µm bins, stay follow-ups.
+
+Steps:
+- [x] `formats/geojson.py`, checked against shapely (and `json.load`).
+- [x] Analysis reading shared in `spatial.py`; Xenium unchanged.
+- [x] Cells in `visium.py`, the `segmented_outputs/` fixture, tests.
+- [x] `--cells`; perf guards; geopandas comparison; `import-visium-cells`
+  benchmark case.
+- [x] Docs (Visium page, commands, convert guide, troubleshooting).
+- [ ] PR, independent review, CI green; then release 0.17.2.
 
 ## Follow-ups noticed
 
-- Space Ranger 4's cell segmentation (`segmented_outputs/`): cells as
-  GeoJSON polygons, mapped to bins by `barcode_mappings.parquet`.
+- `cell_id` (with `in_cell`, `in_nucleus`) on 2 µm bins, from Space Ranger
+  4's `barcode_mappings.parquet`.
 - Spatial bundles whose matrix is a MEX folder only (refused for now, with a
   pointer to `--from 10x-mtx`).
-- Space Ranger's own `analysis/` (clusters, UMAP) for Visium, as Xenium's.
+- Space Ranger's own `analysis/` (clusters, UMAP) for Visium spots and HD
+  bins, as the segmented cells now have it (`spatial.scan_analysis`).
 - CellBender's `_write_embeddings` onto `core/scatter.py`, which generalises
   it.
 

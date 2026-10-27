@@ -1579,12 +1579,148 @@ def write_xenium_bundle(
 
 
 @dataclass
+class VisiumCellsTruth:
+    folder: Path  # segmented_outputs/
+    barcodes: List[str]  # the filtered matrix's, in its order
+    raw_barcodes: List[str]
+    spatial: np.ndarray  # each cell polygon's centroid, by shapely
+    cell_area: np.ndarray  # µm²
+    nucleus_area: np.ndarray  # µm², NaN for a cell with no nucleus
+    clusters: np.ndarray  # "" where analysis lacks the cell
+    umap: np.ndarray  # NaN where analysis lacks the cell
+    images: Dict[str, np.ndarray]
+    scalefactors: dict
+    counts: np.ndarray
+
+
+@dataclass
 class VisiumHDTruth:
     outs: Path
     bins: Dict[int, VisiumTruth]  # by bin size in µm
+    cells: Optional[VisiumCellsTruth] = None
 
 
-def write_visium_hd_outs(folder: Path, *, sizes: Sequence[int] = (8, 16), grid: int = 6, seed: int = 0) -> VisiumHDTruth:
+def write_segmented_outputs(
+    outs: Path,
+    *,
+    n_cells: int = 12,
+    n_extra: int = 4,
+    shuffled: bool = False,
+    missing_nucleus: int = 1,
+    missing_in_analysis: int = 2,
+    seed: int = 0,
+) -> VisiumCellsTruth:
+    """`outs/segmented_outputs/`, as Space Ranger 4.0.1 writes it (checked
+    against 10x's tiny HD sample): the cell matrices, every cell's polygon and
+    its nucleus's as a one-line GeoJSON keyed by integer cell_id, in
+    full-resolution pixels, spatial/ with no positions, and analysis/ as
+    Xenium's. The filtered matrix holds some of the polygons' cells, in id
+    order; one cell has a hole, one is in two parts."""
+    import shapely
+    from PIL import Image
+
+    rng = np.random.default_rng(seed)
+    folder = outs / "segmented_outputs"
+    (folder / "spatial").mkdir(parents=True)
+    n_features = 4
+    ids = [f"ENSMUSG{i:05d}" for i in range(n_features)]
+    names = [f"G{i}" for i in range(n_features)]
+    total = n_cells + n_extra
+    every = np.arange(1, total + 1)
+    kept = np.sort(rng.choice(every, n_cells, replace=False))
+    barcode = lambda cell_id: f"cellid_{cell_id:09d}-1"  # noqa: E731
+
+    def outline(x, y, radius, k=12):
+        ring = [[round(x + radius * rng.uniform(0.7, 1) * np.cos(t), 1), round(y + radius * np.sin(t), 1)]
+                for t in np.linspace(0, 2 * np.pi, k + 1)[:-1]]
+        return ring + [ring[0]]
+
+    cells, nuclei = {}, {}
+    for i, cell_id in enumerate(every):
+        x, y = rng.uniform(1000, 6000, 2)
+        if i == 2:
+            hole = [[x - 2, y - 2], [x - 2, y + 2], [x + 2, y + 2], [x + 2, y - 2], [x - 2, y - 2]]
+            cells[cell_id] = {"type": "Polygon", "coordinates": [outline(x, y, 9), hole]}
+        elif i == 4:
+            cells[cell_id] = {"type": "MultiPolygon", "coordinates": [[outline(x, y, 6)], [outline(x + 30, y, 4)]]}
+        else:
+            cells[cell_id] = {"type": "Polygon", "coordinates": [outline(x, y, 9)]}
+        nuclei[cell_id] = {"type": "Polygon", "coordinates": [outline(x, y, 3, k=8)]}
+    without_nucleus = set(rng.choice(kept, missing_nucleus, replace=False).tolist())
+    order = rng.permutation(every) if shuffled else every
+
+    def collection(geometries, skip=()):
+        features = [
+            {"type": "Feature", "geometry": geometries[c], "properties": {"cell_id": int(c)}}
+            for c in order if c not in skip
+        ]
+        return json.dumps({"type": "FeatureCollection", "features": features})
+
+    (folder / "cell_segmentations.geojson").write_text(collection(cells))
+    (folder / "nucleus_segmentations.geojson").write_text(collection(nuclei, without_nucleus))
+
+    counts = rng.integers(0, 5, size=(n_cells, n_features))
+    raw_counts = np.zeros((total, n_features), dtype=counts.dtype)
+    raw_counts[kept - 1] = counts
+    write_10x_h5(folder / "filtered_feature_cell_matrix.h5", counts, barcodes=[barcode(c) for c in kept], ids=ids, names=names)
+    write_10x_h5(folder / "raw_feature_cell_matrix.h5", raw_counts, barcodes=[barcode(c) for c in every], ids=ids, names=names)
+    for path in (folder / "filtered_feature_cell_matrix.h5", folder / "raw_feature_cell_matrix.h5"):
+        with h5py.File(path, "a") as f:
+            f.attrs["library_ids"] = np.array([b"tiny_mouse_brain"])
+            f.attrs["chemistry_description"] = "Visium HD v1 - 3'"
+            f.attrs["software_version"] = "spaceranger-4.0.1"
+
+    microns_per_pixel = 0.5
+    scalefactors = {
+        "microns_per_pixel": microns_per_pixel, "tissue_lowres_scalef": 0.1,
+        "fiducial_diameter_fullres": 328.9, "tissue_hires_scalef": 1.0,
+        "regist_target_img_scalef": 1.0,
+    }
+    (folder / "spatial" / "scalefactors_json.json").write_text(json.dumps(scalefactors))
+    pictures = {}
+    for key, shape in (("hires", (12, 10)), ("lowres", (4, 3))):
+        pixels = rng.integers(0, 256, size=shape + (3,), dtype=np.uint8)
+        Image.fromarray(pixels).save(folder / "spatial" / f"tissue_{key}_image.png")
+        pictures[key] = pixels
+
+    listed = np.sort(rng.permutation(n_cells)[missing_in_analysis:])
+    clusters = np.full(n_cells, "", dtype=object)
+    clusters[listed] = [str(v) for v in rng.integers(1, 12, listed.size)]
+    umap = np.full((n_cells, 2), np.nan)
+    umap[listed] = rng.normal(size=(listed.size, 2)).round(5)
+    path = folder / "analysis" / "clustering" / "gene_expression_graphclust"
+    path.mkdir(parents=True)
+    (path / "clusters.csv").write_text(
+        "Barcode,Cluster\n" + "".join(f"{barcode(kept[i])},{clusters[i]}\n" for i in listed)
+    )
+    path = folder / "analysis" / "umap" / "gene_expression_2_components"
+    path.mkdir(parents=True)
+    (path / "projection.csv").write_text(
+        "Barcode,UMAP-1,UMAP-2\n" + "".join(f"{barcode(kept[i])},{umap[i, 0]},{umap[i, 1]}\n" for i in listed)
+    )
+
+    shapes = {c: shapely.geometry.shape(g) for c, g in cells.items()}
+    return VisiumCellsTruth(
+        folder=folder,
+        barcodes=[barcode(c) for c in kept],
+        raw_barcodes=[barcode(c) for c in every],
+        spatial=np.array([[shapes[c].centroid.x, shapes[c].centroid.y] for c in kept]),
+        cell_area=np.array([shapes[c].area for c in kept]) * microns_per_pixel ** 2,
+        nucleus_area=np.array([
+            np.nan if c in without_nucleus else shapely.geometry.shape(nuclei[c]).area * microns_per_pixel ** 2
+            for c in kept
+        ]),
+        clusters=clusters,
+        umap=umap,
+        images=pictures,
+        scalefactors=scalefactors,
+        counts=counts,
+    )
+
+
+def write_visium_hd_outs(
+    folder: Path, *, sizes: Sequence[int] = (8, 16), grid: int = 6, cells: bool = False, seed: int = 0
+) -> VisiumHDTruth:
     import pyarrow as pa
     import pyarrow.parquet as pq
     from PIL import Image
@@ -1649,4 +1785,5 @@ def write_visium_hd_outs(folder: Path, *, sizes: Sequence[int] = (8, 16), grid: 
             scalefactors=scalefactors,
             counts=counts,
         )
-    return VisiumHDTruth(outs=outs, bins=bins)
+    segmented = write_segmented_outputs(outs, seed=seed) if cells else None
+    return VisiumHDTruth(outs=outs, bins=bins, cells=segmented)
