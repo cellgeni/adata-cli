@@ -8,6 +8,42 @@ nav_order: 7
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
+## 0.17.2
+
+Space Ranger 4's segmented cells join Visium HD's bins: `convert --cells`
+reads the cell matrix with each cell's centroid, its area and its nucleus's,
+and Space Ranger's clusters, UMAP and PCA, reading the cells' GeoJSON
+outlines a feature at a time.
+
+### Added
+
+- **Visium HD segmented cells** ([#83](https://github.com/cellgeni/adata-cli/pull/83)).
+  `adata convert outs -o cells.h5ad --cells`, or the `segmented_outputs/`
+  folder given itself, reads `filtered_feature_cell_matrix.h5` (`raw_` with
+  `--unfiltered`) with:
+  - `obsm["spatial"]`: each outline's area-weighted centroid in
+    full-resolution pixels, as shapely computes it, so scanpy and squidpy
+    plot the cells over the images;
+  - `obs["cell_area"]` and `obs["nucleus_area"]`, in µm², as Xenium names
+    them;
+  - `obs["graphclust"]`, `obsm["X_umap"]` and `obsm["X_pca"]` from the
+    cells' `analysis/`;
+  - the images, scale factors and metadata in `uns["spatial"]`.
+
+  Without `--cells` an HD output is still read as 8 µm bins, and the
+  summary says the cells are there. Checked in CI against 10x's scanpy and
+  geopandas recipe, and on 10x's SR 4.0.1 tiny sample against shapely.
+  - The GeoJSON, one line of a few hundred MB on a full slide, is read a
+    feature at a time; about 50 bytes a cell are kept, so that a cell with
+    no outline is refused before anything is written. At 50,000 cells the
+    import peaks at 190 MB, against 771 MB for the recipe.
+- **An `import-visium-cells` benchmark case**, against that recipe.
+
+### Changed
+
+- **Xenium's `analysis/` reading is shared** with the segmented cells,
+  which lay theirs out the same way; Xenium's output is unchanged.
+
 ## 0.17.1
 
 Visium HD joins standard Visium and Xenium: `convert` reads a Space Ranger
