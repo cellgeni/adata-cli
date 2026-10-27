@@ -7,6 +7,7 @@ moves; the plan of record for the current item is in the section below.
 
 | Version | What | Issues |
 |---|---|---|
+| 0.17.2 | Visium HD segmented cells (Space Ranger 4): centroids, areas and Space Ranger's analysis | #83 |
 | 0.17.1 | Visium HD, one bin size at a time, with the new `spatial` extra (pyarrow) | #81 |
 | 0.17.0 | `convert` reads Visium (Space Ranger 1–4) and Xenium (XOA 1–4) with positions, images and Xenium's analysis | #79 |
 | 0.16.2 | Documentation site (guides, troubleshooting, a page per format); `export image` writes PNG to stdout without `-o` | #76, #77 |
@@ -21,31 +22,8 @@ The conversion epic's sub-issues (#21–#30) are all done and ticked in #20.
 
 ## In progress
 
-### Visium HD segmented cells (Space Ranger 4), for 0.17.2
-
-`adata convert outs --cells` (or `segmented_outputs/` given itself) reads
-the cell matrix, each cell's centroid into `obsm["spatial"]`, `cell_area`
-and `nucleus_area` in µm² into obs, and the cells' `analysis/` (graphclust,
-UMAP, PCA). Without `--cells` an HD output is still read as 8 µm bins.
-
-Decisions:
-- Centroids weighted by area (shapely's), in full-resolution pixels, so
-  squidpy plots them over the images; areas in µm², Xenium's names. The
-  outlines are not kept.
-- The GeoJSON (one line, a few hundred MB on a full slide) is read a
-  feature at a time (`formats/geojson.py`); each polygon's three numbers are
-  kept from the one read, so a cell with no outline is refused in the plan.
-- `analysis/` reading moved from `xenium.py` to `spatial.py` and is shared.
-- Spot and bin `analysis/`, and `cell_id` on 2 µm bins, stay follow-ups.
-
-Steps:
-- [x] `formats/geojson.py`, checked against shapely (and `json.load`).
-- [x] Analysis reading shared in `spatial.py`; Xenium unchanged.
-- [x] Cells in `visium.py`, the `segmented_outputs/` fixture, tests.
-- [x] `--cells`; perf guards; geopandas comparison; `import-visium-cells`
-  benchmark case.
-- [x] Docs (Visium page, commands, convert guide, troubleshooting).
-- [ ] PR, independent review, CI green; then release 0.17.2.
+Nothing. Space Ranger 4's segmented cells are out in 0.17.2; the spot and
+bin follow-ups below remain.
 
 ## Follow-ups noticed
 
