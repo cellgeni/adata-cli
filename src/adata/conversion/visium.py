@@ -18,11 +18,14 @@ The matrix is read as a 10x HDF5 file is (`tenx`), so features are named by
 gene id and every feature type is kept, where squidpy names them by symbol
 and keeps Gene Expression only. The positions list every spot on the slide,
 a few thousand however large the data, and are matched to the matrix's
-barcodes as they are scanned.
+barcodes as they are scanned. Space Ranger's own `analysis/` beside the
+matrix, when there is one, adds its graph-based clusters to obs
+(`graphclust`) and its UMAP and PCA to obsm, as for Xenium.
 
 Visium HD is read too, one bin size at a time (`--bin-size`, 8 µm by
 default): each `binned_outputs/square_NNNum/` folder is laid out as above,
 with its positions as Parquet, which pyarrow reads (the `spatial` extra).
+Space Ranger writes no `analysis/` for the 2 µm bins.
 
 Or as cells (`--cells`, or the folder given itself): Space Ranger 4
 segments the tissue into cells in `segmented_outputs/`, with a cells x
@@ -395,12 +398,15 @@ class VisiumImport(Converter):
                 require_numeric(positions, POSITION_COLUMNS[1:])
             filtered_barcodes = "filtered_barcodes" in group
             join = joiner.finish()
+            analysis = scan_analysis(outs / "analysis", group["barcodes"])
         join.check(f"spatial/{position_file.name}")
+        check_analysis(analysis, warnings, "bins" if position_file.suffix == ".parquet" else "spots")
 
         scalefactors = json.loads(scalefactor_file.read_text())
         bin_um = _bin_um(scalefactors) if position_file.suffix == ".parquet" else None
         images = _images(spatial, options, warnings)
 
+        found = analysis.found()
         described = describe_import(matrix.n_barcodes, matrix.n_features, matrix.feature_types, targets)
         return ConversionPlan(
             source=source,
@@ -411,6 +417,7 @@ class VisiumImport(Converter):
                 f"Space Ranger (Visium{f' HD, {bin_um} µm bins' if bin_um else ''}) → "
                 f"{dst_format}, {described}, positions from "
                 f"{position_file.name}, library {library_id!r}"
+                + (f", analysis: {', '.join(found)}" if found else "")
                 + (f", images {', '.join(images)}" if images else "")
                 + (" (segmented cells too: --cells)" if bundle.cells_beside else "")
             ),
@@ -427,6 +434,7 @@ class VisiumImport(Converter):
                 images=images,
                 filtered_barcodes=filtered_barcodes,
                 zarr_format=(options.zarr_format or 3) if dst_format == "zarr" else None,
+                analysis=analysis,
             ),
         )
 
@@ -645,7 +653,8 @@ def _write_cell_obs(root: Any, group: h5py.Group, detail: _Plan) -> None:
 
 
 def _write_obs(root: Any, group: h5py.Group, detail: _Plan) -> None:
-    """obs (the barcodes, and the positions' columns), and `obsm["spatial"]`."""
+    """obs (the barcodes, the positions' columns, the clusters),
+    `obsm["spatial"]` and the analysis projections."""
     obs = _write_index(root, group)
 
     pixels = ("pxl_col_in_fullres", "pxl_row_in_fullres")  # x, y
@@ -653,6 +662,7 @@ def _write_obs(root: Any, group: h5py.Group, detail: _Plan) -> None:
         order = _write_parquet_positions(root, obs, detail, pixels)
     else:
         order = _write_csv_positions(root, obs, detail, pixels)
+    order += write_analysis(root, obs, detail.analysis)
     if detail.filtered_barcodes:
         write_dense(obs, "filtered_barcodes", np.asarray(group["filtered_barcodes"][...]).astype(bool))
         order.append("filtered_barcodes")

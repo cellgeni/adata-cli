@@ -1030,7 +1030,36 @@ def test_mudata_reads_what_we_export(tmp_path):
 # ---------------------------------------------------------------------------
 # spatial: Visium against squidpy's reader, Xenium against 10x's recipe
 
-_COMPARE_VISIUM = r"""
+# Space Ranger's analysis/ beside spots or bins, as pandas reads it (neither
+# squidpy nor scanpy does), under today's names or Space Ranger 1's.
+_ANALYSIS_PROBLEMS = r"""
+def analysis_problems(folder, got):
+    from pathlib import Path
+    import numpy as np, pandas as pd
+
+    def table(*names):
+        for name in names:
+            path = Path(folder) / "analysis" / name
+            if path.is_file():
+                return pd.read_csv(path, index_col="Barcode", float_precision="round_trip")
+        raise SystemExit(f"no {names[0]}")
+
+    problems = []
+    clusters = table("clustering/gene_expression_graphclust/clusters.csv", "clustering/graphclust/clusters.csv")
+    expected = clusters["Cluster"].astype(str).reindex(got.obs_names)
+    if expected.fillna("").tolist() != got.obs["graphclust"].astype(object).fillna("").astype(str).tolist():
+        problems.append("graphclust differs")
+    for key, names in (
+        ("X_umap", ("umap/gene_expression_2_components/projection.csv", "umap/2_components/projection.csv")),
+        ("X_pca", ("pca/gene_expression_10_components/projection.csv", "pca/10_components/projection.csv")),
+    ):
+        expected = table(*names).reindex(got.obs_names).to_numpy()
+        if not np.array_equal(expected, got.obsm[key], equal_nan=True):
+            problems.append(f"obsm[{key!r}] differs")
+    return problems
+"""
+
+_COMPARE_VISIUM = _ANALYSIS_PROBLEMS + r"""
 import json, sys, warnings
 warnings.filterwarnings("ignore")
 import numpy as np, anndata as ad, squidpy as sq
@@ -1072,13 +1101,14 @@ else:
         for key in ("chemistry_description", "software_version"):
             if str(r["metadata"].get(key)) != str(g["metadata"].get(key)):
                 problems.append(f"metadata[{key!r}] differs")
+    problems += analysis_problems(outs, got)
 print("RESULT " + json.dumps(problems))
 """
 
 
 @pytest.mark.parametrize("version", ["sr1", "sr2", "sr3_float"])
 def test_visium_imports_as_squidpy_reads_it(tmp_path, version):
-    truth = write_visium_outs(tmp_path / "run", version=version)
+    truth = write_visium_outs(tmp_path / "run", version=version, analysis=True)
     out = tmp_path / "visium.h5ad"
     # squidpy keeps Gene Expression only and names var by symbol.
     _convert(
@@ -1151,7 +1181,7 @@ def test_xenium_imports_as_10x_s_scanpy_recipe_reads_it(tmp_path, ids, shuffled)
 # Visium HD's bins as scanpy users read them, squidpy having no HD reader:
 # the bin folder's matrix, the Parquet positions reindexed to it, and the
 # pixel columns as obsm["spatial"], [col, row] as for standard Visium.
-_COMPARE_VISIUM_HD = r"""
+_COMPARE_VISIUM_HD = _ANALYSIS_PROBLEMS + r"""
 import json, sys, warnings
 from pathlib import Path
 warnings.filterwarnings("ignore")
@@ -1176,12 +1206,13 @@ if not np.array_equal(expected, got.obsm["spatial"]):
 scalefactors = json.loads((folder / "spatial" / "scalefactors_json.json").read_text())
 if got.uns["spatial"]["tiny_mouse_brain"]["scalefactors"] != scalefactors:
     problems.append("scalefactors differ")
+problems += analysis_problems(folder, got)
 print("RESULT " + json.dumps(problems))
 """
 
 
 def test_visium_hd_imports_as_scanpy_and_pandas_read_it(tmp_path):
-    hd = write_visium_hd_outs(tmp_path / "run")
+    hd = write_visium_hd_outs(tmp_path / "run", analysis=True)
     out = tmp_path / "hd.h5ad"
     _convert(str(hd.outs), "-o", str(out), "--var-names", "gene_symbols")
     assert _run(["scanpy", "pyarrow"], _COMPARE_VISIUM_HD, str(hd.bins[8].outs), str(out)) == []

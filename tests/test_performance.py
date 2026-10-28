@@ -984,11 +984,12 @@ def _spatial_bundle(path: Path, kind: str, n: int, shuffled: bool) -> Path:
     from tests.conftest import write_segmented_outputs, write_visium_hd_outs, write_visium_outs, write_xenium_bundle
 
     if kind == "visium":
-        return write_visium_outs(path, n_spots=n, n_extra=n // 4).outs
+        # With Space Ranger's analysis/, its rows in another order.
+        return write_visium_outs(path, n_spots=n, n_extra=n // 4, analysis=True).outs
     if kind == "visium-hd":
         # 16 µm bins on a grid of side ~sqrt(n): every bin on the slide in the
-        # positions, about 60% of them in the matrix.
-        return write_visium_hd_outs(path, sizes=(16,), grid=max(2, int(n ** 0.5))).outs
+        # positions, about 60% of them in the matrix, and analysis/.
+        return write_visium_hd_outs(path, sizes=(16,), grid=max(2, int(n ** 0.5)), analysis=True).outs
     if kind == "visium-cells":
         # Polygons for a fifth more cells than the matrix holds, the cells'
         # in file order or not.
@@ -1016,6 +1017,43 @@ def test_spatial_import_work_grows_linearly(tmp_path, kind, shuffled):
         return io.work
 
     assert_grows_linearly(measure, what=f"convert {kind} (shuffled={shuffled})", axis="n_cells")
+
+
+@pytest.mark.parametrize("kind", ["visium", "visium-hd"])
+def test_spot_and_bin_analysis_is_read_once_a_pass_and_x_once(tmp_path, monkeypatch, kind):
+    """Each analysis table is read twice whatever its size -- scanned and
+    matched in the plan, written in the write -- and adding them reads X
+    no more than once."""
+    import h5py
+
+    from adata.commands.convert import convert_store
+    from adata.conversion import Options
+    from adata.formats import table
+
+    opened: dict = {}
+    real_open = table.open_binary
+
+    def counting_open(path, *args, **kwargs):
+        key = f"{Path(path).parent.name}/{Path(path).name}"
+        opened[key] = opened.get(key, 0) + 1
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(table, "open_binary", counting_open)
+    source = _spatial_bundle(tmp_path / "sa", kind, 400, True)
+    with count_io() as io:
+        convert_store(
+            source, tmp_path / "out.h5ad", QUIET,
+            options=Options(bin_size=16) if kind == "visium-hd" else Options(),
+        )
+    with h5py.File(next(Path(source).rglob("filtered_feature_bc_matrix.h5")), "r") as f:
+        nnz = f["matrix/data"].shape[0]
+
+    assert {k: v for k, v in opened.items() if k.endswith(("clusters.csv", "projection.csv"))} == {
+        "gene_expression_graphclust/clusters.csv": 2,
+        "gene_expression_2_components/projection.csv": 2,
+        "gene_expression_10_components/projection.csv": 2,
+    }
+    assert io.by_name["/matrix/data"] == nnz > 0
 
 
 @pytest.mark.parametrize("kind", ["xenium", "visium-cells"])

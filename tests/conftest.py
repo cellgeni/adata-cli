@@ -1373,6 +1373,49 @@ class VisiumTruth:
     images: Dict[str, np.ndarray]
     scalefactors: dict
     counts: np.ndarray
+    analysis: Optional["AnalysisTruth"] = None
+
+
+@dataclass
+class AnalysisTruth:
+    """Space Ranger's analysis/, per barcode of the filtered matrix."""
+
+    clusters: np.ndarray  # "" where analysis lacks the barcode
+    umap: np.ndarray  # NaN where analysis lacks the barcode
+    pca: np.ndarray
+
+
+def write_space_ranger_analysis(
+    folder: Path, barcodes: Sequence[str], rng: Any, *, missing: int = 2, sr1: bool = False
+) -> AnalysisTruth:
+    """`analysis/` as Space Ranger writes it for spots and bins (checked
+    against 10x's SR 1.1 Adult Mouse Brain and SR 4.0.1 tiny HD samples):
+    the graph-based clusters, UMAP and PCA, keyed by Barcode. Space Ranger
+    leaves some barcodes out (bins with no counts); these rows are in no
+    particular order. Space Ranger 1's folders have no gene_expression_
+    prefix."""
+    prefix = "" if sr1 else "gene_expression_"
+    n = len(barcodes)
+    listed = rng.permutation(n)[missing:]
+    clusters = np.full(n, "", dtype=object)
+    clusters[listed] = [str(v) for v in rng.integers(1, 12, listed.size)]
+    umap = np.full((n, 2), np.nan)
+    umap[listed] = rng.normal(size=(listed.size, 2)).round(5)
+    pca = np.full((n, 3), np.nan)
+    pca[listed] = rng.normal(size=(listed.size, 3))
+    tables = (
+        (f"clustering/{prefix}graphclust/clusters.csv", ["Cluster"], lambda i: [clusters[i]]),
+        (f"umap/{prefix}2_components/projection.csv", ["UMAP-1", "UMAP-2"], lambda i: [repr(float(v)) for v in umap[i]]),
+        (f"pca/{prefix}10_components/projection.csv", ["PC-1", "PC-2", "PC-3"], lambda i: [repr(float(v)) for v in pca[i]]),
+    )
+    for relative, header, values in tables:
+        path = folder / "analysis" / relative
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            ",".join(["Barcode", *header]) + "\n"
+            + "".join(",".join([barcodes[i], *values(i)]) + "\n" for i in listed)
+        )
+    return AnalysisTruth(clusters=clusters, umap=umap, pca=pca)
 
 
 def write_visium_outs(
@@ -1383,10 +1426,12 @@ def write_visium_outs(
     n_extra: int = 5,
     raw: bool = True,
     images: bool = True,
+    analysis: bool = False,
     seed: int = 0,
 ) -> VisiumTruth:
     """An `outs/` folder. `version` is sr1 (no header), sr2, or sr3_float
-    (pixel positions with decimals, as Space Ranger 3 and 4 may write)."""
+    (pixel positions with decimals, as Space Ranger 3 and 4 may write);
+    `analysis` adds Space Ranger's analysis/, named as that version names it."""
     from PIL import Image
 
     rng = np.random.default_rng(seed)
@@ -1464,6 +1509,7 @@ def write_visium_outs(
         images=pictures,
         scalefactors=scalefactors,
         counts=counts,
+        analysis=write_space_ranger_analysis(outs, barcodes, rng, sr1=version == "sr1") if analysis else None,
     )
 
 
@@ -1719,8 +1765,16 @@ def write_segmented_outputs(
 
 
 def write_visium_hd_outs(
-    folder: Path, *, sizes: Sequence[int] = (8, 16), grid: int = 6, cells: bool = False, seed: int = 0
+    folder: Path,
+    *,
+    sizes: Sequence[int] = (8, 16),
+    grid: int = 6,
+    cells: bool = False,
+    analysis: bool = False,
+    seed: int = 0,
 ) -> VisiumHDTruth:
+    """`analysis` adds Space Ranger's analysis/ to each bin size but 2 µm,
+    for which Space Ranger writes none."""
     import pyarrow as pa
     import pyarrow.parquet as pq
     from PIL import Image
@@ -1774,9 +1828,10 @@ def write_visium_hd_outs(
             Image.fromarray(pixels).save(where / "spatial" / f"tissue_{key}_image.png")
             Image.fromarray(pixels).save(outs / "spatial" / f"tissue_{key}_image.png")
             pictures[key] = pixels
+        barcodes = [every[i] for i in kept]
         bins[size] = VisiumTruth(
             outs=where,
-            barcodes=[every[i] for i in kept],
+            barcodes=barcodes,
             in_tissue=in_tissue[kept].astype(np.int64),
             array_row=rows[kept].astype(np.int64),
             array_col=cols[kept].astype(np.int64),
@@ -1784,6 +1839,7 @@ def write_visium_hd_outs(
             images=pictures,
             scalefactors=scalefactors,
             counts=counts,
+            analysis=write_space_ranger_analysis(where, barcodes, rng) if analysis and size != 2 else None,
         )
     segmented = write_segmented_outputs(outs, seed=seed) if cells else None
     return VisiumHDTruth(outs=outs, bins=bins, cells=segmented)

@@ -185,3 +185,18 @@ def test_on_index_sees_every_index_value_once_and_in_order(tmp_path):
     scan_table(path, on_index=seen.extend, block_bytes=24)
 
     assert seen == ["c1", "c2", "c3", "c4"]
+
+
+def test_without_distinct_values_columns_are_typed_the_same(tmp_path):
+    """An analysis projection's scan kept every distinct value of every
+    column as a string, up to the cap: some 60 MB for a PCA's ten columns,
+    for categories a table of numbers never has."""
+    path = _write(tmp_path, CSV)
+    tracked, untracked = scan_table(path, index="id"), scan_table(path, index="id", distinct=False)
+
+    # Numbers, booleans and an empty column as before; text, with no
+    # categories, stays strings.
+    expected = ["str" if c.kind == "text" else tracked.dtype_of(c) for c in tracked.columns]
+    assert [untracked.dtype_of(c) for c in untracked.columns] == expected
+    assert expected == ["int64", "float64", "bool", "str", "str", "float64", "float64"]
+    assert all(c.seen is None for c in untracked.columns)

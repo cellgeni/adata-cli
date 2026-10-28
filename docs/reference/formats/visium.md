@@ -14,7 +14,8 @@ images and the scale factors between them. The result is laid out as
 `squidpy.read.visium` lays it out, so scanpy's and squidpy's spatial plots
 work on it. CI checks standard Visium against squidpy, and Visium HD, which
 squidpy does not read, against scanpy with pandas reading the positions and
-geopandas the cells' outlines.
+geopandas the cells' outlines; pandas reads Space Ranger's analysis tables
+for both.
 
 Give the `outs/` folder, or the run folder holding it. It is recognised by
 `spatial/` (the positions and `scalefactors_json.json`) beside a
@@ -37,6 +38,8 @@ adata convert outs/filtered_feature_bc_matrix.h5 -o section.h5ad --from visium
 | `spatial/scalefactors_json.json` | `uns["spatial"][library]["scalefactors"]`, as it is |
 | the matrix's `chemistry_description`, `software_version` | `uns["spatial"][library]["metadata"]` |
 | the matrix's other run metadata | `uns["cellranger"]`, so an export to `.h5` keeps it |
+| `analysis/clustering/gene_expression_graphclust/clusters.csv` (`graphclust/` in Space Ranger 1) | `obs["graphclust"]`, categorical; empty for a spot the table leaves out |
+| `analysis/umap/gene_expression_2_components/projection.csv`, `analysis/pca/gene_expression_10_components/projection.csv` (`2_components/`, `10_components/` in Space Ranger 1) | `obsm["X_umap"]`, `obsm["X_pca"]`, float64; NaN for a spot the table leaves out |
 
 | Flag | Meaning |
 |---|---|
@@ -46,7 +49,15 @@ adata convert outs/filtered_feature_bc_matrix.h5 -o section.h5ad --from visium
 
 The [10x HDF5 flags](10x-h5.md) (`--genome`, `--var-names`,
 `--make-unique`, `--feature-type`, `--split-feature-types`) apply as well;
-with `--split-feature-types` every output gets the positions and images.
+with `--split-feature-types` every output gets the positions, images and
+analysis.
+
+Space Ranger's own `analysis/`, beside the matrix in `outs/`, is read when
+it is there, as it is for [Xenium](xenium.md): the graph-based clusters,
+UMAP and PCA its web summary shows. Space Ranger analyses the filtered
+spots only, so with `--unfiltered` the rest are left empty, with a warning.
+10x's sample downloads pack the folder as `<sample>_analysis.tar.gz`;
+unpack it in `outs/` to have it read.
 
 ## Differences from squidpy
 
@@ -64,8 +75,11 @@ the slide, in their own order, so they are matched to the matrix's barcodes
 as they are scanned and written in its order, a block at a time; they are a
 few thousand rows (some 14,000 on an 11 mm slide) however deep the
 sequencing. A barcode with no position, or two, is refused before anything
-is written. The images are read whole: a hires PNG is 2,000 pixels on its
-longest side.
+is written. The analysis tables are matched the same way; a barcode they
+leave out is left empty, with a warning, but one they list twice, a
+clusters table with no `Cluster` column or a projection that is not all
+numbers is refused before anything is written. The images are read whole:
+a hires PNG is 2,000 pixels on its longest side.
 
 Refused, with the reason:
 
@@ -97,6 +111,12 @@ The result is laid out as above: `in_tissue`, `array_row` and `array_col` in
 obs, `obsm["spatial"]` in full-resolution pixels (float64, as Space Ranger
 records them), and the bin folder's own images and scale factors, which
 carry `bin_size_um` and `microns_per_pixel`, in `uns["spatial"]`.
+
+The 8 and 16 µm bin folders hold their own `analysis/`, read as for spots
+into `obs["graphclust"]`, `obsm["X_umap"]` and `obsm["X_pca"]`. Space Ranger
+leaves bins with no counts out of it, which are left empty, with a warning;
+on 10x's tiny sample, half the 8 µm bins under tissue. The 2 µm bins have
+no `analysis/`.
 
 The positions list every bin on the slide, about 11 million at 2 µm, where
 the filtered matrix holds the bins under tissue. They are read twice, a

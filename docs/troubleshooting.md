@@ -193,6 +193,14 @@ a bundle trimmed to Parquet cannot be read yet.
 Xenium has one matrix. `--unfiltered`, `--library-id` and `--no-images` are
 Visium's.
 
+### `10,225 bins have no clusters, X_umap or X_pca in analysis/; they are left empty.`
+
+A warning, not a refusal. Space Ranger's own analysis leaves out Visium HD
+bins with no counts, and analyses only the filtered spots or bins, so with
+`--unfiltered` the rest have none either. Those rows get no cluster and NaN
+in `obsm["X_umap"]` and `obsm["X_pca"]`; filter on
+`adata.obs["graphclust"].notna()` to keep the analysed ones.
+
 ## Leftovers from an interrupted run
 
 ### `'out.adata-tmp.h5ad' already exists, probably left by an interrupted run. Check what it holds, remove it, and try again.`
