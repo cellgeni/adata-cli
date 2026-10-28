@@ -8,6 +8,43 @@ nav_order: 7
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
+## 0.17.3
+
+Standard Visium spots and Visium HD's 8 and 16 µm bins now bring in Space
+Ranger's own clusters, UMAP and PCA, as the segmented cells and Xenium
+already did, from today's `analysis/` layout and Space Ranger 1's.
+
+### Added
+
+- **Space Ranger's analysis for spots and bins** ([#85](https://github.com/cellgeni/adata-cli/pull/85)).
+  `adata convert outs -o section.h5ad` reads `analysis/` beside the matrix
+  when it is there:
+  - `obs["graphclust"]`, a categorical;
+  - `obsm["X_umap"]` and `obsm["X_pca"]`.
+
+  Space Ranger 1's folder names (`graphclust/`, `2_components/`,
+  `10_components/`) are read too. The 2 µm bins have no `analysis/`.
+  - Space Ranger leaves bins with no counts out of its analysis (half the
+    8 µm bins of 10x's tiny sample) and analyses only the filtered spots
+    and bins, so with `--unfiltered` the rest have none. Those rows are
+    left empty, with one warning for tables that lack the same rows.
+  - A table from another run, with a barcode twice, or with a projection
+    that is not all numbers is refused before anything is written.
+  - Checked in CI against squidpy and scanpy with pandas reading the
+    tables. On 10x's tiny HD sample and SR 1.1 Adult Mouse Brain, the
+    values equal pandas' exact parse; the 8 µm import peaks 13 MB higher
+    than in 0.17.2.
+
+### Changed
+
+- **Analysis projections are scanned without keeping their values.** The
+  scan that types a table's columns kept each column's distinct values for
+  categories, up to 65,536 strings a column: some 60 MB for a PCA's ten
+  columns, which can never be categories. Xenium and the segmented cells
+  gain this too.
+- **CellBender's embeddings go through the shared row scatter**
+  (`core/scatter.py`) rather than a copy of it; the output is unchanged.
+
 ## 0.17.2
 
 Space Ranger 4's segmented cells join Visium HD's bins: `convert --cells`

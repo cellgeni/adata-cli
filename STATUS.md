@@ -7,6 +7,7 @@ moves; the plan of record for the current item is in the section below.
 
 | Version | What | Issues |
 |---|---|---|
+| 0.17.3 | Space Ranger's analysis (clusters, UMAP, PCA) for Visium spots and HD bins | #85 |
 | 0.17.2 | Visium HD segmented cells (Space Ranger 4): centroids, areas and Space Ranger's analysis | #83 |
 | 0.17.1 | Visium HD, one bin size at a time, with the new `spatial` extra (pyarrow) | #81 |
 | 0.17.0 | `convert` reads Visium (Space Ranger 1–4) and Xenium (XOA 1–4) with positions, images and Xenium's analysis | #79 |
@@ -22,32 +23,8 @@ The conversion epic's sub-issues (#21–#30) are all done and ticked in #20.
 
 ## In progress
 
-0.17.3: Space Ranger's own `analysis/` for standard spots and HD bins, as
-the segmented cells have it, and CellBender's embeddings onto
-`core/scatter.py`.
-
-Decisions:
-- Read by default when there, as for cells and Xenium: `graphclust`,
-  `X_umap`, `X_pca`. 8 and 16 µm bins have their own; 2 µm have none.
-- Space Ranger 1's folder names (`graphclust/`, `2_components/`,
-  `10_components/`) are read too, after today's.
-- Space Ranger leaves bins with no counts out of the analysis (half the
-  8 µm bins of the tiny sample), so tables lacking as many rows share one
-  warning.
-- squidpy's spot size for cells stays as Space Ranger wrote it; the docs
-  keep the one-line fix.
-
-Steps:
-- [x] `spatial.py`: candidate paths, a noun for the warning, one warning
-  per count.
-- [x] `visium.py`: plan and write the analysis for spots and bins.
-- [x] Tests: fixtures, mapping, refusals, `--unfiltered`,
-  `--split-feature-types`, perf guard, squidpy/pandas comparisons.
-- [x] CellBender `_write_embeddings` onto `RowScatter`.
-- [x] Docs: visium.md, troubleshooting, commands table.
-- [x] Real data: tiny HD sample at 8 and 16 µm, 10x's SR 1.1 Adult Mouse
-  Brain with its analysis.
-- [ ] Review, CI, merge; release 0.17.3.
+Nothing. Space Ranger's analysis for spots and bins is out in 0.17.3;
+`cell_id` on 2 µm bins (0.17.4) is next.
 
 ## Follow-ups noticed
 
