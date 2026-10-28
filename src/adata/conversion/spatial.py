@@ -13,6 +13,7 @@ by `scan_analysis`.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
@@ -44,6 +45,9 @@ class Join:
     #: Matrix barcodes the table has more than one row for.
     n_repeated: int = 0
     example_missing: str = ""
+    #: A digest of which barcodes are missing, to tell tables that lack the
+    #: same ones from tables that lack as many.
+    missing_digest: str = ""
 
     def check(self, what: str, *, allow_missing: bool = False) -> None:
         """Refuse a join that would leave a barcode with no row, or two."""
@@ -139,6 +143,7 @@ class BarcodeJoin:
                 self._slice(missing[0], missing[0] + 1)[0].decode("utf-8", "replace")
                 if missing.size else ""
             ),
+            missing_digest=hashlib.blake2b(missing.tobytes(), digest_size=16).hexdigest(),
         )
 
 
@@ -315,17 +320,20 @@ def check_analysis(analysis: Analysis, warnings: List[str], rows: str = "cells")
     for table in analysis.projections.values():
         require_numeric(table.scan, [c.name for c in table.scan.columns])
     # Space Ranger leaves bins with no counts out of every table alike, so
-    # tables lacking as many rows share one warning rather than one each.
-    lacking: Dict[int, List[str]] = {}
+    # tables lacking the same rows share one warning rather than one each.
+    lacking: Dict[Tuple[int, str], List[str]] = {}
     for label, table in [("clusters", analysis.clusters), *analysis.projections.items()]:
         if table is None:
             continue
         table.join.check(f"analysis {label}", allow_missing=True)
         if table.join.n_missing:
-            lacking.setdefault(table.join.n_missing, []).append(label)
-    for n, labels in lacking.items():
+            lacking.setdefault((table.join.n_missing, table.join.missing_digest), []).append(label)
+    for (n, _), labels in lacking.items():
         named = labels[0] if len(labels) == 1 else f"{', '.join(labels[:-1])} or {labels[-1]}"
-        warnings.append(f"{n:,} {rows} have no {named} in analysis/; they are left empty.")
+        if n == 1:
+            warnings.append(f"1 {rows[:-1]} has no {named} in analysis/; it is left empty.")
+        else:
+            warnings.append(f"{n:,} {rows} have no {named} in analysis/; they are left empty.")
 
 
 def write_analysis(root: Any, obs: Any, analysis: Analysis) -> List[str]:

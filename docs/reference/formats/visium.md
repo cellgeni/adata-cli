@@ -76,10 +76,12 @@ as they are scanned and written in its order, a block at a time; they are a
 few thousand rows (some 14,000 on an 11 mm slide) however deep the
 sequencing. A barcode with no position, or two, is refused before anything
 is written. The analysis tables are matched the same way; a barcode they
-leave out is left empty, with a warning, but one they list twice, a
-clusters table with no `Cluster` column or a projection that is not all
-numbers is refused before anything is written. The images are read whole:
-a hires PNG is 2,000 pixels on its longest side.
+leave out is left empty, with a warning, but one they list twice, a table
+with a row for none of the matrix's barcodes (from another run), a clusters
+table with no `Cluster` column or a projection that is not all numbers is
+refused before anything is written. To convert without a broken
+`analysis/`, move it out of `outs/`. The images are read whole: a hires PNG
+is 2,000 pixels on its longest side.
 
 Refused, with the reason:
 

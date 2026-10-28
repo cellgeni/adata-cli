@@ -98,8 +98,11 @@ class TableScan:
         if column.kind == "bool":
             if not column.present:
                 return "float64"  # nothing but missing values, as pandas reads it
-            # pandas reads True/False with gaps as text.
-            return "category" if column.has_missing else "bool"
+            # pandas reads True/False with gaps as text: categories, unless
+            # the distinct values were not kept.
+            if column.has_missing:
+                return "category" if column.seen is not None else "str"
+            return "bool"
         return "category" if self.is_categorical(column) else "str"
 
     def is_categorical(self, column: Column) -> bool:

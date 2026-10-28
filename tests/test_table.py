@@ -200,3 +200,12 @@ def test_without_distinct_values_columns_are_typed_the_same(tmp_path):
     assert [untracked.dtype_of(c) for c in untracked.columns] == expected
     assert expected == ["int64", "float64", "bool", "str", "str", "float64", "float64"]
     assert all(c.seen is None for c in untracked.columns)
+
+
+def test_without_distinct_values_booleans_with_gaps_are_not_categories(tmp_path):
+    """They were typed category with no categories to write, so every
+    value would have been written as missing."""
+    path = _write(tmp_path, "id,flag\nc1,True\nc2,\nc3,False\n")
+    assert scan_table(path, index="id").dtype_of(scan_table(path, index="id").columns[0]) == "category"
+    untracked = scan_table(path, index="id", distinct=False)
+    assert untracked.dtype_of(untracked.columns[0]) == "str"

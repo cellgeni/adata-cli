@@ -148,7 +148,7 @@ adata convert multiome.h5ad -o multiome.h5mu
 | `h5ad` | `.h5ad` | yes | yes |
 | `zarr` | `.zarr` (v2 or v3) | yes | yes |
 | [`10x-h5`](formats/10x-h5.md) | `.h5` | Cell Ranger 2 and 3+; the matrix alone of Space Ranger and Xenium | Cell Ranger 3+ layout |
-| [`visium`](formats/visium.md) | a folder | Space Ranger `outs/`: counts, spot or bin positions or segmented cells, images, Space Ranger's clusters and UMAP (standard Visium; Visium HD bins with `pyadata-cli[spatial]`; Space Ranger 4's cells with `--cells`) | no |
+| [`visium`](formats/visium.md) | a folder | Space Ranger `outs/`: counts, spot or bin positions or segmented cells, images, Space Ranger's clusters, UMAP and PCA (standard Visium; Visium HD bins with `pyadata-cli[spatial]`; Space Ranger 4's cells with `--cells`) | no |
 | [`xenium`](formats/xenium.md) | a folder | a Xenium bundle: counts, cells and centroids, Xenium's analysis | no |
 | [`cellbender`](formats/cellbender.md) | `.h5` | CellBender `remove-background` 0.2 and later | no |
 | [`10x-mtx`](formats/10x-mtx.md) | a folder (`--to 10x-mtx`) | Cell Ranger 2 and 3+, STARsolo (velocyto too) | Cell Ranger 3+ layout, gzipped |

@@ -19,7 +19,12 @@ import pytest
 from typer.testing import CliRunner
 
 from adata.cli import app
-from tests.conftest import write_segmented_outputs, write_visium_hd_outs, write_visium_outs
+from tests.conftest import (
+    write_segmented_outputs,
+    write_space_ranger_analysis,
+    write_visium_hd_outs,
+    write_visium_outs,
+)
 
 ad = pytest.importorskip("anndata")
 
@@ -430,6 +435,41 @@ def test_2_um_bins_have_no_analysis_and_need_none(tmp_path):
     adata = _read(tmp_path / "out.h5ad")
     assert list(adata.obs.columns) == ["in_tissue", "array_row", "array_col"]
     assert list(adata.obsm) == ["spatial"]
+
+
+@pytest.mark.parametrize("missing", [0, 1])
+def test_analysis_in_the_matrixs_order_lands_on_its_spots(tmp_path, missing):
+    """As Space Ranger writes it: in the matrix's order, whole (written
+    straight through) or with a spot left out (through the buckets)."""
+    truth = write_visium_outs(tmp_path / "run")
+    analysis = write_space_ranger_analysis(
+        truth.outs, truth.barcodes, np.random.default_rng(1), missing=missing, shuffled=False
+    )
+    result = _ok(truth.outs, "-o", tmp_path / "out.h5ad")
+    if missing:
+        assert "1 spot has no clusters, X_umap or X_pca in analysis/; it is left empty" in _out(result)
+    else:
+        assert "in analysis/" not in _out(result)
+    _check_analysis(_read(tmp_path / "out.h5ad"), analysis)
+
+
+def test_tables_lacking_different_spots_warn_apart(tmp_path):
+    """Tables lacking as many spots, but not the same ones, shared one
+    warning, as if those spots lacked all of them."""
+    truth = write_visium_outs(tmp_path / "run", analysis=True)
+    path = truth.outs / "analysis" / "umap" / "gene_expression_2_components" / "projection.csv"
+    lines = path.read_text().splitlines()
+    listed = {line.split(",", 1)[0] for line in lines[1:]}
+    absent = [b for b in truth.barcodes if b not in listed]
+    # Swap which spots the UMAP lacks: as many, but others.
+    kept = [line for line in lines[1:] if not line.startswith(lines[1].split(",", 1)[0])]
+    kept = kept[1:] + [f"{b},0.5,0.5" for b in absent]
+    path.write_text("\n".join([lines[0], *kept]) + "\n")
+
+    result = _ok(truth.outs, "-o", tmp_path / "out.h5ad")
+
+    assert "2 spots have no clusters or X_pca in analysis/" in _out(result)
+    assert "2 spots have no X_umap in analysis/" in _out(result)
 
 
 def test_unfiltered_spots_outside_the_analysis_are_left_empty(tmp_path):

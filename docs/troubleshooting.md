@@ -146,7 +146,9 @@ positions but not the matrix are fine. A Xenium cell missing from
 `cells.csv.gz` is refused the same way, as is a Visium HD cell with no
 outline in `cell_segmentations.geojson` (named there by its integer
 `cell_id`), and so is a table (positions, cells, outlines or an analysis
-table) with a row for none of the matrix's barcodes.
+table) with a row for none of the matrix's barcodes. An `analysis/` folder
+copied in from another run is refused this way; move it out of the folder
+to convert without it.
 
 ### `tissue_positions.csv: pxl_col_in_fullres holds values that are not numbers.`
 
@@ -199,7 +201,8 @@ A warning, not a refusal. Space Ranger's own analysis leaves out Visium HD
 bins with no counts, and analyses only the filtered spots or bins, so with
 `--unfiltered` the rest have none either. Those rows get no cluster and NaN
 in `obsm["X_umap"]` and `obsm["X_pca"]`; filter on
-`adata.obs["graphclust"].notna()` to keep the analysed ones.
+`adata.obs["graphclust"].notna()` to keep the analysed ones. Tables that
+lack different rows warn apart.
 
 ## Leftovers from an interrupted run
 

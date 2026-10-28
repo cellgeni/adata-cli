@@ -1386,17 +1386,20 @@ class AnalysisTruth:
 
 
 def write_space_ranger_analysis(
-    folder: Path, barcodes: Sequence[str], rng: Any, *, missing: int = 2, sr1: bool = False
+    folder: Path, barcodes: Sequence[str], rng: Any, *, missing: int = 2, sr1: bool = False,
+    shuffled: bool = True,
 ) -> AnalysisTruth:
     """`analysis/` as Space Ranger writes it for spots and bins (checked
     against 10x's SR 1.1 Adult Mouse Brain and SR 4.0.1 tiny HD samples):
     the graph-based clusters, UMAP and PCA, keyed by Barcode. Space Ranger
-    leaves some barcodes out (bins with no counts); these rows are in no
-    particular order. Space Ranger 1's folders have no gene_expression_
-    prefix."""
+    lists the matrix's barcodes in its order, leaving some out (bins with no
+    counts); `shuffled` puts the rows in no particular order instead. Space
+    Ranger 1's folders have no gene_expression_ prefix."""
     prefix = "" if sr1 else "gene_expression_"
     n = len(barcodes)
     listed = rng.permutation(n)[missing:]
+    if not shuffled:
+        listed = np.sort(listed)
     clusters = np.full(n, "", dtype=object)
     clusters[listed] = [str(v) for v in rng.integers(1, 12, listed.size)]
     umap = np.full((n, 2), np.nan)
