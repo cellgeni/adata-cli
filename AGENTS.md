@@ -108,7 +108,7 @@ Each layer calls only the layers below it:
   Ranger 2 genome layout. `conversion/spatial.py` matches a table to a
   matrix's barcodes while `scan_table` reads it (`on_index`), and writes it
   in the matrix's order; it also reads the `analysis/` (clusters, UMAP, PCA)
-  that Xenium and Space Ranger's segmented cells share.
+  that Xenium and Space Ranger (spots, bins and cells) share.
 - **`formats/`**: the per-file-type halves of `export` and `import`: npy, mtx,
   csv, json and images. `mtx.py` is a streaming Matrix Market codec (two
   passes in, block writes out) shared by `import`/`export sparse` and the

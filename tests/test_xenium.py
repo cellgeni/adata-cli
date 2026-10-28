@@ -111,7 +111,7 @@ def test_cells_missing_from_the_analysis_are_left_empty(tmp_path):
 
     result = _ok(truth.bundle, "-o", tmp_path / "out.h5ad")
 
-    assert "3 cells have no clusters in analysis/" in _out(result)
+    assert "3 cells have no clusters or X_umap in analysis/" in _out(result)
     adata = _read(tmp_path / "out.h5ad")
     assert adata.obs["graphclust"].isna().sum() == 3
     assert adata.obs["graphclust"].astype(object).fillna("").tolist() == list(truth.clusters)

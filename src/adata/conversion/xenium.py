@@ -42,11 +42,10 @@ from adata.conversion import tenx
 from adata.conversion.base import ConversionPlan, Converter, Options
 from adata.conversion.features import STRING_STEP, Target, describe_import, write_obs_index, write_var
 from adata.conversion.spatial import (
-    ANALYSIS_CLUSTERS,
-    ANALYSIS_PROJECTIONS,
     Analysis,
     Sink,
     Table,
+    analysis_paths,
     check_analysis,
     numbers,
     require_numeric,
@@ -119,7 +118,7 @@ def _unpack_analysis(archive: Path, beside: Path) -> tempfile.TemporaryDirectory
     which on a cluster node is often too small for a large run's PCA.
     """
     holder = tempfile.TemporaryDirectory(prefix=".adata-xenium-", dir=beside)
-    wanted = {str(Path("analysis") / p): p for p in (ANALYSIS_CLUSTERS, *ANALYSIS_PROJECTIONS.values())}
+    wanted = {str(Path("analysis") / p): p for p in analysis_paths()}
     with tarfile.open(archive, "r:*") as tar:
         for member in tar:
             relative = wanted.get(member.name.lstrip("./"))

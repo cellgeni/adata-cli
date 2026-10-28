@@ -6,12 +6,14 @@ in their own order, beside a 10x matrix whose barcode order AnnData keeps.
 `write_rows` writes it in the matrix's order: straight through when the two
 already agree, as Xenium's do, and through `core.scatter` when not.
 
-Xenium and Space Ranger's segmented cells also share the layout of their
-own `analysis/` (graph-based clusters, UMAP, PCA), read by `scan_analysis`.
+Xenium and Space Ranger (spots, bins and segmented cells alike) also share
+the layout of their own `analysis/` (graph-based clusters, UMAP, PCA), read
+by `scan_analysis`.
 """
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
@@ -43,6 +45,9 @@ class Join:
     #: Matrix barcodes the table has more than one row for.
     n_repeated: int = 0
     example_missing: str = ""
+    #: A digest of which barcodes are missing, to tell tables that lack the
+    #: same ones from tables that lack as many.
+    missing_digest: str = ""
 
     def check(self, what: str, *, allow_missing: bool = False) -> None:
         """Refuse a join that would leave a barcode with no row, or two."""
@@ -138,6 +143,7 @@ class BarcodeJoin:
                 self._slice(missing[0], missing[0] + 1)[0].decode("utf-8", "replace")
                 if missing.size else ""
             ),
+            missing_digest=hashlib.blake2b(missing.tobytes(), digest_size=16).hexdigest(),
         )
 
 
@@ -237,12 +243,28 @@ def write_image(parent: Any, name: str, path: Path) -> None:
 
 
 #: The analysis tables read, under `analysis/`: the graph-based clusters,
-#: and each projection with the obsm key it goes to.
-ANALYSIS_CLUSTERS = Path("clustering/gene_expression_graphclust/clusters.csv")
+#: and each projection with the obsm key it goes to. Each is where it may
+#: be, the first found read: today's names, then Space Ranger 1's, which
+#: had no `gene_expression_` prefix.
+ANALYSIS_CLUSTERS = (
+    Path("clustering/gene_expression_graphclust/clusters.csv"),
+    Path("clustering/graphclust/clusters.csv"),
+)
 ANALYSIS_PROJECTIONS = {
-    "X_umap": Path("umap/gene_expression_2_components/projection.csv"),
-    "X_pca": Path("pca/gene_expression_10_components/projection.csv"),
+    "X_umap": (
+        Path("umap/gene_expression_2_components/projection.csv"),
+        Path("umap/2_components/projection.csv"),
+    ),
+    "X_pca": (
+        Path("pca/gene_expression_10_components/projection.csv"),
+        Path("pca/10_components/projection.csv"),
+    ),
 }
+
+
+def analysis_paths() -> List[Path]:
+    """Every path under `analysis/` a table is looked for at."""
+    return [p for paths in (ANALYSIS_CLUSTERS, *ANALYSIS_PROJECTIONS.values()) for p in paths]
 
 
 @dataclass
@@ -253,9 +275,9 @@ class Table:
     join: Join
 
 
-def scan_joined(path: Path, index: str, barcodes: Any) -> Table:
+def scan_joined(path: Path, index: str, barcodes: Any, *, distinct: bool = True) -> Table:
     joiner = BarcodeJoin(barcodes)
-    scan = scan_table(path, index=index, on_index=joiner)
+    scan = scan_table(path, index=index, on_index=joiner, distinct=distinct)
     return Table(scan, joiner.finish())
 
 
@@ -275,30 +297,43 @@ def scan_analysis(folder: Path, barcodes: Any) -> Analysis:
     analysis = Analysis()
     if not folder.is_dir():
         return analysis
-    if (folder / ANALYSIS_CLUSTERS).is_file():
-        analysis.clusters = scan_joined(folder / ANALYSIS_CLUSTERS, "Barcode", barcodes)
-    for key, path in ANALYSIS_PROJECTIONS.items():
-        if (folder / path).is_file():
-            analysis.projections[key] = scan_joined(folder / path, "Barcode", barcodes)
+    path = _first_file(folder, ANALYSIS_CLUSTERS)
+    if path is not None:
+        analysis.clusters = scan_joined(path, "Barcode", barcodes)
+    for key, paths in ANALYSIS_PROJECTIONS.items():
+        path = _first_file(folder, paths)
+        if path is not None:
+            # Numbers only, so no column's distinct values are kept.
+            analysis.projections[key] = scan_joined(path, "Barcode", barcodes, distinct=False)
     return analysis
 
 
-def check_analysis(analysis: Analysis, warnings: List[str]) -> None:
-    """Refuse analysis tables that cannot be written; warn of cells they lack,
-    which are left empty."""
+def _first_file(folder: Path, paths: Sequence[Path]) -> Optional[Path]:
+    return next((folder / p for p in paths if (folder / p).is_file()), None)
+
+
+def check_analysis(analysis: Analysis, warnings: List[str], rows: str = "cells") -> None:
+    """Refuse analysis tables that cannot be written; warn of `rows` (cells,
+    spots, bins) they lack, which are left empty."""
     if analysis.clusters is not None and "Cluster" not in analysis.clusters.scan.header:
-        raise ValueError(f"{ANALYSIS_CLUSTERS.name} in analysis has no Cluster column.")
+        raise ValueError(f"{analysis.clusters.scan.path.name} in analysis has no Cluster column.")
     for table in analysis.projections.values():
         require_numeric(table.scan, [c.name for c in table.scan.columns])
+    # Space Ranger leaves bins with no counts out of every table alike, so
+    # tables lacking the same rows share one warning rather than one each.
+    lacking: Dict[Tuple[int, str], List[str]] = {}
     for label, table in [("clusters", analysis.clusters), *analysis.projections.items()]:
         if table is None:
             continue
         table.join.check(f"analysis {label}", allow_missing=True)
         if table.join.n_missing:
-            warnings.append(
-                f"{table.join.n_missing:,} cells have no {label} in analysis/; "
-                "they are left empty."
-            )
+            lacking.setdefault((table.join.n_missing, table.join.missing_digest), []).append(label)
+    for (n, _), labels in lacking.items():
+        named = labels[0] if len(labels) == 1 else f"{', '.join(labels[:-1])} or {labels[-1]}"
+        if n == 1:
+            warnings.append(f"1 {rows[:-1]} has no {named} in analysis/; it is left empty.")
+        else:
+            warnings.append(f"{n:,} {rows} have no {named} in analysis/; they are left empty.")
 
 
 def write_analysis(root: Any, obs: Any, analysis: Analysis) -> List[str]:

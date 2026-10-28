@@ -86,8 +86,8 @@ a converter to another format.
    the feature table every 10x-style format shares. A format that pairs a 10x
    matrix with a table (`visium.py`, `xenium.py`) uses `spatial.py` to match
    the table to the matrix's barcodes and write it in their order, and to
-   read the `analysis/` folder Xenium and Space Ranger's segmented cells
-   share.
+   read the `analysis/` folder Xenium and Space Ranger (spots, bins and
+   cells) share.
 3. Add fixtures shaped like the real tool's output to `tests/conftest.py`, and
    a comparison against the reader people use in
    `tests/test_external_readers.py`.

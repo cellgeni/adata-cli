@@ -22,19 +22,39 @@ The conversion epic's sub-issues (#21–#30) are all done and ticked in #20.
 
 ## In progress
 
-Nothing. Space Ranger 4's segmented cells are out in 0.17.2; the spot and
-bin follow-ups below remain.
+0.17.3: Space Ranger's own `analysis/` for standard spots and HD bins, as
+the segmented cells have it, and CellBender's embeddings onto
+`core/scatter.py`.
+
+Decisions:
+- Read by default when there, as for cells and Xenium: `graphclust`,
+  `X_umap`, `X_pca`. 8 and 16 µm bins have their own; 2 µm have none.
+- Space Ranger 1's folder names (`graphclust/`, `2_components/`,
+  `10_components/`) are read too, after today's.
+- Space Ranger leaves bins with no counts out of the analysis (half the
+  8 µm bins of the tiny sample), so tables lacking as many rows share one
+  warning.
+- squidpy's spot size for cells stays as Space Ranger wrote it; the docs
+  keep the one-line fix.
+
+Steps:
+- [x] `spatial.py`: candidate paths, a noun for the warning, one warning
+  per count.
+- [x] `visium.py`: plan and write the analysis for spots and bins.
+- [x] Tests: fixtures, mapping, refusals, `--unfiltered`,
+  `--split-feature-types`, perf guard, squidpy/pandas comparisons.
+- [x] CellBender `_write_embeddings` onto `RowScatter`.
+- [x] Docs: visium.md, troubleshooting, commands table.
+- [x] Real data: tiny HD sample at 8 and 16 µm, 10x's SR 1.1 Adult Mouse
+  Brain with its analysis.
+- [ ] Review, CI, merge; release 0.17.3.
 
 ## Follow-ups noticed
 
 - `cell_id` (with `in_cell`, `in_nucleus`) on 2 µm bins, from Space Ranger
-  4's `barcode_mappings.parquet`.
-- Spatial bundles whose matrix is a MEX folder only (refused for now, with a
-  pointer to `--from 10x-mtx`).
-- Space Ranger's own `analysis/` (clusters, UMAP) for Visium spots and HD
-  bins, as the segmented cells now have it (`spatial.scan_analysis`).
-- CellBender's `_write_embeddings` onto `core/scatter.py`, which generalises
-  it.
+  4's `barcode_mappings.parquet` (0.17.4).
+- Dropped: spatial bundles whose matrix is a MEX folder only. 10x always
+  writes the `.h5` beside it, and the refusal points to `--from 10x-mtx`.
 
 - Fixed in 0.16.2 (#77): `export image` without `-o` crashed (`'NoneType'
   object has no attribute 'parent'`); it now writes PNG to stdout, as every

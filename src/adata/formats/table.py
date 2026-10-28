@@ -64,7 +64,10 @@ class Column:
     name: str
     kind: str = "bool"
     has_missing: bool = False
-    #: Distinct values of a text column, None once past the cap.
+    #: Whether any value is not missing.
+    present: bool = False
+    #: Distinct values of a text column, None once past the cap (or when
+    #: not tracked at all, for columns that must be numbers).
     seen: Optional[Set[str]] = field(default_factory=set)
 
     @property
@@ -93,10 +96,13 @@ class TableScan:
         if column.kind == "float":
             return "float64"
         if column.kind == "bool":
-            if not column.seen:
+            if not column.present:
                 return "float64"  # nothing but missing values, as pandas reads it
-            # pandas reads True/False with gaps as text.
-            return "category" if column.has_missing else "bool"
+            # pandas reads True/False with gaps as text: categories, unless
+            # the distinct values were not kept.
+            if column.has_missing:
+                return "category" if column.seen is not None else "str"
+            return "bool"
         return "category" if self.is_categorical(column) else "str"
 
     def is_categorical(self, column: Column) -> bool:
@@ -138,6 +144,8 @@ def _narrow(column: Column, values: List[str]) -> None:
     present = [v for v in values if v not in NA_VALUES]
     if len(present) < len(values):
         column.has_missing = True
+    if present:
+        column.present = True
     kind = _ORDER.index(column.kind)
     while present and kind < 3:
         try:
@@ -166,6 +174,7 @@ def scan_table(
     select: Optional[Tuple[str, str]] = None,
     names: Optional[Sequence[str]] = None,
     on_index: Optional[Callable[[List[str]], None]] = None,
+    distinct: bool = True,
     block_bytes: int = TABLE_BLOCK_BYTES,
 ) -> TableScan:
     """Pass 1: the header, the row count and each column's type.
@@ -175,7 +184,10 @@ def scan_table(
     holds that value. `names` are the columns of a file with no header line,
     such as Space Ranger 1's `tissue_positions_list.csv`. `on_index` is
     given each block's index values, in file order, so a caller can match
-    them against something else in the same pass.
+    them against something else in the same pass. `distinct=False` keeps
+    no column's distinct values, which only categories need, for a table
+    whose columns must all be numbers: they are up to `CATEGORY_CAP`
+    strings a column, some 60 MB for a PCA's ten.
     """
     path = Path(path)
     header: Optional[List[str]] = None
@@ -203,7 +215,7 @@ def scan_table(
                 raise ValueError(f"{path.name} has no {index!r} column; it has: {', '.join(header)}.")
             at = header.index(index)
             positions = [i for i, name in enumerate(header) if name != index]
-            columns = [Column(header[i]) for i in positions]
+            columns = [Column(header[i], seen=set() if distinct else None) for i in positions]
             if select is not None:
                 if select[0] not in header:
                     raise ValueError(f"{path.name} has no {select[0]!r} column.")
@@ -226,7 +238,7 @@ def scan_table(
     if not columns:
         # A file of no rows: its header (or the names given) still stands.
         index = header[0] if index is None else index
-        columns = [Column(name) for name in header if name != index]
+        columns = [Column(name, seen=set() if distinct else None) for name in header if name != index]
     return TableScan(
         path=path,
         delimiter=delimiter,

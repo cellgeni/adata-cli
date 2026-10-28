@@ -47,8 +47,9 @@ from adata.conversion.features import (
     write_obs_index,
     write_var,
 )
-from adata.core.csr_build import CsrAppender, count_keys, scratch_group, write_runs
+from adata.core.csr_build import CsrAppender, count_keys, write_runs
 from adata.core.recast import Matrix
+from adata.core.scatter import RowScatter
 from adata.core.subset import fan_out_sparse_matrix
 from adata.elements import spec
 from adata.elements.read import decode_str_array
@@ -579,9 +580,9 @@ def _write_embeddings(
     Latent rows come in CellBender's order, analysed droplets by count, and
     output rows in the file's, so one block of output draws on latents from
     anywhere. Reading those rows by fancy indexing is some 500 times slower
-    than a slice, so the latents are read in slices and sorted, by the output
-    block they belong to, into a scratch copy that each block then reads in
-    one piece.
+    than a slice, so the latents are read in slices and placed through
+    `core.scatter`'s buckets: one column per embedding, all fed from the
+    same pass over the latents.
     """
     if not latents.embeddings:
         return
@@ -593,51 +594,25 @@ def _write_embeddings(
     target = (
         position[: latents.n_latent] if latents.rows is None else position[latents.rows]
     )
-    kept = np.flatnonzero(target >= 0)
-    block_of = target[kept] // _ROW_STEP
-    by_block = np.argsort(block_of, kind="stable")
-    n_blocks = -(-n_out // _ROW_STEP)
-    starts = np.concatenate(([0], np.cumsum(np.bincount(block_of, minlength=n_blocks))))
-    # The output row of each scratch row.
-    placed = target[kept][by_block]
 
-    with scratch_group(root, "__embedding_scratch__") as scratch:
-        for key, path in latents.embeddings.items():
-            source = handle[path]
-            width = source.shape[1]
-            dtype = source.dtype if source.dtype.kind == "f" else np.float64
-            sorted_rows = create_dataset(
-                scratch, key, shape=(kept.size, width), dtype=dtype,
-                chunks=(min(max(kept.size, 1), _ROW_STEP), width),
-            )
-            cursor = starts[:-1].copy()
-            for lo in range(0, latents.n_latent, _ROW_STEP):
-                hi = min(lo + _ROW_STEP, latents.n_latent)
-                here = target[lo:hi]
-                have = np.flatnonzero(here >= 0)
-                if have.size == 0:
-                    continue
-                values = np.asarray(source[lo:hi])[have]
-                blocks = here[have] // _ROW_STEP
-                order = np.argsort(blocks, kind="stable")
-                values, blocks = values[order], blocks[order]
-                edges = np.flatnonzero(np.diff(blocks)) + 1
-                for run, b in zip(np.split(values, edges), blocks[np.r_[0, edges]]):
-                    sorted_rows[cursor[b] : cursor[b] + len(run)] = run
-                    cursor[b] += len(run)
-
-            out = create_dataset(
-                root["obsm"], key, shape=(n_out, width), dtype=dtype,
-                chunks=(min(max(n_out, 1), _ROW_STEP), width),
-            )
-            for b in range(n_blocks):
-                lo = b * _ROW_STEP
-                block = np.full((min(_ROW_STEP, n_out - lo), width), np.nan, dtype=dtype)
-                a, z = starts[b], starts[b + 1]
-                if a < z:
-                    block[placed[a:z] - lo] = sorted_rows[a:z]
-                out[lo : lo + block.shape[0]] = block
-            spec.set_encoding(out, spec.ARRAY)
+    sources, outs = [], []
+    for key, path in latents.embeddings.items():
+        source = handle[path]
+        width = source.shape[1]
+        dtype = source.dtype if source.dtype.kind == "f" else np.float64
+        out = create_dataset(
+            root["obsm"], key, shape=(n_out, width), dtype=dtype,
+            chunks=(min(max(n_out, 1), _ROW_STEP), width),
+        )
+        spec.set_encoding(out, spec.ARRAY)
+        sources.append(source)
+        outs.append(out)
+    with RowScatter(target, n_out, root, row_step=_ROW_STEP) as scatter:
+        columns = [scatter.column(out) for out in outs]
+        for lo in range(0, latents.n_latent, _ROW_STEP):
+            hi = min(lo + _ROW_STEP, latents.n_latent)
+            for source, column in zip(sources, columns):
+                column.add(source[lo:hi])
 
 
 def _write_uns(root: Any, handle: h5py.File, latents: _Latents) -> None:
