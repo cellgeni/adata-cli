@@ -19,6 +19,7 @@ from adata.core.recast import (
     DEFAULT_CHUNK,
     LAYOUTS,
     Plan,
+    _stored_bytes,
     convert_matrix,
     parse_dtype,
     plan_conversion,
@@ -26,8 +27,8 @@ from adata.core.recast import (
 from adata.elements import spec
 from adata.elements.write import ensure_anndata_skeleton
 from adata.storage import copy_tree, detect_backend, is_group, open_store
-from adata.util.path import same_path
-from adata.util.staging import staged_outputs
+from adata.util.path import output_target
+from adata.util.staging import check_free_space, disk_size, staged_outputs
 
 def discover_matrices(root: Any) -> List[str]:
     """Entry paths `--all` resolves to, in a stable order.
@@ -71,10 +72,9 @@ def recast_store(
     in_memory: bool = False,
     force: bool = False,
     zarr_format: Optional[int] = None,
+    space_check: bool = True,
 ) -> None:
     """Write a copy of `file` with the named matrices converted."""
-    if not inplace and output is None:
-        raise ValueError("Output file is required unless --inplace is specified.")
     if dtype is None and indices_dtype is None and layout is None:
         raise ValueError(
             "Nothing to do: pass at least one of --dtype, --indices-dtype "
@@ -82,6 +82,8 @@ def recast_store(
         )
     if layout is not None and layout not in LAYOUTS:
         raise ValueError(f"--layout must be one of: {', '.join(LAYOUTS)}.")
+    if chunk < 1 or chunk_rows < 1:
+        raise ValueError("--chunk must be at least 1.")
 
     data_dtype = parse_dtype(dtype) if dtype else None
     index_dtype = (
@@ -90,16 +92,10 @@ def recast_store(
         else None
     )
 
-    if output is not None and not inplace and same_path(file, output):
-        # Opening the destination "w" clears it while the source is still
-        # being read from it. HDF5 refuses; Zarr does not, and quietly
-        # produced an empty store where the data used to be.
-        raise ValueError(
-            f"Output path is the input: {output}. Use --inplace to replace "
-            "it, which writes to a temporary file first."
-        )
-
-    dst_path = file if inplace else Path(output)
+    # Refuses -o naming the input: opening the destination "w" clears it
+    # while the source is still being read from it. HDF5 refuses; Zarr does
+    # not, and quietly produced an empty store where the data used to be.
+    dst_path = output_target(file, output, inplace)
 
     if zarr_format is None and detect_backend(file) == "zarr":
         with open_store(file, "r") as probe:
@@ -132,6 +128,12 @@ def recast_store(
                 for path in targets
             }
 
+            check_free_space(
+                dst_path,
+                disk_size(file) * max([1.0] + [_growth(p) for p in plans.values()]),
+                check=space_check,
+            )
+
             console.print(
                 f"[cyan]Converting {len(targets)} matrix/matrices:[/] "
                 + ", ".join(targets)
@@ -150,6 +152,32 @@ def recast_store(
         console.print(f"[green]Converted[/] {file}")
     else:
         console.print(f"[green]Wrote[/] {dst_path}")
+
+
+def _growth(plan: Plan) -> float:
+    """How many times its current size a matrix will be once converted.
+
+    From the uncompressed sizes, so a guess for compressed stores, but it
+    catches the cases that matter: a wider dtype, and densifying.
+    """
+    src = plan.source
+    current = _stored_bytes(src.obj)
+    if current <= 0:
+        return 1.0
+    if plan.layout == "dense":
+        cells = 1
+        for extent in src.shape:
+            cells *= int(extent)
+        return cells * plan.data_dtype.itemsize / current
+    if not src.sparse:
+        return 1.0  # sparsifying is done to shrink; its nnz is not known yet
+    nnz = int(src.obj["data"].shape[0])
+    pointers = int(src.obj["indptr"].shape[0])
+    projected = (
+        nnz * (plan.data_dtype.itemsize + plan.index_dtype.itemsize)
+        + pointers * plan.pointer_dtype.itemsize
+    )
+    return projected / current
 
 
 def _write(src: Any, dst: Any, plans: dict, **options: Any) -> None:

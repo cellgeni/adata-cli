@@ -46,8 +46,8 @@ from adata.storage import (
     write_legacy_categorical,
     zarr_format_of,
 )
-from adata.util.path import same_path
-from adata.util.staging import staged_outputs
+from adata.util.path import output_target
+from adata.util.staging import check_free_space, disk_size, staged_outputs
 
 
 def _target_backend(dst_group: Any) -> str:
@@ -1081,6 +1081,7 @@ def subset_h5ad(
     var_indices: Optional[np.ndarray] = None,
     zarr_format: Optional[int] = None,
     quiet: bool = False,
+    space_check: bool = True,
 ) -> None:
     """Write a copy of `file` narrowed to the selected obs and/or var.
 
@@ -1093,19 +1094,12 @@ def subset_h5ad(
     )
     if not has_selection:
         raise ValueError("At least one of --obs or --var must be provided.")
+    if chunk_rows < 1:
+        raise ValueError("--chunk must be at least 1.")
 
-    if not inplace and output is None:
-        raise ValueError("Output file is required unless --inplace is specified.")
-
-    if not inplace and same_path(file, output):
-        # Opening the output "w" would empty a Zarr source before a single
-        # element had been read from it.
-        raise ValueError(
-            f"Output path is the input: {output}. Use --inplace to replace "
-            "it, which writes to a temporary file first."
-        )
-
-    dst_path = file if inplace else Path(output)
+    # Refuses -o naming the input (opening it "w" would empty a Zarr source
+    # before a single element had been read from it), or a folder.
+    dst_path = output_target(file, output, inplace)
 
     if zarr_format is None and detect_backend(file) == "zarr":
         with open_store(file, "r") as probe:
@@ -1138,6 +1132,25 @@ def subset_h5ad(
                 if var_indices is not None
                 else _select_axis(src, "var", var_file, var_query, console)
             )
+            for axis, idx, name_file in (
+                ("obs", obs_idx, obs_file),
+                ("var", var_idx, var_file),
+            ):
+                if idx is not None and len(idx) == 0:
+                    # An empty store is never what was meant -- typically
+                    # barcodes without the "-1" the index carries -- and
+                    # with --inplace it replaced the user's data.
+                    source = f"the names in '{name_file}'" if name_file else "the selection"
+                    raise ValueError(
+                        f"No {axis} selected: none of {source} is in the "
+                        f"store's {axis} index. Nothing was written."
+                    )
+
+            check_free_space(
+                dst_path,
+                disk_size(file) * _kept(src, "obs", obs_idx) * _kept(src, "var", var_idx),
+                check=space_check,
+            )
 
             # raw/ has its own var axis, so it is matched by name rather than
             # by reusing these indices.
@@ -1156,6 +1169,17 @@ def subset_h5ad(
                 )
     finally:
         status.stop()
+
+
+def _kept(src: Any, axis: str, indices: Optional[np.ndarray]) -> float:
+    """The fraction of `axis` a selection keeps, for sizing the output."""
+    if indices is None or axis not in src:
+        return 1.0
+    try:
+        total = element_len(resolve_index(src[axis], axis)[0])
+    except Exception:  # pragma: no cover - an axis without an index
+        return 1.0
+    return min(1.0, len(indices) / total) if total else 1.0
 
 
 def _open_output_limit() -> int:

@@ -1,9 +1,16 @@
-"""Import command helpers for creating/replacing objects in h5ad/zarr stores."""
+"""Import command helpers for creating/replacing objects in h5ad/zarr stores.
+
+An import never edits a store in place. The source is copied beside its
+destination (the source itself with --inplace, or -o), the element is
+written into the copy, and the copy is moved into place only once that has
+succeeded: an import that is refused or fails part way leaves the source and
+any existing output as they were.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from rich.console import Console
 
@@ -13,6 +20,8 @@ from adata.formats.image import import_image
 from adata.formats.json_data import import_json
 from adata.formats.sparse import import_mtx
 from adata.storage import copy_path, copy_store_contents, detect_backend, open_store
+from adata.util.path import output_target
+from adata.util.staging import check_free_space, disk_size, staged_outputs
 
 
 EXTENSION_FORMAT = {
@@ -23,31 +32,46 @@ EXTENSION_FORMAT = {
 }
 
 
-def _prepare_target_path(
-    file: Path,
-    output_file: Optional[Path],
-    inplace: bool,
-    console: Console,
-) -> Path:
-    if inplace:
-        return file
-    if output_file is None:
-        raise ValueError("Output file is required unless --inplace is specified.")
-
+def _copy_source(file: Path, temp: Path, output: Path, console: Console) -> None:
+    """Copy `file` to `temp`, converting it if `output` is the other backend."""
     src_backend = detect_backend(file)
-    dst_backend = detect_backend(output_file)
-
+    dst_backend = detect_backend(temp)
     if src_backend == dst_backend:
-        copy_path(file, output_file)
-        console.print(f"[dim]Copied {file} → {output_file}[/]")
-        return output_file
+        copy_path(file, temp)
+        if output != file:
+            console.print(f"[dim]Copied {file} → {output}[/]")
+        return
 
-    with open_store(file, "r") as src_store, open_store(output_file, "w") as dst_store:
+    with open_store(file, "r") as src_store, open_store(temp, "w") as dst_store:
         copy_store_contents(src_store.root, dst_store.root)
     console.print(
-        f"[dim]Converted {file} ({src_backend}) → {output_file} ({dst_backend})[/]"
+        f"[dim]Converted {file} ({src_backend}) → {output} ({dst_backend})[/]"
     )
-    return output_file
+
+
+def import_into(
+    file: Path,
+    output: Optional[Path],
+    inplace: bool,
+    write: Callable[[Path], None],
+    console: Console,
+    *,
+    input_file: Optional[Path] = None,
+    space_check: bool = True,
+) -> Path:
+    """Copy `file`, call `write` on the copy's path, and move it into place.
+
+    The destination is `output`, or with `inplace` the source itself.
+    Returns the path written.
+    """
+    others = [input_file] if input_file is not None else []
+    target = output_target(file, output, inplace, others=others)
+    needed = disk_size(file) + (disk_size(input_file) if input_file else 0)
+    with staged_outputs([target]) as (temp,):
+        check_free_space(target, needed, check=space_check)
+        _copy_source(file, temp, target, console)
+        write(temp)
+    return target
 
 
 def import_object(
@@ -59,7 +83,6 @@ def import_object(
     index_column: Optional[str],
     console: Console,
 ) -> None:
-    target_file = _prepare_target_path(file, output_file, inplace, console)
     suffixes = [x.lower() for x in input_file.suffixes]
     # A gzipped matrix is still a matrix: `counts.mtx.gz` imports as `.mtx`.
     ext = suffixes[-2] if len(suffixes) > 1 and suffixes[-1] == ".gz" else input_file.suffix.lower()
@@ -75,14 +98,17 @@ def import_object(
     if index_column and (fmt != "csv" or obj not in ("obs", "var")):
         raise ValueError("--index-column is only valid for CSV import into 'obs' or 'var'.")
 
-    if fmt == "csv":
-        _import_csv(target_file, obj, input_file, index_column, console)
-    elif fmt == "npy":
-        _import_npy(target_file, obj, input_file, console)
-    elif fmt == "mtx":
-        _import_mtx(target_file, obj, input_file, console)
-    elif fmt == "json":
-        _import_json(target_file, obj, input_file, console)
+    def write(target: Path) -> None:
+        if fmt == "csv":
+            _import_csv(target, obj, input_file, index_column, console)
+        elif fmt == "npy":
+            _import_npy(target, obj, input_file, console)
+        elif fmt == "mtx":
+            _import_mtx(target, obj, input_file, console)
+        elif fmt == "json":
+            _import_json(target, obj, input_file, console)
+
+    import_into(file, output_file, inplace, write, console, input_file=input_file)
 
 
 def _import_csv(

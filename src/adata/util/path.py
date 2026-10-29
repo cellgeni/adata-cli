@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from typing import Iterable, Optional
 
 
 def norm_path(path: str) -> str:
@@ -12,11 +14,19 @@ def norm_path(path: str) -> str:
 
 
 def same_path(left: Path, right: Path) -> bool:
-    """Do these name the same store, through symlinks and `..` alike?"""
+    """Do these name the same store, through symlinks and `..` alike?
+
+    When both exist, the filesystem decides: on a case-insensitive one
+    (macOS, Windows) `Data.h5ad` and `data.h5ad` are one file, and so are
+    two hard links, though neither resolves to the same string.
+    """
+    left, right = Path(left), Path(right)
     try:
-        return Path(left).resolve() == Path(right).resolve()
+        if left.exists() and right.exists():
+            return os.path.samefile(left, right)
+        return left.resolve() == right.resolve()
     except OSError:  # pragma: no cover - unresolvable path
-        return Path(left).absolute() == Path(right).absolute()
+        return left.absolute() == right.absolute()
 
 
 def is_zarr_path(path: Path) -> bool:
@@ -29,3 +39,107 @@ def is_zarr_path(path: Path) -> bool:
     if (path / ".zgroup").exists() or (path / ".zattrs").exists():
         return True
     return False
+
+
+def _inside(path: Path, directory: Path) -> bool:
+    """Does `path` lie inside `directory` (a Zarr store, say)?"""
+    directory = Path(directory)
+    if not directory.is_dir():
+        return False
+    return any(
+        parent.exists() and same_path(parent, directory)
+        for parent in Path(path).absolute().parents
+    )
+
+
+def _is_hdf5(path: Path) -> bool:
+    import h5py
+
+    try:
+        return bool(h5py.is_hdf5(str(path)))
+    except OSError:  # pragma: no cover - unreadable
+        return False
+
+
+def check_output(
+    output: Path,
+    inputs: Iterable[Path] = (),
+    *,
+    store: bool = True,
+    inplace_hint: bool = False,
+) -> None:
+    """Refuse an output that would destroy something it should not.
+
+    Every command that writes calls this before it opens anything:
+
+    - an output that is one of the inputs, under any alias, is refused:
+      opening it to write empties a Zarr input before it has been read, and
+      truncates an HDF5 one;
+    - a store output (`store=True`) that names an existing directory which
+      is not a Zarr store, or an existing non-empty file which is not HDF5,
+      is refused: replacing it would delete a folder of files, or a text
+      file, that `-o` named by mistake;
+    - a file output (`store=False`, an export) that names a directory is
+      refused for the same reason.
+
+    An existing store is still replaced; that is what `-o` asks for.
+    """
+    output = Path(output)
+    for source in inputs:
+        if same_path(source, output) or _inside(output, source):
+            raise ValueError(
+                f"Output path is the input: {output}."
+                + (
+                    " Use --inplace to replace it, which writes to a "
+                    "temporary file first."
+                    if inplace_hint
+                    else ""
+                )
+            )
+    if not (output.exists() or output.is_symlink()):
+        return
+    if output.is_dir():
+        if store and is_zarr_path(output):
+            return
+        raise ValueError(
+            f"'{output}' is a directory"
+            + (", not a Zarr store" if store else "")
+            + ": refusing to replace it. Name a file"
+            + (" or store" if store else "")
+            + " to write instead."
+        )
+    if store and output.is_file() and output.stat().st_size and not _is_hdf5(output):
+        raise ValueError(
+            f"'{output}' exists and is not an HDF5 file or a Zarr store: "
+            "refusing to replace it. Remove it first if it should go."
+        )
+
+
+def output_target(
+    source: Path,
+    output: Optional[Path],
+    inplace: bool,
+    *,
+    others: Iterable[Path] = (),
+) -> Path:
+    """Where a command that can rewrite its input should write.
+
+    `--inplace` and `-o` are exclusive: given both, the source used to be
+    rewritten and the output quietly ignored. With `--inplace` a symlinked
+    source is followed, so the store it points at is replaced and the link
+    itself kept; otherwise the output is checked with `check_output`,
+    against the source and any `others` the command reads.
+    """
+    if inplace and output is not None:
+        raise ValueError(
+            "Give --output/-o or --inplace, not both: --inplace replaces the "
+            "input."
+        )
+    if not inplace:
+        if output is None:
+            raise ValueError(
+                "Output file is required. Use --output/-o or --inplace."
+            )
+        check_output(output, [source, *others], inplace_hint=True)
+        return Path(output)
+    return Path(os.path.realpath(source))
