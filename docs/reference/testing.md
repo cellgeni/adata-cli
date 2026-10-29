@@ -26,6 +26,17 @@ click installed. The locked suite cannot see a dependency the lock brings in
 by accident: 0.7.0 to 0.17.2 imported click, which typer had stopped
 installing, so `convert` crashed on every fresh install.
 
+Each leg of the unit suite checks that it runs the Python it is named after
+before testing anything. uv takes its interpreter from `.python-version`
+(3.12) ahead of the one on `PATH`, so up to 0.17.4 the 3.13 leg ran the
+suite on 3.12; the workflow now sets `UV_PYTHON` for each leg.
+
+The workflows are tested too. Publishing, the image and the benchmark run
+only on a tag, so a pull request never runs them; `test_release_pipeline.py`
+reads them and works out which jobs publish in each kind of run, and the
+`workflow lint` job runs [actionlint](https://github.com/rhysd/actionlint)
+and [zizmor](https://docs.zizmor.sh) over them.
+
 ## How the suite is organised
 
 | File | What it covers |
@@ -58,7 +69,8 @@ installing, so `convert` crashed on every fresh install.
 | `test_mtx_codec.py`, `test_csr_build.py` | The streaming Matrix Market reader and writer against scipy, and the bucket sort they and `recast` share |
 | `test_external_readers.py` | 10x conversions, HDF5 and MTX, Parse runs and looms, checked by scanpy (Parse's own recipe for Parse), anndata with loompy (the pySCENIC tutorial's recipe for SCope looms), anndata's `read_csv`, `read_text` and `read_hdf`, a pandas 1.5 pycisTopic pickle read back there, mudata (a file it writes read as it reads it; ours read by it), and PyTables in their own uv environments (`integration`) |
 | `test_performance.py` | Complexity guards -- what an operation costs, not how long it takes (see below) |
-| `test_benchmark_harness.py` | That the benchmark's measurement is trustworthy |
+| `test_benchmark_harness.py` | That the benchmark's measurement is trustworthy, and that each run compares with the release before it |
+| `test_release_pipeline.py` | The workflows and the Dockerfile: which jobs publish in each kind of run, which hold a write token and what they run, pinned actions and base image, no untrusted value pasted into a script, each Python leg on its own Python |
 | `test_subset.py`, `test_export.py`, `test_import.py`, `test_info_read.py`, `test_zarr.py`, `test_query.py` | Per-feature unit tests |
 
 ## Writing a test
@@ -328,7 +340,14 @@ rather than to assert a claim the code does not yet meet.
 
 Results are published to [Benchmarks](benchmarks.md) and `docs/benchmarks/<tag>.json`
 on every tag, and appended to the GitHub release notes if a release exists.
-Artifacts expire; the docs page is the durable series.
+Artifacts expire; the docs page is the durable series. The "vs previous"
+column compares with the release just before, at the same tier; a run that
+is not a release compares with the newest one.
+
+The job that measures holds a read-only token, because the baselines are the
+newest anndata, scanpy, dask and geopandas from PyPI rather than anything
+`uv.lock` pins. A second job, which installs nothing, renders the results
+with the standard library and commits them.
 
 ### How it measures
 
