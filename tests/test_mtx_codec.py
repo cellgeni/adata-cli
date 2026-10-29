@@ -227,6 +227,26 @@ def test_a_bad_body_is_refused_before_anything_is_written(tmp_path, body, nnz, m
         scan(header, EntryMap(n_rows=2, n_cols=2))
 
 
+@pytest.mark.parametrize("block_bytes", [None, 8], ids=["one-block", "small-blocks"])
+def test_a_short_line_beside_a_long_one_is_refused_by_number(tmp_path, block_bytes):
+    """F129: only a block's field total was checked, so a line a field short
+    and a later one a field long paired values with the wrong coordinates
+    (1 1 / 2 2 3 7 read as 1 1 2 and 2 3 7), and the file read without
+    complaint."""
+    path = tmp_path / "ragged.mtx"
+    path.write_text(
+        "%%MatrixMarket matrix coordinate integer general\n% a comment\n3 3 3\n"
+        "1 1\n2 2 3 7\n3 3 9\n"
+    )
+    pd = pytest.importorskip("pandas")
+    with pytest.raises(Exception, match="Expected 2 fields in line 5, saw 4"):
+        pd.read_csv(path, sep=r"\s+", comment="%", header=None, skiprows=3)
+    header = read_header(path)
+    kw = {"block_bytes": block_bytes} if block_bytes else {}
+    with pytest.raises(ValueError, match="line 4 does not hold 3 fields: it holds 2"):
+        scan(header, EntryMap(n_rows=3, n_cols=3), **kw)
+
+
 def test_a_real_file_with_fractional_coordinates_is_refused(tmp_path):
     path = tmp_path / "bad.mtx"
     path.write_text("%%MatrixMarket matrix coordinate real general\n2 2 1\n1.5 1 1\n")

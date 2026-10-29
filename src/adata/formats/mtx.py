@@ -49,6 +49,11 @@ FIELDS = ("integer", "real", "pattern")
 #: Entries read from a stored matrix per block, when writing one out.
 EXPORT_BLOCK_ENTRIES = 1 << 20
 
+#: The bytes numpy's `sep=" "` takes for space: tab, newline, vertical tab,
+#: form feed, carriage return and space.
+_SPACE = np.zeros(256, dtype=bool)
+_SPACE[[9, 10, 11, 12, 13, 32]] = True
+
 
 @dataclass(frozen=True)
 class MtxHeader:
@@ -124,12 +129,42 @@ def read_header(path: Path) -> MtxHeader:
     return MtxHeader(path, fld, n_rows, n_cols, nnz, tuple(comments))
 
 
+def _fields_per_line(text: bytes) -> np.ndarray:
+    """The fields on each line of `text`, every line at once: the starts of
+    runs of other bytes than space, between one newline and the next."""
+    buffer = np.frombuffer(text, dtype=np.uint8)
+    space = _SPACE[buffer]
+    keep = ~space
+    keep[1:] &= space[:-1]  # where a field starts
+    newline = np.equal(buffer, 10, out=space)  # space is not needed again
+    keep |= newline
+    # Field starts and newlines in order: a line's fields lie between two.
+    kinds = newline[keep]
+    del space, keep
+    ends = np.append(np.flatnonzero(kinds), kinds.size)
+    return np.diff(ends, prepend=-1) - 1
+
+
 def _parse(block: bytes, header: MtxHeader, first_line: int) -> np.ndarray:
     """One block of entry lines as an (n, columns) array: int64, or float64 for `real`."""
     dtype = np.float64 if header.field == "real" else np.int64
     text = block.rstrip()
     if not text:
         return np.empty((0, header.columns), dtype=dtype)
+    # Line by line, not the block's total: a line a field short and a later
+    # one a field long add up, and pair values with the wrong coordinates.
+    fields = _fields_per_line(text)
+    wrong = np.flatnonzero(fields != header.columns)
+    if wrong.size:
+        line, found = first_line + int(wrong[0]), int(fields[wrong[0]])
+        if not found:
+            raise ValueError(
+                f"{header.path.name}: line {line:,} is a blank line among the entries."
+            )
+        raise ValueError(
+            f"{header.path.name}: line {line:,} does not hold {header.columns} "
+            f"fields: it holds {found}."
+        )
     try:
         flat = np.fromstring(text, dtype=dtype, sep=" ")
     except ValueError:
@@ -137,12 +172,11 @@ def _parse(block: bytes, header: MtxHeader, first_line: int) -> np.ndarray:
             f"{header.path.name}: a line from line {first_line:,} on is not "
             f"{header.columns} numbers{' (integers)' if dtype is np.int64 else ''}."
         ) from None
-    lines = text.count(b"\n") + 1
-    if flat.size != lines * header.columns:
+    lines = fields.size
+    if flat.size != lines * header.columns:  # pragma: no cover - counted above
         raise ValueError(
             f"{header.path.name}: a line from line {first_line:,} on does not "
-            f"hold {header.columns} fields (or a blank line sits among the "
-            "entries)."
+            f"hold {header.columns} numbers."
         )
     if dtype is np.int64 and flat.size:
         info = np.iinfo(np.int64)
