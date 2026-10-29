@@ -718,3 +718,19 @@ def test_npy_export_refuses_a_record_array_with_text_fields(temp_dir):
         with pytest.raises(ValueError, match="record array with text fields"):
             export_npy(store.root, "recs", temp_dir / "r.npy", 10, console)
     assert not (temp_dir / "r.npy").exists()
+
+
+def test_npy_export_of_a_record_array_with_non_latin_field_names(temp_dir):
+    """`rank_genes_groups/scores` names its fields after cell types. Only
+    the latin-1 header versions were tried, so `β-cell` failed the export,
+    after an empty output file had been created."""
+    import h5py
+
+    records = np.array([(1.5, 2), (3.0, 4)], dtype=[("β-cell", "f4"), ("α", "<i8")])
+    path = temp_dir / "r.h5ad"
+    with h5py.File(path, "w") as f:
+        f.create_dataset("scores", data=records)
+    with open_store(path, "r") as store:
+        export_npy(store.root, "scores", temp_dir / "r.npy", 1, console)
+    got = np.load(temp_dir / "r.npy")
+    assert got.dtype == records.dtype and (got == records).all()

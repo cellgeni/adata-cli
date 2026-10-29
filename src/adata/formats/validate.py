@@ -43,6 +43,29 @@ _WHAT = {
 
 _UNREADABLE = "would leave a store anndata cannot read"
 
+#: The files Zarr keeps a group's or an array's metadata in: a member of
+#: that name would overwrite them, or vanish behind them.
+_ZARR_METADATA = frozenset({".zarray", ".zattrs", ".zgroup", ".zmetadata", "zarr.json"})
+
+
+def check_element_name(name: str, where: str) -> None:
+    """Refuse a name no element can have in every backend, before writing.
+
+    `where` says what holds the name, for the message: a JSON object, or a
+    CSV header. A name holding '/' would make nested groups, and an empty
+    one, '.' or '..' names no member at all.
+    """
+    if name in ("", ".", "..") or "/" in name or name in _ZARR_METADATA:
+        raise ValueError(
+            f"{where} has the name {name!r}, which cannot name an element: names "
+            "may not be empty, '.' or '..', hold '/', or be one of Zarr's "
+            f"metadata files ({', '.join(sorted(_ZARR_METADATA))})."
+        )
+
+
+def parent_of(path: str) -> str:
+    return path.rsplit("/", 1)[0] if "/" in path else ""
+
 
 def check_target(obj_path: str, kind: str) -> str:
     """The normalised path, once it is known that a `kind` element may go
@@ -78,7 +101,7 @@ def check_target(obj_path: str, kind: str) -> str:
         )
     if path in ("X", "raw/X") and kind in ("dict", "dataframe"):
         raise ValueError(f"'{path}' must hold a matrix; writing {what} there {_UNREADABLE}.")
-    parent = path.rsplit("/", 1)[0] if "/" in path else ""
+    parent = parent_of(path)
     if kind in _REFUSED_UNDER.get(parent, ()):
         raise ValueError(
             f"'{path}' is an entry of '{parent}', which cannot hold {what}: "
@@ -176,6 +199,13 @@ def validate_dimensions(
     console: Console,
 ) -> None:
     obj_path = norm_path(obj_path)
+
+    if parent_of(obj_path.strip("/")) in DATAFRAME_PATHS and len(data_shape) != 1:
+        raise ValueError(
+            f"'{obj_path}' would be a column of '{parent_of(obj_path.strip('/'))}', "
+            f"which holds 1-D arrays, but the input's shape is "
+            f"{'x'.join(map(str, data_shape)) or 'a scalar'}."
+        )
 
     if _validate_raw(root, obj_path, data_shape, console):
         return

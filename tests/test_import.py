@@ -646,14 +646,15 @@ def _same_frame(got, expected) -> None:
             assert list(a.cat.categories) == list(b.cat.categories), name
             assert a.isna().tolist() == b.isna().tolist(), name
             assert _labels(a) == _labels(b), name
+        elif pd.api.types.is_string_dtype(b):
+            # Text: str in pandas 3, objects in pandas 2; anndata reads a Zarr
+            # string array as objects and an HDF5 one as str.
+            assert pd.api.types.is_string_dtype(a), (name, a.dtype)
+            assert _labels(a) == _labels(b), name
         elif b.dtype == object:
             # pandas reads True/False with gaps as Python objects, a column
             # anndata cannot write: it stays the text it was, a categorical.
             assert isinstance(a.dtype, pd.CategoricalDtype), name
-            assert _labels(a) == _labels(b), name
-        elif pd.api.types.is_string_dtype(b.dtype):
-            # anndata reads a Zarr string array as objects, an HDF5 one as str.
-            assert pd.api.types.is_string_dtype(a.dtype), (name, a.dtype)
             assert _labels(a) == _labels(b), name
         else:
             assert a.dtype == b.dtype, (name, a.dtype, b.dtype)
@@ -683,9 +684,13 @@ def test_imported_columns_are_typed_as_pandas_reads_them(written, temp_dir):
     assert result.exit_code == 0, _out(result)
     got = _read(out).obs
     expected = _pandas_frame(csv, "cell")
-    assert {k: str(v) for k, v in expected.dtypes.items()} == {
+    kinds = {
+        k: "text" if pd.api.types.is_string_dtype(v) and v.dtype != "category" else str(v.dtype)
+        for k, v in expected.items()
+    }
+    assert kinds == {
         "score": "float64", "count": "int64", "gappy": "float64", "flag": "bool",
-        "flags": "object", "label": "category", "note": "str", "sample": "str",
+        "flags": "object", "label": "category", "note": "text", "sample": "text",
     }
     _same_frame(got, expected)
 
@@ -755,35 +760,34 @@ def test_categorical_overrides_still_apply(written, temp_dir):
     assert "--categorical names 'nope', which cells.csv does not have" in _out(unknown)
 
 
-def test_a_dataframe_import_holds_a_block_not_the_file(new_store, temp_dir, monkeypatch):
+def test_a_dataframe_import_holds_a_block_not_the_file(temp_dir, monkeypatch):
     """F034: the whole CSV was read into a list of dicts and then a list per
     column, so memory grew with the file. Eight times the rows must not
-    take much more memory."""
+    take much more memory.
+
+    Measured on HDF5. Zarr picks a column's chunks itself, the whole column
+    at these sizes, and rewrites a chunk with each block written into it,
+    so there memory is set by its chunk as well as by the block."""
     import tracemalloc
 
+    from adata.elements.write import write_dataframe_header
     from adata.formats import dataframe, table
 
-    def peak(n: int) -> int:
-        path, opener = new_store(f"s{n}")
-        with opener("a") as root:
-            del root["obs"]
-            from adata.elements.write import write_dataframe_header
+    real_scan, real_write = table.scan_table, table.write_table
+    # Small blocks, so that both sizes take several.
+    monkeypatch.setattr(dataframe, "scan_table", lambda *a, **k: real_scan(*a, block_bytes=1 << 16, **k), raising=False)
+    monkeypatch.setattr(dataframe, "write_table", lambda *a, **k: real_write(*a, block_bytes=1 << 16, **k), raising=False)
 
-            write_dataframe_header(root, "obs", [f"c{i}" for i in range(n)], [])
+    def peak(n: int) -> int:
+        path = temp_dir / f"s{n}.h5ad"
+        with h5py.File(path, "w") as f:
+            write_dataframe_header(f, "obs", [f"c{i}" for i in range(n)], [])
         csv = temp_dir / f"t{n}.csv"
         csv.write_text("id,a,b,c\n" + "".join(f"c{i},{i % 97},{i % 89 / 4},l{i % 7}\n" for i in range(n)))
-        real = table.scan_table
-        monkeypatch.setattr(
-            dataframe, "scan_table", lambda *a, **k: real(*a, block_bytes=1 << 16, **k)
-        )
-        real_write = table.write_table
-        monkeypatch.setattr(
-            dataframe, "write_table", lambda *a, **k: real_write(*a, block_bytes=1 << 16, **k)
-        )
-        with opener("a") as root:
+        with h5py.File(path, "a") as f:
             tracemalloc.start()
             try:
-                dataframe.import_dataframe(root, "obs", csv, "id", QUIET)
+                dataframe.import_dataframe(f, "obs", csv, "id", QUIET)
                 return tracemalloc.get_traced_memory()[1]
             finally:
                 tracemalloc.stop()
@@ -813,6 +817,9 @@ def test_a_dataframe_import_holds_a_block_not_the_file(new_store, temp_dir, monk
         ("dataframe", "obsm", "rows.csv"),
         ("dataframe", "X", "rows.csv"),
         ("dataframe", "uns", "rows.csv"),
+        ("array", "obs/n", "matrix.npy"),
+        ("image", "uns", "tissue.png"),
+        ("image", "layers", "tissue.png"),
     ],
 )
 def test_an_element_of_the_wrong_kind_is_refused_where_the_layout_fixes_one(
@@ -827,14 +834,21 @@ def test_an_element_of_the_wrong_kind_is_refused_where_the_layout_fixes_one(
     scipy_io.mmwrite(temp_dir / "matrix.mtx", sparse.csr_matrix(np.ones((N_OBS, 3))))
     (temp_dir / "params.json").write_text('{"a": 1}')
     (temp_dir / "rows.csv").write_text("id,a\n" + "".join(f"c{i},{i}\n" for i in range(N_OBS)))
+    from PIL import Image
+
+    Image.fromarray(np.zeros((4, 4), dtype="uint8")).save(temp_dir / "tissue.png")
     before = _read(written)
 
     result = runner.invoke(app, ["import", kind, str(written), entry, str(temp_dir / source), "--inplace"])
 
     assert result.exit_code == 1, _out(result)
-    assert "would leave a store anndata cannot read" in _out(result) or "is a group of elements" in _out(result)
+    assert any(
+        message in _out(result)
+        for message in ("would leave a store anndata cannot read", "is a group of elements", "which holds 1-D arrays")
+    ), _out(result)
     after = _read(written)
     assert list(after.obs.columns) == list(before.obs.columns)
+    np.testing.assert_array_equal(after.obs["n"], before.obs["n"])
     assert set(after.obsm) == set(before.obsm) and set(after.layers) == set(before.layers)
 
 
@@ -968,14 +982,18 @@ def test_json_arrays_are_typed_where_their_values_share_a_type(written, temp_dir
     [
         ('{"n": 99999999999999999999999}', "uns/meta/n holds the whole number 99999999999999999999999"),
         ('{"n": [1, -99999999999999999999]}', "which no 64-bit integer holds"),
-        ('{"a/b": 1}', "has the key 'a/b', which cannot name an element"),
-        ('{"ok": {"": 1}}', "has the key '', which cannot name an element"),
+        ('{"a/b": 1}', "uns/meta has the name 'a/b', which cannot name an element"),
+        ('{"ok": {"": 1}}', "uns/meta/ok has the name '', which cannot name an element"),
+        ('{".zarray": 1, "x": 1}', "has the name '.zarray', which cannot name an element"),
+        ('{"zarr.json": 1}', "has the name 'zarr.json', which cannot name an element"),
         ('[1, 2]', None),
     ],
 )
 def test_json_that_no_element_can_hold_is_refused_before_writing(written, temp_dir, text, message):
     """F067: an integer past 64 bits was written as an object array that
-    made the store unreadable, and a key holding '/' made nested groups."""
+    made the store unreadable, and a key holding '/' made nested groups. A
+    key named as Zarr's metadata files vanished, or failed half way through
+    replacing the entry."""
     source = temp_dir / "params.json"
     source.write_text(text)
     entry = "uns" if message is None else "uns/meta"
@@ -985,3 +1003,25 @@ def test_json_that_no_element_can_hold_is_refused_before_writing(written, temp_d
     assert result.exit_code == 1
     assert (message or "'uns' must stay a mapping") in _out(result)
     assert _read(written).uns == {"keep": {"a": 1}}
+
+
+@pytest.mark.parametrize(
+    "header,index,message",
+    [
+        (",cell,score", "cell", "has a column with no name, as pandas writes an unnamed index"),
+        ("cell,a/b,score", "cell", "has the name 'a/b', which cannot name an element"),
+        ("cell,.zattrs,score", "cell", "has the name '.zattrs', which cannot name an element"),
+    ],
+)
+def test_a_column_name_no_element_can_have_is_refused_before_writing(written, temp_dir, header, index, message):
+    """A column with no name (`df.to_csv()` writes its index so) failed
+    after obs had been deleted, so with --inplace anndata could no longer
+    read the source; a name holding '/' made a nested group."""
+    csv = temp_dir / "cells.csv"
+    csv.write_text(header + "\n" + "".join(f"{i},c{i},{i}\n" for i in range(N_OBS)))
+
+    result = runner.invoke(app, ["import", "dataframe", str(written), "obs", str(csv), "-i", index, "--inplace"])
+
+    assert result.exit_code == 1
+    assert message in _out(result)
+    assert list(_read(written).obs.columns) == ["n"]

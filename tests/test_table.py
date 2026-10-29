@@ -217,11 +217,12 @@ LITERALS = [
     "1_1", "1_0.5", "11_0", "٣", "١", "0x10", "1d5", "1e", "e5", "-", "+", ".",
     "1.5.", "NAN", "+nan", "1 2", "inF", "True ", " NA",
     " 1", "1 ", "\t1", "+1", "-0", "01", "1.", ".5", "1e5", "1E+5", "1.e5",
-    "-.5e-3", "inf", "-Infinity", "iNfInItY", "1e500",
+    "-.5e-3", "inf", "-Infinity", "iNfInItY", "1e500", " inf", "-inf ", "+inf",
+    "1" * 5000,
 ]
 
 
-@pytest.mark.parametrize("literal", LITERALS, ids=repr)
+@pytest.mark.parametrize("literal", LITERALS, ids=lambda v: repr(v)[:24])
 def test_a_value_is_a_number_only_when_pandas_reads_one(tmp_path, literal):
     """F020: typing by `int()` and `float()` read the label `1_1` as the
     integer 11 (so `1_10` and `11_0` were both 110), and digits of other
@@ -318,3 +319,26 @@ def test_whole_numbers_past_uint64_are_kept_as_text(tmp_path):
     assert pd.read_csv(path)["a"].tolist() == [2**64, 1]
     got = _read_back(tmp_path, scan)
     assert got["a"].tolist() == [huge, "1"] and got["b"].tolist() == [low, "1"]
+
+
+@pytest.mark.timeout(60)
+def test_a_long_block_of_numbers_ending_in_a_word_is_typed_at_once(tmp_path):
+    """The number pattern could split "12" two ways, and before giving up on
+    a block of whole numbers that ended in a word it tried every split of
+    every line: the time doubled with each line, and 40 lines took days."""
+    rows = ["id,donor"] + [f"c{i},{10 + i}" for i in range(2_000)] + ["c_last,unknown"]
+    path = _write(tmp_path, "\n".join(rows) + "\n")
+    scan = scan_table(path, index="id")
+    assert scan.dtype_of(scan.columns[0]) == "str"
+    _same(_read_back(tmp_path, scan), _expected(path))
+
+
+def test_a_quoted_newline_does_not_pass_for_two_numbers(tmp_path):
+    """A block's values were joined with newlines to be matched at once, so
+    "1\n2" read as two whole numbers; the column was typed int64 and
+    writing it then failed, half way through replacing obs."""
+    path = _write(tmp_path, 'id,a,b\nc0,"1\n2",x\nc1,3,y\nc2,4,x\n')
+    scan = scan_table(path, index="id")
+    assert scan.dtype_of(scan.columns[0]) == "str"
+    assert pd.read_csv(path)["a"].tolist() == ["1\n2", "3", "4"]
+    assert _read_back(tmp_path, scan)["a"].tolist() == ["1\n2", "3", "4"]

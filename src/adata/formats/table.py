@@ -61,11 +61,16 @@ _FALSE = frozenset({"False", "FALSE", "false"})
 
 # A block's values, one per line, matched whole: whole numbers, and numbers
 # of any kind (which include the whole ones), as pandas' C parser reads
-# them. ASCII only: `re.ASCII` keeps `[0-9]` from meaning other scripts'
-# digits, which pandas reads as text.
-_INTS = re.compile(r"(?:[ \t]*[+-]?[0-9]+[ \t]*\n)*", re.ASCII)
+# them. Blanks may surround a number, not infinity. ASCII only: `re.ASCII`
+# keeps `[0-9]` from meaning other scripts' digits, which pandas reads as
+# text. Every quantifier is possessive, so nothing is retried: a pattern
+# that could split "12" two ways retried every split of every line before
+# a block's one word, which doubled the time with each line, and even an
+# unambiguous one kept a backtracking record per line.
+_INTS = re.compile(r"(?:[ \t]*+[+-]?+[0-9]++[ \t]*+\n)*+", re.ASCII)
 _NUMBERS = re.compile(
-    r"(?:[ \t]*[+-]?(?:(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:e[+-]?[0-9]+)?|inf(?:inity)?)[ \t]*\n)*",
+    r"(?:[ \t]*+[+-]?+(?:[0-9]++(?:\.[0-9]*+)?+|\.[0-9]++)(?:e[+-]?+[0-9]++)?+[ \t]*+\n"
+    r"|[+-]?+inf(?:inity)?+\n)*+",
     re.ASCII | re.IGNORECASE,
 )
 # 19 digits in a row: the shortest whole number that may not fit in int64.
@@ -184,12 +189,15 @@ def _narrow(column: Column, values: List[str]) -> None:
         column.present = True
     if present and column.kind != "text":
         text = "\n".join(present) + "\n"
-        if _INTS.fullmatch(text):
+        # A quoted value may hold a newline of its own, and so pass for two
+        # numbers; no number holds one.
+        lines = text.count("\n") == len(present)
+        if lines and _INTS.fullmatch(text):
             column.numbers = True
             column.negative = column.negative or "-" in text
             if _LONG.search(text):
                 _measure(column, present)
-        elif _NUMBERS.fullmatch(text):
+        elif lines and _NUMBERS.fullmatch(text):
             column.numbers = column.fraction = True
         elif all(v in _TRUE or v in _FALSE for v in present):
             column.bools = True
@@ -208,11 +216,14 @@ def _measure(column: Column, present: List[str]) -> None:
     try:
         np.array(present, dtype=np.int64)
         return
-    except OverflowError:
+    except (OverflowError, ValueError):  # ValueError: past int()'s 4,300 digits
         pass
     for value in present:
-        number = int(value)
-        if number < _INT64.min or number > _UINT64.max:
+        digits = value.strip(" \t").lstrip("+-").lstrip("0")
+        # Past 20 digits no 64-bit integer holds it, and int() refuses
+        # past 4,300.
+        number = int(value) if len(digits) <= 20 else None
+        if number is None or number < _INT64.min or number > _UINT64.max:
             column.huge = True
         elif number > _INT64.max:
             column.wide = True

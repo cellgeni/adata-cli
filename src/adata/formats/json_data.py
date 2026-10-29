@@ -12,7 +12,7 @@ from rich.console import Console
 from adata.core.read import decode_str_array
 from adata.elements import spec
 from adata.formats.common import _check_json_exportable, _resolve, stdout_reader_may_stop
-from adata.formats.validate import check_target
+from adata.formats.validate import check_element_name, check_target
 from adata.elements.write import (
     write_dense,
     write_mapping,
@@ -255,11 +255,7 @@ def _plan(value: Any, where: str) -> Tuple[str, Any]:
     if isinstance(value, dict):
         plans = {}
         for key, item in value.items():
-            if key in ("", ".", "..") or "/" in key:
-                raise ValueError(
-                    f"{where or 'The JSON'} has the key {key!r}, which cannot name "
-                    "an element: keys may not be empty, '.' or '..', or hold '/'."
-                )
+            check_element_name(key, where or "The JSON")
             plans[key] = _plan(item, f"{where}/{key}" if where else key)
         return "dict", plans
     if isinstance(value, bool) or isinstance(value, (str, float)):

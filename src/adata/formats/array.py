@@ -9,6 +9,8 @@ the block, never by the array.
 
 from __future__ import annotations
 
+import io
+import struct
 import sys
 from contextlib import nullcontext
 from pathlib import Path
@@ -73,16 +75,28 @@ def _text_width(values: Any, chunk_elements: int) -> int:
     return width
 
 
-def _write_header(fh: BinaryIO, dtype: np.dtype, shape: Tuple[int, ...]) -> None:
+def _npy_header(dtype: np.dtype, shape: Tuple[int, ...]) -> bytes:
+    """A .npy header, in the earliest version that can hold it, as np.save
+    picks: 1.0, 2.0 past 64 KiB, and 3.0 for field names latin-1 cannot
+    spell (`rank_genes_groups` has fields named after cell types)."""
     header = {
         "descr": np.lib.format.dtype_to_descr(dtype),
         "fortran_order": False,
         "shape": tuple(int(d) for d in shape),
     }
-    try:
-        np.lib.format.write_array_header_1_0(fh, header)
-    except ValueError:  # a header past 64 KiB, which only version 2 holds
-        np.lib.format.write_array_header_2_0(fh, header)
+    for write in (np.lib.format.write_array_header_1_0, np.lib.format.write_array_header_2_0):
+        buffer = io.BytesIO()
+        try:
+            write(buffer, header)
+            return buffer.getvalue()
+        except ValueError:  # too long for 1.0; not latin-1 (UnicodeEncodeError)
+            continue
+    # 3.0 is 2.0 in UTF-8. numpy writes it only through a private function,
+    # so it is spelled out: magic, version, a 4-byte length, and the dict,
+    # padded with spaces to a multiple of 64 bytes and ended by a newline.
+    text = ("{" + "".join(f"{k!r}: {v!r}, " for k, v in header.items()) + "}").encode("utf-8")
+    text += b" " * (-(12 + len(text) + 1) % 64) + b"\n"
+    return b"\x93NUMPY\x03\x00" + struct.pack("<I", len(text)) + text
 
 
 def _holds_objects(path: Path) -> bool:
@@ -154,6 +168,7 @@ def export_npy(
             block[gaps] = np.nan
         return block
 
+    header = _npy_header(dtype, shape)
     to_stdout = out is None or str(out) == "-"
     if not to_stdout:
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -164,7 +179,7 @@ def export_npy(
         else console.status(f"[magenta]Exporting {obj} to {out}...[/]")
     )
     with target as fh, status as progress, stdout_reader_may_stop():
-        _write_header(fh, dtype, shape)
+        fh.write(header)
         if shape == ():
             fh.write(convert(None, None).tobytes())
         else:

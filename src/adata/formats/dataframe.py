@@ -13,7 +13,7 @@ from adata.elements.read import dataframe_columns, element_len, resolve_index
 from adata.elements.write import write_mapping
 from adata.formats.common import _resolve, stdout_reader_may_stop
 from adata.formats.table import CATEGORY_CAP, scan_table, write_table
-from adata.formats.validate import check_target, validate_dimensions
+from adata.formats.validate import check_element_name, check_target, validate_dimensions
 from adata.storage import is_group
 
 
@@ -131,6 +131,14 @@ def import_dataframe(
     input_file = Path(input_file)
     scan = scan_table(input_file, index=index_column)
     by_name = {column.name: column for column in scan.columns}
+    if "" in by_name:
+        raise ValueError(
+            f"{input_file.name} has a column with no name, as pandas writes an "
+            "unnamed index. Name it, or make it the index: without "
+            "--index-column, the first column is."
+        )
+    for name in by_name:
+        check_element_name(name, f"{input_file.name}'s header")
     if "_index" in by_name:
         raise ValueError(
             f"{input_file.name} has a column named '_index' besides its index "

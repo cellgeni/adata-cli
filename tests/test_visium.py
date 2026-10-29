@@ -704,3 +704,24 @@ def test_a_segmented_folder_is_visium_not_unrecognised(tmp_path):
     truth = write_segmented_outputs(tmp_path / "outs")
     result = _ok(truth.folder, "-o", tmp_path / "out.h5ad")
     assert "Space Ranger (Visium HD, segmented cells)" in _out(result)
+
+
+def test_a_null_scale_factor_is_left_out_so_older_anndata_can_read_the_store(tmp_path):
+    """F035: a null in scalefactors_json.json was written with
+    `encoding-type: null`, which anndata 0.8 to 0.11 cannot read, so the
+    whole converted store was unreadable to them."""
+    truth = write_visium_outs(tmp_path / "run")
+    path = truth.outs / "spatial" / "scalefactors_json.json"
+    factors = json.loads(path.read_text())
+    path.write_text(json.dumps({**factors, "regist_target_img_scalef": None}))
+    out = tmp_path / "out.h5ad"
+
+    result = _ok(truth.outs, "-o", out)
+
+    assert "scalefactors_json.json holds null for regist_target_img_scalef; left out" in _out(result)
+    kept = {k: v for k, v in factors.items() if k != "regist_target_img_scalef"}
+    assert _read(out).uns["spatial"]["V1_Test_Section"]["scalefactors"] == kept
+    with h5py.File(out) as f:
+        nulls = []
+        f.visititems(lambda name, obj: nulls.append(name) if obj.attrs.get("encoding-type") == "null" else None)
+    assert nulls == []

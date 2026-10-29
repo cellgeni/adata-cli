@@ -351,7 +351,7 @@ def test_json_import_keeps_nested_string_arrays_rectangular(tmp_path, fmt):
 
 
 @pytest.mark.parametrize("fmt", ["h5ad", "zarr"])
-def test_json_null_survives_a_full_round_trip(tmp_path, fmt):
+def test_a_null_element_exports_as_json_null(tmp_path, fmt):
     """Exporting a `null` element emitted its storage placeholder, not None.
 
     The placeholder differs per backend -- an h5py.Empty, or a 0-d zarr bool --

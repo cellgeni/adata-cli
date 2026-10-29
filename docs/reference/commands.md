@@ -373,11 +373,11 @@ an axis.
 
 An element of a kind the AnnData layout does not allow where it would go is
 refused before anything is written, since anndata could not then read the
-store: an array, a matrix or JSON in place of `obs`, `var` or `raw/var`;
-anything in place of the whole of `obsm`, `varm`, `obsp`, `varp` or `layers`,
-or of `uns` but a JSON object; JSON or a dataframe as `X`. Name the entry to
-write, such as `obsm/X_pca` or `uns/params`: an entry is replaced whatever it
-held.
+store: an array, a matrix, an image or JSON in place of `obs`, `var` or
+`raw/var`; anything in place of the whole of `obsm`, `varm`, `obsp`, `varp`
+or `layers`, or of `uns` but a JSON object; JSON or a dataframe as `X`; an
+array that is not 1-D as a column of a dataframe. Name the entry to write,
+such as `obsm/X_pca` or `uns/params`: an entry is replaced whatever it held.
 
 For `array`: the `.npy` is read a block of rows at a time, so its size is not
 a limit. Text (`<U` or `S`) becomes a string array.
@@ -401,9 +401,10 @@ A text column that repeats a value becomes a categorical, as anndata makes
 it. Use `--categorical col1,col2` to make specific text columns categoricals
 whatever their values (numeric columns stay numeric), or
 `--no-auto-categorical` to keep all text as `string-array`. A row with more
-or fewer fields than the header, a header that repeats a name, a column named
-`_index` besides the index, and a `--categorical` name the file does not have
-are refused before the store is touched.
+or fewer fields than the header, a header that repeats a name, a column with
+no name (as pandas writes an unnamed index) or named `_index` besides the
+index, and a `--categorical` name the file does not have are refused before
+the store is touched.
 
 For `dict`: an object becomes a mapping, and an array a typed array where its
 values share a type: strings, booleans, whole numbers (int64, or uint64 past
@@ -411,7 +412,11 @@ it), or numbers (float64, with NaN for a `null` among them). An array that
 mixes types, or is ragged, is kept as its JSON text. A key holding `null` is
 left out, with a warning, as anndata 0.8 to 0.11 leave out `None`: they
 cannot read the `null` encoding, and would refuse the whole store. A whole
-number past 64 bits, and a key that is empty or holds `/`, are refused.
+number past 64 bits is refused.
+
+Names, of a CSV's columns or a JSON object's keys, may not be empty, `.` or
+`..`, hold `/`, or be one of Zarr's metadata files (`.zarray`, `.zattrs`,
+`.zgroup`, `.zmetadata`, `zarr.json`).
 
 Giving `-o out.zarr` for an `.h5ad` source (or the reverse) converts the store
 as it writes.
