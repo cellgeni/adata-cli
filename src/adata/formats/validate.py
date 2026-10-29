@@ -16,6 +16,76 @@ MATRIX_PREFIXES = ("X", "layers/")
 #: the store rather than merely mis-size it.
 DATAFRAME_PATHS = frozenset({"obs", "var", "raw/var"})
 
+#: Groups that hold one element per key: each key is replaceable, the group
+#: itself is not.
+MAPPING_PATHS = frozenset({"obsm", "varm", "obsp", "varp", "layers", "uns", "raw/varm"})
+
+#: Where an entry may not be of a given kind: a dataframe's columns are 1-D
+#: arrays, a matrix is no mapping, and obsp, varp and layers hold matrices.
+_REFUSED_UNDER = {
+    "obs": {"sparse", "dict", "dataframe"},
+    "var": {"sparse", "dict", "dataframe"},
+    "raw/var": {"sparse", "dict", "dataframe"},
+    "obsm": {"dict"},
+    "varm": {"dict"},
+    "raw/varm": {"dict"},
+    "obsp": {"dict", "dataframe"},
+    "varp": {"dict", "dataframe"},
+    "layers": {"dict", "dataframe"},
+}
+
+_WHAT = {
+    "array": "an array",
+    "sparse": "a sparse matrix",
+    "dict": "JSON",
+    "dataframe": "a dataframe",
+}
+
+_UNREADABLE = "would leave a store anndata cannot read"
+
+
+def check_target(obj_path: str, kind: str) -> str:
+    """The normalised path, once it is known that a `kind` element may go
+    there: "array", "sparse", "dict" or "dataframe".
+
+    Run before anything is read or written. An element of the wrong kind
+    where the layout fixes one (an array in place of `obs`, a matrix in
+    place of the whole of `obsm`) used to be written, and anndata could
+    then not read the store at all. An entry the user names inside such a
+    group (`obsm/X_pca`, `uns/params`) is theirs to replace.
+    """
+    path = norm_path(obj_path).strip("/")
+    what = _WHAT[kind]
+    if path in ("", "raw"):
+        raise ValueError(
+            f"'{path or '/'}' is a group of elements, not one; name the entry "
+            "to write, such as 'X', 'obsm/X_pca' or 'uns/params'."
+        )
+    if path in DATAFRAME_PATHS:
+        if kind != "dataframe":
+            raise ValueError(
+                f"'{path}' must hold a dataframe; writing {what} there {_UNREADABLE}. "
+                "Use `adata import dataframe` for a table."
+            )
+        return path
+    if path == "uns" and kind == "dict":
+        return path
+    if path in MAPPING_PATHS:
+        hint = "a JSON object, with `adata import dict`, or " if path == "uns" else ""
+        raise ValueError(
+            f"'{path}' holds one element per key; writing {what} in its place "
+            f"{_UNREADABLE}. Write {hint}an entry inside it, such as '{path}/name'."
+        )
+    if path in ("X", "raw/X") and kind in ("dict", "dataframe"):
+        raise ValueError(f"'{path}' must hold a matrix; writing {what} there {_UNREADABLE}.")
+    parent = path.rsplit("/", 1)[0] if "/" in path else ""
+    if kind in _REFUSED_UNDER.get(parent, ()):
+        raise ValueError(
+            f"'{path}' is an entry of '{parent}', which cannot hold {what}: "
+            f"writing it {_UNREADABLE}."
+        )
+    return path
+
 
 def _get_axis_length(root: Any, axis: str) -> Optional[int]:
     try:

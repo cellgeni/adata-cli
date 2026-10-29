@@ -7,6 +7,8 @@ exception here.
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import sys
 
@@ -206,16 +208,115 @@ def test_npy_export_streams_in_small_chunks(store, temp_dir):
     assert np.array_equal(np.load(out), array)
 
 
-def test_npy_export_unwraps_a_nullable_group(store, temp_dir):
+@pytest.mark.parametrize(
+    "values,mask,encoding,pandas_dtype",
+    [
+        ([1, 2, 3], [False, True, False], spec.NULLABLE_INTEGER, "Int32"),
+        ([True, False, True], [False, False, True], spec.NULLABLE_BOOLEAN, "boolean"),
+    ],
+    ids=["integer", "boolean"],
+)
+def test_npy_export_of_a_nullable_array_keeps_its_gaps_as_nan(
+    store, temp_dir, values, mask, encoding, pandas_dtype
+):
+    """F063: the mask was dropped, so a missing entry was exported as the
+    0 or False stored under it."""
+    pd = pytest.importorskip("pandas")
     path, opener = store
     with opener("a") as root:
-        ew.write_masked(
-            root["uns"], "m", np.array([1, 2, 3], dtype="int32"),
-            [False, True, False], spec.NULLABLE_INTEGER,
-        )
+        ew.write_masked(root["uns"], "m", np.array(values, dtype="int32" if encoding == spec.NULLABLE_INTEGER else bool), mask, encoding)
+        out = temp_dir / "m.npy"
+        export_npy(root, "uns/m", out, chunk_elements=2, console=console)
+    expected = pd.array([None if m else v for v, m in zip(values, mask)], dtype=pandas_dtype)
+    got = np.load(out)
+    assert got.dtype == np.float64
+    np.testing.assert_array_equal(got, expected.to_numpy(dtype="float64", na_value=np.nan))
+
+
+def test_npy_export_of_a_nullable_array_with_no_gaps_keeps_its_dtype(store, temp_dir):
+    path, opener = store
+    with opener("a") as root:
+        ew.write_masked(root["uns"], "m", np.array([1, 2, 3], dtype="int32"), [False] * 3, spec.NULLABLE_INTEGER)
         out = temp_dir / "m.npy"
         export_npy(root, "uns/m", out, chunk_elements=100, console=console)
-    assert np.array_equal(np.load(out), np.array([1, 2, 3], dtype="int32"))
+    got = np.load(out)
+    assert got.dtype == np.int32 and got.tolist() == [1, 2, 3]
+
+
+@pytest.mark.parametrize("nullable", [False, True], ids=["string-array", "nullable-string-array"])
+def test_npy_export_of_text_writes_fixed_width_unicode(store, temp_dir, nullable):
+    """F064: no text array could be exported; each failed with "Array can't
+    be memory-mapped: Python objects in dtype", even the
+    nullable-string-array the command said it handled."""
+    path, opener = store
+    labels = ["a", "βeta", "", "a longer label"]
+    with opener("a") as root:
+        if nullable:
+            ew.write_masked(root["uns"], "t", labels, [False] * 4, spec.NULLABLE_STRING_ARRAY)
+        else:
+            ew.write_string_array(root["uns"], "t", labels)
+        out = temp_dir / "t.npy"
+        export_npy(root, "uns/t", out, chunk_elements=3, console=console)
+    got = np.load(out)
+    assert got.dtype == np.dtype("<U14")
+    assert got.tolist() == labels
+
+
+def test_npy_export_refuses_text_with_gaps_before_writing(store, temp_dir):
+    """A .npy of text cannot hold a missing value: refused, not written as ''."""
+    path, opener = store
+    with opener("a") as root:
+        ew.write_masked(root["uns"], "t", ["a", "b"], [False, True], spec.NULLABLE_STRING_ARRAY)
+        with pytest.raises(ValueError, match="has 1 missing values, which a .npy of text cannot hold"):
+            export_npy(root, "uns/t", temp_dir / "t.npy", 100, console)
+    assert not (temp_dir / "t.npy").exists()
+
+
+class _Digest(io.RawIOBase):
+    """A stdout that keeps only a hash of what it is given."""
+
+    def __init__(self):
+        self.hash = hashlib.sha256()
+
+    def writable(self):
+        return True
+
+    def write(self, data):
+        self.hash.update(data)
+        return len(data)
+
+
+def test_npy_export_streams_rather_than_mapping_the_output(store, temp_dir, monkeypatch):
+    """F080: the output was a writable memmap, so the whole array ended up
+    in memory as dirty pages, which tracemalloc cannot see; and the stdout
+    path loaded the array whole. Both now hold a block at a time."""
+    import tracemalloc
+
+    from adata.storage import create_dataset
+
+    def no_memmap(*args, **kwargs):
+        raise AssertionError("open_memmap called")
+
+    monkeypatch.setattr(np.lib.format, "open_memmap", no_memmap)
+    digest = _Digest()
+    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(io.BufferedWriter(digest)))
+    path, opener = store
+    array = np.arange(1 << 20, dtype="float64").reshape(-1, 4)
+    with opener("a") as root:
+        ds = create_dataset(root["uns"], "big", shape=array.shape, dtype=array.dtype, chunks=(1024, 4))
+        ds[...] = array
+        spec.set_encoding(ds, spec.ARRAY)
+    for out in (temp_dir / "big.npy", None):
+        with opener("r") as root:
+            tracemalloc.start()
+            try:
+                export_npy(root, "uns/big", out, chunk_elements=4096, console=console)
+                peak = tracemalloc.get_traced_memory()[1]
+            finally:
+                tracemalloc.stop()
+        assert peak < array.nbytes / 16, f"{peak:,} bytes to export {array.nbytes:,} ({out})"
+    np.testing.assert_array_equal(np.load(temp_dir / "big.npy"), array)
+    assert digest.hash.hexdigest() == hashlib.sha256((temp_dir / "big.npy").read_bytes()).hexdigest()
 
 
 def test_npy_export_rejects_a_group_it_cannot_unwrap(store, temp_dir):
@@ -409,7 +510,6 @@ def test_json_round_trips_every_scalar_kind(store, temp_dir):
         "count": 42,
         "rate": 0.25,
         "flag": True,
-        "nothing": None,
         "labels": ["a", "b"],
         "numbers": [1, 2, 3],
         "grid": [["a", "b"], ["c", "d"]],
@@ -482,3 +582,139 @@ def test_json_import_rejects_an_unrepresentable_value(store, temp_dir):
     with opener("a") as root:
         with pytest.raises(ValueError, match="Cannot convert"):
             write_json_value(root["uns"], "bad", {1, 2})
+
+
+def test_json_export_writes_null_for_nan_and_infinity(store, temp_dir):
+    """F128: they were written as the tokens NaN and Infinity, which are not
+    JSON: jq and strict parsers refused the whole file."""
+    path, opener = store
+    with opener("a") as root:
+        ew.write_dense(root["uns"], "v", np.array([np.nan, np.inf, -np.inf, 1.5]))
+        ew.write_scalar(root["uns"], "s", float("nan"))
+        out = temp_dir / "v.json"
+        export_json(root, "uns", out, 1000, False, console)
+
+    def refuse(token):
+        raise ValueError(f"not JSON: {token}")
+
+    payload = json.loads(out.read_text(), parse_constant=refuse)
+    assert payload["v"] == [None, None, None, 1.5] and payload["s"] is None
+
+
+# ---------------------------------------------------------------------------
+# dataframes
+
+
+def _frame_store(opener):
+    from adata.formats.table import scan_table  # noqa: F401  (the writer import dataframe uses)
+
+    with opener("a") as root:
+        obs = root["obs"]
+        ew.write_dense(obs, "n", np.array([1, 2, 3]))
+        ew.write_string_array(obs, "label", ["x", "y, z", "w"])
+        ew.set_column_order(obs, ["n", "label"])
+
+
+def test_dataframe_export_refuses_an_unknown_column_before_writing(store, temp_dir):
+    """F065: --columns was checked only while rows were written, so a typo
+    left a CSV holding just the header."""
+    from adata.formats.dataframe import export_dataframe
+
+    path, opener = store
+    _frame_store(opener)
+    out = temp_dir / "obs.csv"
+    with opener("r") as root:
+        with pytest.raises(ValueError, match="'obs' has no column 'nope'; it has: n, label"):
+            export_dataframe(root, "obs", ["n", "nope"], out, 100, None, console)
+        with pytest.raises(ValueError, match="--head must be 0 or more"):
+            export_dataframe(root, "obs", None, out, 100, -1, console)
+    assert not out.exists()
+
+
+def test_dataframe_export_reads_back_as_pandas_reads_it(store, temp_dir):
+    """F127: lines ended in CRLF, and --head 0 wrote every row."""
+    pd = pytest.importorskip("pandas")
+    from adata.formats.dataframe import export_dataframe
+
+    path, opener = store
+    _frame_store(opener)
+    out, empty = temp_dir / "obs.csv", temp_dir / "none.csv"
+    with opener("r") as root:
+        export_dataframe(root, "obs", None, out, 2, None, console)
+        export_dataframe(root, "obs", None, empty, 2, 0, console)
+
+    assert b"\r" not in out.read_bytes()
+    got = pd.read_csv(out, index_col=0)
+    assert got["n"].tolist() == [1, 2, 3] and got["label"].tolist() == ["x", "y, z", "w"]
+    assert empty.read_text() == "_index,n,label\n"
+
+
+def test_mtx_export_head_zero_writes_no_entries(store, temp_dir):
+    """F127: --head 0 exported every entry, as if no limit were given."""
+    from scipy import io as scipy_io
+
+    path, opener = store
+    with opener("a") as root:
+        ew.write_sparse(root["uns"], "m", [1.0, 2.0], [0, 1], [0, 1, 2], (2, 2))
+        out = temp_dir / "m.mtx"
+        export_mtx(root, "uns/m", out, 0, 100, False, console)
+        with pytest.raises(ValueError, match="--head must be 0 or more"):
+            export_mtx(root, "uns/m", temp_dir / "n.mtx", -1, 100, False, console)
+    assert scipy_io.mmread(out).nnz == 0
+
+
+# ---------------------------------------------------------------------------
+# stdout
+
+
+@pytest.fixture(scope="module")
+def long_store(tmp_path_factory):
+    """A store whose every export is far longer than a pipe's buffer."""
+    ad = pytest.importorskip("anndata")
+    pd = pytest.importorskip("pandas")
+    from scipy import sparse
+
+    n = 40_000
+    obj = ad.AnnData(
+        X=sparse.csr_matrix(np.ones((n, 4), dtype="float32")),
+        obs=pd.DataFrame({"x": np.arange(n)}, index=[f"cell_{i}" for i in range(n)]),
+    )
+    obj.obsm["X_pca"] = np.ones((n, 4))
+    obj.uns["v"] = np.arange(n, dtype="float64")
+    path = tmp_path_factory.mktemp("long") / "long.h5ad"
+    obj.write_h5ad(path)
+    return path
+
+
+@pytest.mark.parametrize(
+    "args",
+    [["dataframe", "obs"], ["array", "obsm/X_pca"], ["sparse", "X"], ["dict", "uns"]],
+    ids=["dataframe", "array", "sparse", "dict"],
+)
+def test_an_export_ends_quietly_when_its_reader_stops(long_store, args):
+    """F127: `adata export ... | head` printed an Error about a broken pipe
+    and exited 1, although the reader had read all it wanted."""
+    import subprocess
+
+    command = [sys.executable, "-c", "from adata.cli import main; main()", "export", args[0], str(long_store), args[1]]
+    proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert proc.stdout.read(64)
+    proc.stdout.close()
+    err = proc.stderr.read().decode()
+    proc.wait(timeout=120)
+    assert proc.returncode == 0, err
+    assert "Error" not in err and "BrokenPipe" not in err and "Exception ignored" not in err, err
+
+
+def test_npy_export_refuses_a_record_array_with_text_fields(temp_dir):
+    """Its fields are pointers to strings; written as bytes they would be
+    addresses, not text."""
+    import h5py
+
+    path = temp_dir / "r.h5ad"
+    with h5py.File(path, "w") as f:
+        f.create_dataset("recs", data=np.array([("x", 1)], dtype=[("a", h5py.string_dtype()), ("b", "i4")]))
+    with open_store(path, "r") as store:
+        with pytest.raises(ValueError, match="record array with text fields"):
+            export_npy(store.root, "recs", temp_dir / "r.npy", 10, console)
+    assert not (temp_dir / "r.npy").exists()
