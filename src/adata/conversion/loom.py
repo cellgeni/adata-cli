@@ -17,7 +17,9 @@ attributes with one value per cell are obs columns and those with several
 are obsm. Four things differ, on purpose (docs/reference/formats/loom.md
 lists the same four):
 
-* values keep their dtype, where anndata casts X to float32;
+* values keep their dtype, where anndata casts X to float32 (but for
+  float16, which no scipy sparse matrix holds: it becomes float32 unless
+  kept dense);
 * graphs become obsp/varp and global attributes `uns["loom"]`, where
   anndata drops them; and the main matrix is never dropped: with a layer
   named `matrix` (a loom written from an AnnData that had one), X is the
