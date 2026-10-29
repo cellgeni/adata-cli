@@ -18,7 +18,13 @@ uv run pytest -m integration       # anndata releases, scanpy and PyTables
 
 CI runs the unit suite on Python 3.12 and 3.13 with a **90% coverage floor**,
 and the anndata compatibility suite and the 10x external-reader suite as
-separate jobs.
+separate jobs. A fourth job installs the package alone from a fresh
+resolution, without `uv.lock`, as `pip install pyadata-cli` would. It
+imports every module on the base dependencies alone, runs `adata convert`
+with and without click beside typer, and runs the docs-accuracy suite with no
+click installed. The locked suite cannot see a dependency the lock brings in
+by accident: 0.7.0 to 0.17.2 imported click, which typer had stopped
+installing, so `convert` crashed on every fresh install.
 
 ## How the suite is organised
 

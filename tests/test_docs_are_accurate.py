@@ -11,34 +11,41 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Iterator, List, Tuple
+from typing import Any, Iterator, List, Tuple
 
-import click
 import pytest
 from typer.main import get_command
 
 from adata.cli import app
 
-#: The real Click command tree. Options are read from here rather than from
+#: The real command tree. Options are read from here rather than from
 #: rendered `--help` text: Rich wraps long option names at the terminal width,
 #: so a help-scraping check passes on a wide terminal and fails in CI.
+#: It is walked through typer's objects, never click's classes: typer 0.26
+#: and later carry their own copy of click and no longer install click, so a
+#: fresh install has none to import. A group is whatever has `commands`.
 ROOT = get_command(app)
 
 
-def _lookup(path: List[str]) -> click.Command:
+def _subcommands(command: Any) -> dict:
+    """A group's subcommands by name; empty for a plain command."""
+    return getattr(command, "commands", None) or {}
+
+
+def _lookup(path: List[str]) -> Any:
     """Resolve a subcommand path, or raise KeyError naming what is missing."""
-    command: click.Command = ROOT
+    command = ROOT
     for name in path:
-        if not isinstance(command, click.Group):
+        if not hasattr(command, "commands"):
             raise KeyError(f"{name!r}: {path} is not a group")
-        found = command.get_command(click.Context(command), name)
+        found = _subcommands(command).get(name)
         if found is None:
             raise KeyError(f"{name!r} is not a command of {path}")
         command = found
     return command
 
 
-def _options(command: click.Command) -> set:
+def _options(command: Any) -> set:
     """Every option string the command accepts, long and short."""
     names = set()
     for param in command.params:
@@ -435,7 +442,7 @@ def _help_examples() -> List[Tuple[str, str]]:
     """Every example-looking command line inside any command's `--help`."""
     found: List[Tuple[str, str]] = []
 
-    def walk(command: click.Command, path: List[str]) -> None:
+    def walk(command: Any, path: List[str]) -> None:
         for raw in (command.help or "").splitlines():
             line = raw.strip()
             # Same cleanup as the docs parser: comments, pipes, redirections.
@@ -443,11 +450,10 @@ def _help_examples() -> List[Tuple[str, str]]:
             line = re.split(r"\s*[|>]\s*", line)[0].strip()
             if line.startswith(("adata ", "h5ad ")):
                 found.append((line, "cli.py:" + ("/".join(path) or "<app>")))
-        if isinstance(command, click.Group):
-            for name, sub in command.commands.items():
-                if getattr(sub, "hidden", False):
-                    continue
-                walk(sub, path + [name])
+        for name, sub in _subcommands(command).items():
+            if getattr(sub, "hidden", False):
+                continue
+            walk(sub, path + [name])
 
     walk(ROOT, [])
     return found
