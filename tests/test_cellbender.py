@@ -282,6 +282,12 @@ def test_from_cellbender_refuses_a_plain_10x_file(tmp_path):
     assert "--from 10x-h5" in _out(result)
     assert not out.exists()
 
+    # An h5ad is no 10x matrix either, so is not pointed at --from 10x-h5.
+    _ok(plain, "-o", tmp_path / "plain.h5ad")
+    result = _convert(tmp_path / "plain.h5ad", "-o", out, "--from", "cellbender")
+    assert result.exit_code == 1
+    assert "is not CellBender output." in _out(result) and "10x-h5" not in _out(result)
+
 
 def test_cellbender_0_2_keeps_global_arrays_out_of_var_whatever_their_length(tmp_path):
     """F097: a 0.2 file's loss per epoch, as long as the features by chance,

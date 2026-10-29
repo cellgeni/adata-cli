@@ -386,14 +386,15 @@ def export_features(
         types_col = "feature_types"
     index = read_str_all(var_index)
 
-    # Ids and names each come from their column, and the var names stand in
-    # for whichever has none: ids when the names have a column, as
-    # `--var-names gene_ids` leaves var, and names otherwise.
+    # Ids and names each come from their column. The var names are ids when
+    # var is laid out as `--var-names gene_ids` leaves it, with the symbols
+    # in a column of their own, whichever column a flag names for the names;
+    # otherwise they are names, and no ids is refused.
     missing = []
     names = column(names_col) if names_col else index
     if ids_col is not None:
         ids = column(ids_col)
-    elif names_col is not None:
+    elif "gene_symbols" in columns:
         ids = index
     else:
         missing.append("gene ids (a gene_ids column, or --gene-ids-column)")
@@ -421,13 +422,25 @@ def export_features(
         ids = column("probe_ids")
     tags = recorded_tag_keys(root)
     recorded = recorded_feature_keys(root)
-    for key in tags if recorded is None else recorded:
+    keys = list(tags if recorded is None else recorded)
+    if recorded is None and "gene_id" in fields:
+        # Nothing recorded which fields a probe-level matrix had -- an
+        # older import, or scanpy's: Cell Ranger's are known.
+        keys += _FLEX_FIELDS
+    for key in keys:
         if key not in fields and key not in _EXPORT_CORE and key in columns:
-            fields[key] = _field(var, key)
-    tag_keys = [key for key in tags if key in fields] if tags else list(fields)
+            fields[key] = _field(var, key, warnings)
+    known = _FLEX_TAGS if "gene_id" in fields else ("genome",)
+    tag_keys = [key for key in (tags or known) if key in fields]
     if "genome" not in tag_keys:
         tag_keys.insert(0, "genome")
     return ExportFeatures(ids=ids, names=names, types=types, fields=fields, tag_keys=tag_keys)
+
+
+#: The per-probe fields of Cell Ranger's probe-level (Flex) matrix besides
+#: `gene_id` and `genome`, and which of them it lists in `_all_tag_keys`.
+_FLEX_FIELDS = ("filtered_probes", "gene_name", "probe_region")
+_FLEX_TAGS = ("gene_id", "gene_name", "genome", "probe_region")
 
 
 #: var columns that are Cell Ranger's `id`, `name` or `feature_type`, not a
@@ -435,18 +448,24 @@ def export_features(
 _EXPORT_CORE = frozenset({"gene_ids", "gene_symbols", "probe_ids", "feature_types"})
 
 
-def _field(var: Any, key: str) -> Any:
+def _field(var: Any, key: str, warnings: List[str]) -> Any:
     """A var column as a feature dataset holds it: bool, or strings.
 
-    A pandas nullable boolean is bool too while no value is missing, which
-    a 10x file has no way to say.
+    A pandas nullable boolean is bool too. A 10x file cannot say a value is
+    missing, so missing ones are written as False, with a warning: written
+    as strings, 'False' would read back as true.
     """
     obj = var[key]
     if is_dataset(obj) and "categories" not in obj.attrs and obj.dtype.kind == "b":
         return np.asarray(obj[...], dtype=bool)
     if is_group(obj) and spec.encoding_type(obj) == spec.NULLABLE_BOOLEAN:
-        if not np.asarray(obj["mask"][...], dtype=bool).any():
-            return np.asarray(obj["values"][...], dtype=bool)
+        missing = np.asarray(obj["mask"][...], dtype=bool)
+        if missing.any():
+            warnings.append(
+                f"var[{key!r}] has {int(missing.sum()):,} missing values, "
+                "written as False: a 10x matrix has no missing booleans."
+            )
+        return np.asarray(obj["values"][...], dtype=bool) & ~missing
     return read_str_all(obj, parent_group=var)
 
 

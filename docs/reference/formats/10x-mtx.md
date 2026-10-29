@@ -56,8 +56,12 @@ Exporting needs `--to 10x-mtx`, since a folder has no extension to say so,
 and writes a Cell Ranger 3 folder: gzipped (`--compression none` for plain
 files), three feature columns, entries in barcode order, from X or the
 matrix `--layer` names. Feature ids, names and types come from var as for
-the [HDF5 export](10x-h5.md), with the same `--force` placeholders. Names
-that the TSV readers would not read back are refused: one holding a tab or a
-line break, which would break the file; one starting with a double quote,
-which pandas (and so scanpy) and R take for a quoted field; and an empty
-barcode, whose blank line they skip.
+the [HDF5 export](10x-h5.md), with the same `--force` placeholders; a
+probe-level (Flex) matrix writes its probe ids as the ids. Before the folder
+exists, names the TSV readers would not read back are refused: one holding a
+tab or a line break, which would break the file; one starting with a double
+quote, which pandas (and so scanpy) and R take for a quoted field; an empty
+id, type or barcode, which pandas reads as missing (and an empty barcode's
+blank line, which pandas and R skip); and a barcode holding a comma, since
+scanpy reads `barcodes.tsv` as comma-separated. An empty name is written,
+and read by pandas as missing.

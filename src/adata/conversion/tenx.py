@@ -137,9 +137,15 @@ _REFERENCE = re.compile(r"&#(?:([0-9]+)|x([0-9a-fA-F]+));")
 
 
 def _character(match: "re.Match[str]") -> str:
+    """The character a reference stands for, if XML allows it; otherwise the
+    reference as it is -- a NUL or a lone surrogate cannot be stored."""
     decimal, hexadecimal = match.groups()
     code = int(decimal) if decimal is not None else int(hexadecimal, 16)
-    return chr(code) if code <= 0x10FFFF else match.group(0)
+    allowed = (
+        code in (0x9, 0xA, 0xD) or 0x20 <= code <= 0xD7FF
+        or 0xE000 <= code <= 0xFFFD or 0x10000 <= code <= 0x10FFFF
+    )
+    return chr(code) if allowed else match.group(0)
 
 
 def decode_text(values: np.ndarray) -> np.ndarray:
@@ -225,7 +231,6 @@ def _read_matrix(handle: h5py.File, genome: Optional[str]) -> _Matrix:
             # one entry per feature.
             if isinstance(item, h5py.Dataset) and key != "_all_tag_keys" and item.shape[:1] != (n_features,):
                 problems.append(f"{item.shape[0] if item.ndim else 'a scalar'} feature {key}")
-        problems += [f"no feature {key}, which _all_tag_keys lists" for key in tag_keys if key not in features]
     else:
         for key in ("genes", "gene_names"):
             if group[key].shape[:1] != (n_features,):

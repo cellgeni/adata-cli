@@ -459,7 +459,8 @@ class CellbenderImport(Converter):
                 # matrix, and calling it CellBender's would invent a result.
                 raise ValueError(
                     f"{Path(source).name} holds no CellBender latents, so it is not "
-                    "CellBender output; read it with --from 10x-h5."
+                    "CellBender output"
+                    + ("; read it with --from 10x-h5." if tenx.sniff(source) else ".")
                 )
             matrix, outputs, targets, warnings = tenx.plan_matrix_import(
                 handle, output, options

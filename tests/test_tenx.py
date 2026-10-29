@@ -287,8 +287,6 @@ def _spoil(path: Path, how: str) -> None:
         elif how == "a tag":
             del m["features/pattern"]
             m["features/pattern"] = np.array([b""] * 5)
-        elif how == "a listed tag":
-            del m["features/pattern"]
         elif how == "gene_id":
             m["features/gene_id"] = np.array([b"E1"] * 2)
         elif how == "filtered_barcodes":
@@ -312,7 +310,6 @@ def _spoil(path: Path, how: str) -> None:
     [
         ("feature_type", "3 feature feature_type"),
         ("a tag", "5 feature pattern"),
-        ("a listed tag", "no feature pattern, which _all_tag_keys lists"),
         ("gene_id", "2 feature gene_id"),
         ("filtered_barcodes", f"{N_CELLS - 1} filtered_barcodes"),
         ("indptr end", "an indptr that ends at"),
@@ -372,16 +369,20 @@ def test_a_feature_type_absent_from_the_genome_is_refused(tmp_path):
     assert list(_read(out).var_names) == ["c"]
 
 
-def test_text_cell_ranger_escaped_reads_as_the_characters(tmp_path):
+@pytest.mark.parametrize("suffix", [".h5ad", ".zarr"])
+def test_text_cell_ranger_escaped_reads_as_the_characters(tmp_path, suffix):
     """F110: Cell Ranger writes text outside ASCII as XML character
-    references; they are read back as the characters they stand for."""
+    references; they are read back as the characters they stand for. Found
+    in review: a reference to a character no store can hold (a NUL, a lone
+    surrogate) failed the import part-way; it stays as written."""
+    names = ["IFN&#947;", "Gr&#xE9;", "A&B", "nul&#0;", "half&#55296;"]
     h5 = write_10x_h5(
-        tmp_path / "escaped.h5", _counts(n_features=3), barcodes=_barcodes(),
-        ids=["a", "b", "c"], names=["IFN&#947;", "Gr&#xE9;", "A&B"],
+        tmp_path / "escaped.h5", _counts(n_features=5), barcodes=_barcodes(),
+        ids=list("abcde"), names=names,
     )
-    out = tmp_path / "out.h5ad"
+    out = tmp_path / f"out{suffix}"
     _ok(h5, "-o", out, "--var-names", "gene_symbols")
-    assert list(_read(out).var_names) == ["IFNγ", "Gré", "A&B"]
+    assert list(_read(out).var_names) == ["IFNγ", "Gré", "A&B", "nul&#0;", "half&#55296;"]
 
 
 def test_a_10x_file_is_recognised_by_its_content(tenx, tmp_path):
@@ -646,6 +647,52 @@ def test_naming_one_column_keeps_var_names_that_are_ids(tmp_path, flags, ids, na
     with h5py.File(out) as f:
         assert [v.decode() for v in f["matrix/features/id"][...]] == ids
         assert [v.decode() for v in f["matrix/features/name"][...]] == names
+
+
+def test_var_names_that_are_symbols_are_not_taken_for_ids(tmp_path):
+    """Found in review: with F046's fix first written, naming any column for
+    the names made the var names ids, so a store named by symbol exported its
+    symbols as ids without the refusal that asks for --force."""
+    source = _anndata_source(tmp_path, alias=[n.lower() for n in NAMES], feature_types=TYPES)
+    out = tmp_path / "out.h5"
+    result = _convert(source, "-o", out, "--gene-names-column", "alias")
+    assert result.exit_code == 1
+    assert "var has no gene ids" in _out(result)
+    assert not out.exists()
+
+
+def test_a_flex_store_with_nothing_recorded_exports_cell_ranger_s_fields(tmp_path):
+    """F045, F048: a Flex store whose fields were not recorded -- an older
+    import, or scanpy's read_10x_h5 written out -- dropped filtered_probes,
+    gene_name and probe_region, and listed only genome and gene_id as tags."""
+    flex, h5ad, back = _flex(tmp_path / "flex.h5"), tmp_path / "x.h5ad", tmp_path / "back.h5"
+    _ok(flex, "-o", h5ad, "--var-names", "gene_symbols")
+    obj = ad.read_h5ad(h5ad)
+    del obj.uns["cellranger"]
+    obj.write_h5ad(h5ad)
+    _ok(h5ad, "-o", back)
+
+    before, after = _datasets(flex), _datasets(back)
+    for key in before:
+        if key.startswith("matrix/"):
+            assert np.array_equal(before[key][0], after[key][0]), key
+            assert before[key][1] == after[key][1], key
+
+
+def test_a_missing_boolean_is_written_as_false_with_a_warning(tmp_path):
+    """F048: a nullable boolean with a missing value went out as strings,
+    where 'False' reads back as true. A 10x file has no missing booleans."""
+    flex, h5ad, back = _flex(tmp_path / "flex.h5"), tmp_path / "x.h5ad", tmp_path / "back.h5"
+    _ok(flex, "-o", h5ad)
+    obj = ad.read_h5ad(h5ad)
+    obj.var["filtered_probes"] = pd.array([True, None, True, False], dtype="boolean")
+    obj.write_h5ad(h5ad)
+    result = _ok(h5ad, "-o", back)
+    assert "var['filtered_probes'] has 1 missing values, written as False" in _out(result)
+    with h5py.File(back) as f:
+        got = f["matrix/features/filtered_probes"]
+        assert got.dtype == bool
+        assert list(got[...]) == [True, False, True, False]
 
 
 def test_float16_counts_export_as_float32(tmp_path):
