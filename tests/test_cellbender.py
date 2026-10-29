@@ -243,6 +243,67 @@ def test_min_cell_probability_is_checked(tmp_path):
     assert not (tmp_path / "o.h5ad").exists()
 
 
+@pytest.mark.parametrize("suffix", [".h5ad", ".zarr"])
+def test_a_probability_cut_that_keeps_no_droplet_is_refused(tmp_path, suffix):
+    """F094: keeping no droplet crashed an h5ad output part-way, creating
+    obsm with a chunk larger than its zero rows, and wrote a Zarr store of
+    no cells."""
+    truth = _cellbender(tmp_path)
+    out = tmp_path / f"o{suffix}"
+    result = _convert(truth.path, "-o", out, "--min-cell-probability", "1")
+    assert result.exit_code == 1
+    assert "No droplet has a cell probability of at least 1; the highest is 0.99" in _out(result)
+    assert sorted(p.name for p in tmp_path.iterdir()) == [truth.path.name]
+
+
+def test_embeddings_of_no_rows_are_written_on_every_backend(new_store, tmp_path):
+    """F094: an embedding of no rows was created with a chunk of one row,
+    which HDF5 refuses."""
+    from adata.conversion.cellbender import _Latents, _write_embeddings
+
+    path, open_store = new_store()
+    latents = _Latents("0.3", {}, {"z": "z"}, {}, {}, n_latent=3, rows=None)
+    with h5py.File(tmp_path / "latents.h5", "w") as handle:
+        handle["z"] = np.ones((3, 4), dtype=np.float32)
+        with open_store("a") as root:
+            _write_embeddings(root, handle, latents, 3, np.array([], dtype=np.int64))
+    with open_store("r") as root:
+        assert root["obsm"]["z"].shape == (0, 4)
+
+
+def test_from_cellbender_refuses_a_plain_10x_file(tmp_path):
+    """F098: --from cellbender on a 10x matrix with no latents wrote a fake
+    'CellBender 0.2' result."""
+    plain = _raw_file(tmp_path)
+    out = tmp_path / "o.h5ad"
+    result = _convert(plain, "-o", out, "--from", "cellbender")
+    assert result.exit_code == 1
+    assert "holds no CellBender latents, so it is not CellBender output" in _out(result)
+    assert "--from 10x-h5" in _out(result)
+    assert not out.exists()
+
+
+def test_cellbender_0_2_keeps_global_arrays_out_of_var_whatever_their_length(tmp_path):
+    """F097: a 0.2 file's loss per epoch, as long as the features by chance,
+    was written into var as if it were a property of each feature."""
+    n_features = 20  # the fixture trains for 20 epochs
+    counts = np.random.default_rng(3).poisson(1.0, (N_DROPLETS, n_features))
+    truth = write_cellbender_h5(
+        tmp_path / "cb.h5", counts, barcodes=_barcodes(),
+        ids=[f"E{i}" for i in range(n_features)], names=[f"G{i}" for i in range(n_features)],
+        version="0.2",
+    )
+    out = tmp_path / "o.h5ad"
+    _ok(truth.path, "-o", out)
+    got = _read(out)
+    assert "training_elbo_per_epoch" not in got.var
+    with h5py.File(truth.path) as f:
+        np.testing.assert_array_equal(
+            got.uns["cellbender"]["training_elbo_per_epoch"], f["matrix/training_elbo_per_epoch"][...]
+        )
+    np.testing.assert_allclose(got.var["ambient_expression"], truth.ambient)
+
+
 # ---------------------------------------------------------------------------
 # --raw
 
@@ -332,6 +393,59 @@ def test_a_raw_file_that_does_not_match_is_refused(tmp_path, spoil, message):
     assert result.exit_code == 1
     assert message in _out(result)
     assert not out.exists()
+
+
+@pytest.mark.parametrize("given", ["text", "h5ad"])
+def test_raw_that_is_not_a_10x_matrix_is_refused_clearly(tmp_path, given):
+    """F099: a --raw that was not HDF5 at all failed with h5py's 'file
+    signature not found'."""
+    truth = _cellbender(tmp_path, filtered=True)
+    raw = tmp_path / "raw_feature_bc_matrix.h5"
+    if given == "text":
+        raw.write_text("barcode,count\n")
+    else:
+        _ok(truth.path, "-o", tmp_path / "cb.h5ad")
+        (tmp_path / "cb.h5ad").rename(raw)
+    out = tmp_path / "out.h5ad"
+    result = _convert(truth.path, "-o", out, "--raw", raw)
+    assert result.exit_code == 1
+    assert "--raw raw_feature_bc_matrix.h5 is not a 10x HDF5 matrix" in _out(result)
+    assert not out.exists()
+
+
+def _layout(store: Path, path: str) -> dict:
+    """dtype, chunks and compression of each array of a sparse matrix."""
+    found = {}
+    if store.suffix == ".zarr":
+        import zarr
+
+        group = zarr.open_group(store, mode="r")[path]
+        for key in ("data", "indices", "indptr"):
+            array = group[key]
+            found[key] = (array.dtype, array.chunks, repr(array.compressors))
+    else:
+        with h5py.File(store) as f:
+            for key in ("data", "indices", "indptr"):
+                array = f[path][key]
+                found[key] = (array.dtype, array.chunks, array.compression, array.compression_opts)
+    return found
+
+
+@pytest.mark.parametrize("suffix", [".h5ad", ".zarr"])
+@pytest.mark.parametrize("filtered", [False, True], ids=["full", "filtered"])
+def test_the_raw_layer_is_laid_out_as_x(tmp_path, suffix, filtered):
+    """F131: layers["cellranger"] was written with int32 indices and default
+    chunks and compression, where X and layers["cellbender"] keep the
+    CellBender file's int64 indices and its layout."""
+    truth = _cellbender(tmp_path, filtered=filtered)
+    out = tmp_path / f"out{suffix}"
+    _ok(truth.path, "-o", out, "--raw", _raw_file(tmp_path))
+    x = _layout(out, "X")
+    assert x["indices"][0] == np.int64
+    assert _layout(out, "layers/cellranger") == x
+    assert _layout(out, "layers/cellbender") == x
+    got = _read(out)
+    assert np.array_equal(got.layers["cellranger"].toarray(), _raw_counts()[truth.rows])
 
 
 def test_cellbender_flags_are_refused_for_other_formats(tmp_path):
