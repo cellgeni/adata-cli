@@ -42,10 +42,12 @@ Test markers:
   0.13), scanpy and PyTables, so they need the network on the first run.
 - `perf` tests are slow, but CI runs them in the main job.
 
-CI also installs the package from a fresh resolution, without the lock, and
-checks that it imports nothing undeclared. Don't import click: typer 0.26
-and later no longer install it. Compare the enums typer hands back (such as
-`ParameterSource`) by `.name`.
+CI also installs the package from a fresh resolution, without the lock,
+imports every module on the base dependencies alone, and runs `convert`.
+That catches a module-level import of something undeclared; one inside a
+function is caught only on the paths it runs. Don't import click: typer
+0.26 and later no longer install it. Compare the enums typer hands back
+(such as `ParameterSource`) by `.name`.
 
 Neither CI nor the repo runs a linter or formatter. Match the style of the
 surrounding code.

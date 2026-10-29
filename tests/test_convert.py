@@ -463,4 +463,4 @@ def test_convert_sees_only_typed_flags_whatever_enum_typer_uses(
               "--dtype", "float64", "--to", "zarr"],
     )
     assert result.exit_code == 1
-    assert "--to cannot be combined with --dtype" in _out(result)
+    assert "Error: --to cannot be combined with --dtype:" in _out(result)

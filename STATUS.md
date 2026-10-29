@@ -7,7 +7,7 @@ moves; the plan of record for the current item is in the section below.
 
 | Version | What | Issues |
 |---|---|---|
-| 0.17.3 | Space Ranger's analysis (clusters, UMAP, PCA) for Visium spots and HD bins; `convert` works on fresh installs again | #85, #88 |
+| 0.17.3 | Space Ranger's analysis (clusters, UMAP, PCA) for Visium spots and HD bins; `convert` works on fresh installs (broken since 0.7.0) | #85, #88 |
 | 0.17.2 | Visium HD segmented cells (Space Ranger 4): centroids, areas and Space Ranger's analysis | #83 |
 | 0.17.1 | Visium HD, one bin size at a time, with the new `spatial` extra (pyarrow) | #81 |
 | 0.17.0 | `convert` reads Visium (Space Ranger 1–4) and Xenium (XOA 1–4) with positions, images and Xenium's analysis | #79 |

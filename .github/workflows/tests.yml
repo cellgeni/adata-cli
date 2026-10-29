@@ -81,11 +81,12 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: false
 
-  # What `pip install pyadata-cli` gets today, not what uv.lock pins. 0.17.1
-  # and 0.17.2 imported click, which typer stopped installing in 0.26, so
+  # What `pip install pyadata-cli` gets today, not what uv.lock pins. 0.7.0
+  # to 0.17.2 imported click, which typer had stopped installing in 0.26, so
   # every `adata convert` on a fresh install crashed while the locked suite
   # stayed green. This installs the base package alone from a fresh
-  # resolution and checks that it imports nothing undeclared.
+  # resolution, imports every module on the base dependencies alone, and
+  # runs `convert`.
   fresh-install:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -140,6 +141,10 @@ jobs:
         run: |
           uv pip uninstall --python fresh/bin/python click
           uv pip install --python fresh/bin/python pytest pytest-timeout
+          # `!` would not stop a `bash -e` step, hence the explicit exit.
+          if fresh/bin/python -c "import click" 2>/dev/null; then
+            echo "click is still installed"; exit 1
+          fi
           fresh/bin/python -m pytest -q -p no:cacheprovider tests/test_docs_are_accurate.py
 
   # Builds a store with each pinned anndata release and checks the CLI against
