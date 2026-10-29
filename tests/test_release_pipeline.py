@@ -17,8 +17,9 @@ import subprocess
 from pathlib import Path
 
 import pytest
-
-yaml = pytest.importorskip("yaml")
+# Not importorskip: a missing parser must fail these, not skip them. PyYAML
+# comes with zarr (through donfig).
+import yaml
 
 ROOT = Path(__file__).parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -36,11 +37,12 @@ def _workflows():
     return sorted(path.name for path in WORKFLOWS.glob("*.yml"))
 
 
-def _evaluate(expression, results, github, inputs):
+def _evaluate(expression, results, github, inputs, outputs):
     """A job's `if:`, for the subset of GitHub's expression syntax used here.
 
-    `results` holds the result of each job it needs. As on GitHub, an
-    expression with no status function is implicitly `success() && (...)`.
+    `results` holds the result of each job it needs, and `outputs` their
+    outputs. As on GitHub, an expression with no status function is
+    implicitly `success() && (...)`.
     """
     expression = " ".join(expression.split())  # `if: |` spans lines
     if expression.startswith("${{"):
@@ -50,6 +52,11 @@ def _evaluate(expression, results, github, inputs):
 
     py = re.sub(
         r"\bneeds\.([\w-]+)\.result\b", lambda m: repr(results[m[1]]), expression
+    )
+    py = re.sub(
+        r"\bneeds\.([\w-]+)\.outputs\.([\w-]+)",
+        lambda m: repr(outputs.get(m[1], {}).get(m[2], "")),
+        py,
     )
     py = re.sub(r"\bgithub\.(\w+)", lambda m: repr(github[m[1]]), py)
     py = re.sub(r"\binputs\.(\w+)", lambda m: repr(inputs.get(m[1])), py)
@@ -62,8 +69,9 @@ def _evaluate(expression, results, github, inputs):
     return value and (succeeded or not implicit)
 
 
-def _run(workflow, event, ref, inputs=None, failing=()):
-    """Each job's result in one run, given which jobs fail if they run."""
+def _run(workflow, event, ref, inputs=None, failing=(), outputs=None):
+    """Each job's result in one run, given which jobs fail if they run and
+    what the jobs that ran put out."""
     jobs = workflow["jobs"]
     github = {
         "event_name": event,
@@ -78,7 +86,10 @@ def _run(workflow, event, ref, inputs=None, failing=()):
             needs = jobs[name].get("needs", [])
             needs = [needs] if isinstance(needs, str) else needs
             before = {need: result(need) for need in needs}
-            runs = _evaluate(jobs[name].get("if", "success()"), before, github, inputs or {})
+            runs = _evaluate(
+                str(jobs[name].get("if", "success()")), before, github,
+                inputs or {}, outputs or {},
+            )
             results[name] = (
                 "skipped" if not runs else "failure" if name in failing else "success"
             )
@@ -100,7 +111,8 @@ TAG = "refs/tags/0.17.5"
         ("workflow_dispatch", TAG, "testpypi", (), {"publish-testpypi"}),
         ("workflow_dispatch", TAG, "pypi", (), {"publish-pypi", "image"}),
         ("workflow_dispatch", "refs/heads/main", "testpypi", (), {"publish-testpypi"}),
-        ("workflow_dispatch", "refs/heads/main", "pypi", (), set()),
+        # check-version refuses a branch, so the run fails rather than pass.
+        ("workflow_dispatch", "refs/heads/main", "pypi", ("check-version",), set()),
         ("push", TAG, None, ("test",), set()),
         ("push", TAG, None, ("check-version",), set()),
         ("push", TAG, None, ("build",), set()),
@@ -123,6 +135,51 @@ def test_each_run_publishes_exactly_what_passed(event, ref, target, failing, pub
     assert {
         job for job in PUBLISHERS if results.get(job) == "success"
     } == published
+    for job in failing:
+        assert results[job] == "failure", f"{job} must run, so the run goes red"
+
+
+def _script(workflow, job, step_id):
+    steps = _load(workflow)["jobs"][job]["steps"]
+    return next(step for step in steps if step.get("id") == step_id)["run"]
+
+
+def _bash(script, cwd, **env):
+    """A `run:` script under GitHub's default shell, `bash -e`, with no
+    pipefail."""
+    return subprocess.run(
+        ["bash", "-e", "-c", script],
+        cwd=cwd,
+        env={**os.environ, **env},
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "ref_type, ref_name, declared, ok",
+    [
+        ("tag", "0.17.5", "0.17.5", True),
+        ("tag", "0.17.5", "0.17.4", False),
+        ("branch", "main", "0.17.5", False),
+    ],
+    ids=["tag-is-the-version", "tag-is-not-the-version", "branch"],
+)
+def test_check_version_passes_only_a_tag_that_names_the_version(
+    tmp_path, ref_type, ref_name, declared, ok
+):
+    """F142: up to 0.17.4 a PyPI dispatch from a branch skipped the version
+    check and published whatever pyproject.toml declared."""
+    (tmp_path / "pyproject.toml").write_text(f'[project]\nversion = "{declared}"\n')
+    output = tmp_path / "output"
+    done = _bash(
+        _script("publish.yml", "check-version", "version"), tmp_path,
+        GITHUB_REF_TYPE=ref_type, GITHUB_REF_NAME=ref_name,
+        GITHUB_OUTPUT=str(output),
+    )
+    assert (done.returncode == 0) == ok, done.stdout + done.stderr
+    if ok:
+        assert output.read_text() == f"version={declared}\n"
 
 
 def test_the_image_is_pushed_only_from_publish():
@@ -131,6 +188,17 @@ def test_the_image_is_pushed_only_from_publish():
     image = _load("publish.yml")["jobs"]["image"]
     assert image["uses"] == "./.github/workflows/quay-on-tag.yml"
     assert "inherit" not in str(image.get("secrets")), "pass Quay's secrets by name"
+
+
+def _stand_in_git(tmp_path, tags, *, fails=False):
+    """A `git` on PATH that answers `ls-remote --tags` with these tags."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    listing = "".join(f"{'0' * 40}\trefs/tags/{tag}\n" for tag in tags)
+    body = "exit 128\n" if fails else f"cat <<'EOF'\n{listing}EOF\n"
+    (bin_dir / "git").write_text("#!/bin/sh\n" + body)
+    (bin_dir / "git").chmod(0o755)
+    return f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
 
 
 @pytest.mark.parametrize(
@@ -149,28 +217,125 @@ def test_latest_moves_only_to_the_newest_final_release(tmp_path, version, tags, 
     1.0.0rc1, or a 0.16.x backport tagged after 0.17.0, would have taken it.
     Runs the step's own script against a stand-in for `git ls-remote`."""
     steps = _load("quay-on-tag.yml")["jobs"]["docker"]["steps"]
-    step = next(s for s in steps if s.get("id") == "latest")
     meta = next(s for s in steps if s.get("id") == "meta")
     assert "enable=${{ steps.latest.outputs.latest == 'true' }}" in meta["with"]["tags"]
 
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    listing = "".join(f"{'0' * 40}\trefs/tags/{tag}\n" for tag in tags)
-    (bin_dir / "git").write_text(f"#!/bin/sh\ncat <<'EOF'\n{listing}EOF\n")
-    (bin_dir / "git").chmod(0o755)
     output = tmp_path / "output"
-    subprocess.run(
-        ["bash", "-eo", "pipefail", "-c", step["run"]],
-        env={
-            **os.environ,
-            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
-            "VERSION": version,
-            "GITHUB_OUTPUT": str(output),
-        },
-        check=True,
-        capture_output=True,
+    done = _bash(
+        _script("quay-on-tag.yml", "docker", "latest"), tmp_path,
+        PATH=_stand_in_git(tmp_path, tags), VERSION=version,
+        GITHUB_OUTPUT=str(output),
     )
+    assert done.returncode == 0, done.stderr
     assert output.read_text() == f"latest={latest}\n"
+
+
+def test_a_failed_tag_lookup_fails_the_image_job(tmp_path):
+    """F143: GitHub runs a `run:` script as `bash -e`, without pipefail, so a
+    failed `git ls-remote` read as "no release is newer" and the job went on
+    to push with :latest left behind."""
+    output = tmp_path / "output"
+    done = _bash(
+        _script("quay-on-tag.yml", "docker", "latest"), tmp_path,
+        PATH=_stand_in_git(tmp_path, [], fails=True), VERSION="0.17.5",
+        GITHUB_OUTPUT=str(output),
+    )
+    assert done.returncode != 0
+    assert not output.exists() or "latest=" not in output.read_text()
+
+
+def test_the_image_pushed_is_the_image_that_was_checked():
+    """F143: the image is built once, run by the smoke script, and that image
+    is pushed. A second build after the check could differ from what ran."""
+    steps = _load("quay-on-tag.yml")["jobs"]["docker"]["steps"]
+    builds = [s for s in steps if s.get("uses", "").startswith("docker/build-push-action@")]
+    assert len(builds) == 1 and builds[0]["with"].get("load") is True
+    assert "push" not in builds[0]["with"]
+    names = [s.get("name", "") for s in steps]
+    smoke = next(i for i, s in enumerate(steps) if "smoke-image.sh" in s.get("run", ""))
+    push = next(i for i, s in enumerate(steps) if "docker push" in s.get("run", ""))
+    assert steps.index(builds[0]) < smoke < push, names
+
+
+def test_every_pull_request_and_release_builds_and_runs_the_image():
+    """F138, F143: the Dockerfile was built only when a tag was pushed, so a
+    broken image was found after PyPI had the release. tests.yml builds it
+    and runs the same smoke script, and publish.yml's `test` runs tests.yml.
+    """
+    tests = _load("tests.yml")
+    for event, ref in [("pull_request", "refs/pull/1/merge"), ("push", TAG)]:
+        results = _run(tests, event, ref)
+        assert results["image"] == "success", event
+    steps = tests["jobs"]["image"]["steps"]
+    assert any("smoke-image.sh" in s.get("run", "") for s in steps)
+    # PyPI needs build, which needs test: the run of tests.yml holding this job.
+    publish = _load("publish.yml")["jobs"]
+    assert "build" in publish["publish-pypi"]["needs"]
+    assert "test" in publish["build"]["needs"]
+
+
+def test_the_lint_runs_on_pull_requests_and_not_inside_a_release():
+    """zizmor's online audits ask GitHub at run time, so on a tag a new
+    advisory or an API outage would stop a release of unchanged code."""
+    tests = _load("tests.yml")
+    assert _run(tests, "pull_request", "refs/pull/1/merge")["workflows"] == "success"
+    assert _run(tests, "push", "refs/heads/main")["workflows"] == "success"
+    assert _run(tests, "push", TAG)["workflows"] == "skipped"
+
+
+@pytest.mark.parametrize(
+    "event, ref, publish, measured, commits",
+    [
+        ("push", TAG, None, "true", True),
+        ("push", TAG, None, "", False),
+        ("workflow_dispatch", TAG, False, "true", False),
+        ("workflow_dispatch", TAG, True, "true", True),
+        ("workflow_dispatch", "refs/heads/main", True, "true", True),
+        ("workflow_dispatch", "refs/heads/main", False, "true", False),
+    ],
+    ids=[
+        "tag", "tag-not-measured", "dispatch-from-tag", "dispatch-from-tag-publish",
+        "dispatch-from-branch-publish", "dispatch-from-branch",
+    ],
+)
+def test_benchmark_results_are_committed_only_when_measured_and_asked_for(
+    event, ref, publish, measured, commits
+):
+    """F084, F085: the job that can push runs only after a measurement, and
+    a dispatch from a tag that did not ask to publish no longer overwrites
+    that release's results with another tier."""
+    inputs = {"publish": publish} if publish is not None else {}
+    results = _run(
+        _load("benchmark.yml"), event, ref, inputs,
+        outputs={"benchmark": {"measured": measured}},
+    )
+    assert (results["publish"] == "success") == commits
+
+
+LEVELS = {"none": 0, "read": 1, "write": 2}
+
+
+def test_a_called_workflow_asks_for_no_more_than_its_caller_grants():
+    """F142: a called workflow's jobs get no more than the calling job
+    grants, and one that asks for more fails the whole run as it starts:
+    on a tag, no release at all."""
+    for name in _workflows():
+        workflow = _load(name)
+        for job_name, job in workflow["jobs"].items():
+            uses = job.get("uses", "")
+            if not uses.startswith("./"):
+                continue
+            granted = job.get("permissions", workflow.get("permissions"))
+            assert isinstance(granted, dict), f"{name}: {job_name} grants nothing explicit"
+            called = _load(Path(uses).name)
+            for inner_name, inner in called["jobs"].items():
+                asked = inner.get("permissions", called.get("permissions")) or {}
+                for scope, level in asked.items():
+                    assert LEVELS[level] <= LEVELS[granted.get(scope, "none")], (
+                        f"{name}: {job_name} grants {scope}: "
+                        f"{granted.get(scope, 'none')}, but {Path(uses).name}: "
+                        f"{inner_name} asks for {level}"
+                    )
 
 
 @pytest.mark.parametrize("name", _workflows())
@@ -183,7 +348,9 @@ def test_every_job_says_what_its_token_may_do(name):
         assert "permissions" in job or "permissions" in workflow, f"{name}: {job_name}"
 
 
-INSTALLS = re.compile(r"(^|[\s;&|(])(uv|uvx|pip3?|pipx|conda|npm|curl|wget)\s")
+INSTALLS = re.compile(
+    r"(^|[\s;&|(])(uv|uvx|pip3?|pipx|conda|mamba|npm|npx|cargo|gem|apt|apt-get|curl|wget)\s"
+)
 
 
 @pytest.mark.parametrize("name", _workflows())

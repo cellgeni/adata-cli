@@ -218,18 +218,20 @@ an item to Released when its tag is out.
   - entries that start with a bold one-line lead and an issue link.
 - Merge the release branch, then push a tag with no `v` prefix. The tag
   triggers:
-  - `publish.yml`, which checks that the tag matches pyproject, tests, builds
-    and publishes to PyPI, then calls `quay-on-tag.yml` to build the Docker
-    image, check that it runs, and push it to `quay.io/cellgeni/adata-cli`.
-    If the tests fail or the tag does not match, nothing is published and
-    `:latest` does not move;
+  - `publish.yml`, which checks that the tag matches pyproject, tests
+    (`tests.yml`, including a build and smoke test of the Docker image),
+    builds and publishes to PyPI, then calls `quay-on-tag.yml` to build the
+    image, check that it runs, and push that image to
+    `quay.io/cellgeni/adata-cli`. If the tests fail or the tag does not
+    match, nothing is published. `:latest` moves only to the highest
+    `X.Y.Z` tag;
   - `benchmark.yml`, which reruns `benchmarks/` and commits the results to
     `docs/reference/benchmarks.md` and `docs/benchmarks/<tag>.json`. The job
     that measures has a read-only token; the one that commits installs
     nothing.
 - A manual `Publish` dispatch to `testpypi` publishes there alone, from any
   ref. One to `pypi` publishes, and pushes the image, only when run from a
-  tag.
+  tag; from a branch it fails.
 - Workflows pin third-party actions by commit SHA, with the version in a
   comment, and pass tags and inputs to scripts through `env:`.
   `tests/test_release_pipeline.py` and the `workflow lint` job check both.

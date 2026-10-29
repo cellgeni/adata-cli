@@ -35,10 +35,15 @@ before testing anything. uv takes its interpreter from `.python-version`
 suite on 3.12; the workflow now sets `UV_PYTHON` for each leg.
 
 The workflows are tested too. Publishing, the image and the benchmark run
-only on a tag, so a pull request never runs them; `test_release_pipeline.py`
-reads them and works out which jobs publish in each kind of run, and the
-`workflow lint` job runs [actionlint](https://github.com/rhysd/actionlint)
-and [zizmor](https://docs.zizmor.sh) over them.
+only on a tag, so a pull request never runs them. `test_release_pipeline.py`
+reads them, works out which jobs publish in each kind of run, and runs their
+scripts against stand-ins. The `workflow lint` job runs
+[actionlint](https://github.com/rhysd/actionlint) and
+[zizmor](https://docs.zizmor.sh) over them on every pull request, though not
+inside a release, where an advisory published that day would stop it. The
+`container image` job builds the Docker image and runs
+`.github/scripts/smoke-image.sh` against it, on every pull request and inside
+every release before PyPI has it.
 
 ## How the suite is organised
 

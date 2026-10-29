@@ -333,8 +333,10 @@ def test_vs_previous_only_compares_runs_at_the_same_tier(tmp_path):
 
 
 def test_every_published_run_compares_with_the_release_before_it():
-    """Checked against the runs in docs/benchmarks/, with packaging's
-    version ordering as the oracle."""
+    """F085, checked against the runs in docs/benchmarks/, with packaging's
+    version ordering as the oracle. A dispatch with `publish` stores a run
+    named by its commit; that is no release, and compares with the newest."""
+    import re
     from pathlib import Path
 
     from packaging.version import Version
@@ -343,15 +345,38 @@ def test_every_published_run_compares_with_the_release_before_it():
 
     store = Path(__file__).parents[1] / "docs" / "benchmarks"
     runs = {path.stem: json.loads(path.read_text()) for path in store.glob("*.json")}
-    assert len(runs) >= 2
+    releases = {ref: run for ref, run in runs.items() if re.fullmatch(r"\d+\.\d+\.\d+", ref)}
+    assert len(releases) >= 2
     for ref, payload in runs.items():
         earlier = [
-            other for other, run in runs.items()
-            if Version(other) < Version(ref) and run["tier"] == payload["tier"]
+            other for other, run in releases.items()
+            if run["tier"] == payload["tier"]
+            and (ref not in releases or Version(other) < Version(ref))
         ]
         expected = max(earlier, key=Version) if earlier else None
         found = _previous(store, payload)
         assert (found and found["ref"]) == expected, ref
+
+
+def test_a_stored_dispatch_does_not_break_the_comparison(tmp_path):
+    """A `Benchmark` dispatch with `publish` commits `docs/benchmarks/<sha>.json`.
+    The check above once fed that name to Version() and failed on main."""
+    import shutil
+    from pathlib import Path
+
+    store = Path(__file__).parents[1] / "docs" / "benchmarks"
+    for path in store.glob("*.json"):
+        shutil.copy(path, tmp_path / path.name)
+    (tmp_path / "8d779d6.json").write_text(json.dumps(_run("8d779d6")))
+
+    from benchmarks.report import _previous
+
+    newest = max(
+        (p.stem for p in store.glob("*.json")),
+        key=lambda ref: tuple(int(part) for part in ref.split(".")),
+    )
+    assert _previous(tmp_path, _run("8d779d6"))["ref"] == newest
+    assert _previous(tmp_path, _run("99.0.0"))["ref"] == newest
 
 
 def test_the_page_names_the_run_it_compares_with(tmp_path):

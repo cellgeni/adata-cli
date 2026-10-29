@@ -50,8 +50,9 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      # Prefer an action over curl|sh. Every workflow names the same uv, so a
-      # release builds and publishes with the uv this suite ran on.
+      # Prefer an action over curl|sh. Every workflow names the same uv, so
+      # a release's build and benchmark use the uv this suite ran on. (The
+      # image has its base's own uv.)
       - name: Set up uv
         uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3.2.4
         with:
@@ -179,9 +180,15 @@ jobs:
   # publish.yml, quay-on-tag.yml and benchmark.yml run only on a tag, so no
   # pull request runs them. actionlint parses every workflow as GitHub will
   # and shellchecks its scripts; zizmor audits them for injection, unpinned
-  # actions and excess permissions. Both pinned, so that a new release of
-  # either cannot fail a pull request that changed nothing.
+  # actions and excess permissions. Both are pinned, but zizmor's online
+  # audits still ask GitHub, and a new advisory against a pinned action
+  # fails this job.
+  #
+  # Not on a tag: there this workflow runs inside publish.yml, and the
+  # release PR has already been linted. A new advisory, or GitHub's API
+  # being down, must not stop a release of code that has not changed.
   workflows:
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     name: workflow lint
@@ -208,6 +215,37 @@ jobs:
           # belongs to its action and whether that version has an advisory.
           GH_TOKEN: ${{ github.token }}
         run: uvx zizmor==1.31.1 --format github .github/workflows
+
+  # The Docker image, built and run as quay-on-tag.yml will push it, but not
+  # pushed. On a tag this workflow runs inside publish.yml, so an image that
+  # does not build or run stops the release before PyPI has it.
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    name: container image
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          tags: adata-cli:candidate
+
+      - name: The image runs, as its own user and as the caller's
+        run: |
+          version=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          bash .github/scripts/smoke-image.sh adata-cli:candidate "$version"
 
   # Builds a store with each pinned anndata release and checks the CLI against
   # it. Split out because it assembles six environments with uv, which needs

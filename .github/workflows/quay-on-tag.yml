@@ -40,7 +40,10 @@ jobs:
         id: latest
         env:
           VERSION: ${{ inputs.version }}
+        # GitHub runs a bare `run:` without pipefail, which would let a failed
+        # ls-remote pass for "no newer release" and leave :latest behind.
         run: |
+          set -o pipefail
           newest=$(git ls-remote --tags --refs origin \
             | sed 's#.*refs/tags/##' \
             | { grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' || true; } \
@@ -61,45 +64,23 @@ jobs:
             type=raw,value=${{ inputs.version }}
             type=raw,value=latest,enable=${{ steps.latest.outputs.latest == 'true' }}
 
-      # Built into the local daemon first, so that an image which does not
-      # run is never pushed. The push below rebuilds from this builder's
-      # cache. No cache from earlier runs: a release image is built from the
-      # pinned base, duckdb and lock alone.
+      # Built into the local daemon, checked, and then that same image is
+      # pushed: nothing is rebuilt after the check. No cache from earlier
+      # runs: a release image is built from the pinned base, duckdb and lock
+      # alone.
       - name: Build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: Dockerfile
           load: true
-          tags: adata-cli:candidate
+          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
       - name: The image runs, as its own user and as the caller's
         env:
           VERSION: ${{ inputs.version }}
-        run: |
-          image=adata-cli:candidate
-          docker run --rm "$image" adata --help > /dev/null
-          reported=$(docker run --rm "$image" adata --version)
-          if [ "$reported" != "$VERSION" ]; then
-            echo "::error::the image reports $reported, the release is $VERSION"
-            exit 1
-          fi
-          if [ "$(docker run --rm "$image" id -u)" = 0 ]; then
-            echo "::error::the image runs as root"
-            exit 1
-          fi
-          docker run --rm "$image" duckdb -c "select 42"
-          # As a pipeline runs it: the caller's user id, on a bind mount.
-          mkdir smoke
-          printf ',g1,g2,g3\nc1,0,1,2\nc2,3,4,5\nc3,6,7,8\n' > smoke/counts.csv
-          run() {
-            docker run --rm --user "$(id -u):$(id -g)" --read-only --tmpfs /tmp \
-              -v "$PWD/smoke":/data "$image" "$@"
-          }
-          run adata convert /data/counts.csv -o /data/counts.h5ad
-          run adata convert /data/counts.h5ad -o /data/counts.zarr
-          run adata view /data/counts.zarr
+        run: bash .github/scripts/smoke-image.sh "quay.io/cellgeni/adata-cli:$VERSION" "$VERSION"
 
       - name: Login to Quay
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
@@ -108,11 +89,10 @@ jobs:
           username: ${{ secrets.QUAY_USERNAME }}
           password: ${{ secrets.QUAY_TOKEN }}
 
-      - name: Build and push
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
-        with:
-          context: .
-          file: Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+      - name: Push the image that was checked
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          while read -r tag; do
+            if [ -n "$tag" ]; then docker push "$tag"; fi
+          done <<< "$TAGS"

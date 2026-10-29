@@ -7,8 +7,8 @@ name: Publish
 #   a pushed tag                            PyPI, then the image
 #   workflow_dispatch, target testpypi      TestPyPI only, from any ref
 #   workflow_dispatch, target pypi          PyPI, then the image; from a tag
-#                                           only, as check-version runs for
-#                                           tags alone
+#                                           only, as check-version refuses a
+#                                           branch
 #
 # Nothing publishes unless the suite passed, and nothing reaches PyPI or
 # quay.io unless the tag matches pyproject.toml.
@@ -33,7 +33,9 @@ jobs:
   # before, and 0.3.2 was tagged against a tree declaring 0.3.1.
   check-version:
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    # Every tag, and every dispatch to PyPI: one from a branch fails here,
+    # rather than pass having published nothing.
+    if: startsWith(github.ref, 'refs/tags/') || inputs.target == 'pypi'
     permissions:
       contents: read
     outputs:
@@ -45,6 +47,10 @@ jobs:
       - name: Tag must match the declared version
         id: version
         run: |
+          if [ "$GITHUB_REF_TYPE" != tag ]; then
+            echo "::error::Publish to PyPI from a tag, not from $GITHUB_REF_NAME"
+            exit 1
+          fi
           declared=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
           tag="${GITHUB_REF_NAME}"
           echo "pyproject: $declared, tag: $tag"
@@ -55,7 +61,7 @@ jobs:
           echo "version=$declared" >> "$GITHUB_OUTPUT"
 
   test:
-    uses: ./.github/workflows/tests.yml
+    uses: ./.github/workflows/tests.yml # zizmor: ignore[self-repository] actionlint 1.7 predates $/
     # A called workflow gets no more than its caller grants, and the unit
     # job in tests.yml writes a check run and comments on pull requests.
     permissions:
@@ -78,7 +84,7 @@ jobs:
           enable-cache: false
       - run: uv build
       - name: Check metadata renders on PyPI
-        run: uvx twine check dist/*
+        run: uvx twine==7.0.0 check dist/*
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist
@@ -101,10 +107,9 @@ jobs:
           repository-url: https://test.pypi.org/legacy/
 
   publish-pypi:
-    # Both must succeed: a job whose need was skipped is skipped too, so a
-    # dispatch from a branch, where check-version does not run, publishes
-    # nothing. The event test is what keeps a TestPyPI dispatch from a tag
-    # off PyPI; up to 0.17.4 any run from a tag published here.
+    # Both must succeed, and check-version refuses anything but a tag. The
+    # event test is what keeps a TestPyPI dispatch from a tag off PyPI; up
+    # to 0.17.4 any run from a tag published here.
     needs: [build, check-version]
     if: github.event_name == 'push' || inputs.target == 'pypi'
     runs-on: ubuntu-latest
@@ -124,7 +129,7 @@ jobs:
     needs: [check-version, publish-pypi]
     permissions:
       contents: read
-    uses: ./.github/workflows/quay-on-tag.yml
+    uses: ./.github/workflows/quay-on-tag.yml # zizmor: ignore[self-repository] as above
     with:
       version: ${{ needs.check-version.outputs.version }}
     secrets:

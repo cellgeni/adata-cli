@@ -105,7 +105,9 @@ jobs:
   publish:
     name: Commit the results to docs/
     needs: [benchmark]
-    if: needs.benchmark.outputs.measured == 'true' && (github.ref_type == 'tag' || inputs.publish)
+    # A pushed tag, or a dispatch that asks. A dispatch from a tag that does
+    # not ask must not overwrite that release's results with another tier.
+    if: needs.benchmark.outputs.measured == 'true' && (github.event_name == 'push' || inputs.publish)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     continue-on-error: true
