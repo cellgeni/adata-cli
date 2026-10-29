@@ -947,3 +947,84 @@ def test_too_many_embeddings_for_hdf5_are_refused_before_writing(tmp_path, monke
     assert result.exit_code == 1
     assert "2 embeddings (two-column obsm arrays) are more than HDF5 can hold" in _out(result)
     assert not out.exists()
+
+
+def test_a_scope_export_from_any_backend_writes_the_same_loom(tmp_path, new_store, backend):
+    """F009: an annotation's categories were counted with len(), which a
+    zarr-python 3 Array does not have, so --scope from any Zarr store
+    failed before writing."""
+    from adata.elements import write as ew
+
+    path, opened = new_store("scope")
+    with opened() as root:
+        ew.write_categorical(root["obs"], "tissue", [0, 1, 0], ["brain", "gut"])
+        ew.write_categorical(root["obs"], "leiden", [1, 0, 1], ["0", "1"])
+        ew.write_dense(root["obs"], "n_genes", np.array([5, 6, 7], dtype=np.int64))
+        ew.set_column_order(root["obs"], ["tissue", "leiden", "n_genes"])
+        ew.write_dense(root, "X", np.arange(6, dtype=np.float32).reshape(3, 2))
+        ew.write_dense(root["obsm"], "X_umap", np.arange(6, dtype=np.float64).reshape(3, 2))
+    ref = _read(path)
+
+    out = tmp_path / f"{backend}.loom"
+    _ok(path, "-o", out, "--scope", "--clusterings", "leiden")
+    loom = _scope_loom(out)
+    meta = loom["meta"]
+    assert meta["annotations"] == [{"name": "tissue", "values": list(ref.obs["tissue"].cat.categories)}]
+    assert meta["metrics"] == [{"name": "n_genes"}]
+    assert [c["description"] for c in meta["clusterings"][0]["clusters"]] == list(ref.obs["leiden"].cat.categories)
+    assert list(loom["cols"]["Clusterings"]["0"]) == list(ref.obs["leiden"].cat.codes)
+    assert [v.decode() for v in loom["cols"]["tissue"]] == list(ref.obs["tissue"])
+    assert np.array_equal(
+        np.column_stack([loom["cols"]["Embedding"]["_X"], loom["cols"]["Embedding"]["_Y"]]), ref.obsm["X_umap"]
+    )
+
+
+def _compressed(text: str) -> str:
+    import base64
+    import zlib
+
+    return base64.b64encode(zlib.compress(text.encode())).decode()
+
+
+def test_metadata_that_decompresses_past_the_bound_is_kept_as_text(tmp_path, monkeypatch):
+    """F139: MetaData was decompressed whole, however large it came out;
+    past the bound it is now malformed, kept as the text it came as."""
+    from adata.conversion import scope
+
+    monkeypatch.setattr(scope, "MAX_METADATA_BYTES", 4096)
+    truth = write_scope_loom(tmp_path / "scope.loom")
+    padded = json.dumps(dict(truth.metadata, padding="x" * 5000))
+    text = _compressed(padded)
+    assert len(text) < 4096 < len(padded)
+    _set_metadata(truth.path, text)
+    out = tmp_path / "out.h5ad"
+    result = _ok(truth.path, "-o", out)
+    assert "MetaData is neither JSON nor compressed JSON" in _out(result)
+    got = _read(out)
+    assert got.uns["scope"]["metadata"] == text
+    assert "X_embedding_0" in got.obsm, "named by id, as for any metadata not read"
+
+    # Within the bound it reads as ever.
+    _set_metadata(truth.path, _compressed(json.dumps(truth.metadata)))
+    _ok(truth.path, "-o", tmp_path / "small.h5ad")
+    assert json.loads(_read(tmp_path / "small.h5ad").uns["scope"]["metadata"]) == truth.metadata
+
+
+@pytest.mark.parametrize("spoil", ["truncated", "trailing"])
+def test_bounded_metadata_reads_as_zlib_reads_a_stream_cut_short_or_followed_by_more(spoil):
+    """F139: the bounded reader takes what zlib.decompress took, and no more:
+    a stream cut short is malformed, and bytes after its end are ignored,
+    as they were."""
+    import base64
+    import zlib
+
+    from adata.conversion import scope
+
+    whole = zlib.compress(json.dumps({"embeddings": []}).encode())
+    data = whole[:-6] if spoil == "truncated" else whole + b"junk"
+    text = base64.b64encode(data).decode()
+    try:
+        expected = json.loads(zlib.decompress(data, 47))
+    except zlib.error:
+        expected = None
+    assert scope.read_metadata(text)[0] == expected
