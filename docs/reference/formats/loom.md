@@ -28,7 +28,7 @@ adata convert counts.h5ad -o counts.loom
 | loom | AnnData |
 |---|---|
 | `/matrix`, or `/layers/spliced` when there is one | `X`, CSR (`--dense` keeps it dense) |
-| `/layers/<name>`, and `/matrix` when X is `spliced` | `layers[<name>]`, `layers["matrix"]` |
+| `/layers/<name>`, and `/matrix` when X is a layer | `layers[<name>]`, `layers["matrix"]` (`layers["matrix_1"]` when a layer is named `matrix`) |
 | `col_attrs` with one value per cell / several | obs columns / obsm |
 | `row_attrs`, the same way | var columns / varm |
 | compound `col_attrs` and `row_attrs`, a field per column | dataframes in obsm and varm |
@@ -37,17 +37,21 @@ adata convert counts.h5ad -o counts.loom
 
 | Flag | Meaning |
 |---|---|
-| `--layer` | The loom layer that becomes X: `matrix` (the main one) or a layer name |
+| `--layer` | The loom layer that becomes X: `matrix` (the main one) or a layer name (default `spliced` when there is one, else `matrix`) |
 | `--dense` | Keep X and the layers dense |
-| `--obs-names-attr` | The attribute naming cells (default `CellID`, else `cell_id`, `obs_names` or `barcode`) |
-| `--var-names-attr` | The attribute naming genes (default the ids: `Accession` or `gene_id`) |
+| `--var-names` | `gene_ids` (default) to name genes by id, `gene_symbols` by symbol; each falls back to the other when the loom records only one |
+| `--make-unique` | Suffix repeated gene names (`-1`, `-2`, ...) as anndata's `var_names_make_unique` does |
+| `--obs-names-attr` | The attribute naming cells (default the first there of `CellID`, `cell_id`, `obs_names`, `barcode` and `barcodes`; without one, cells are numbered) |
+| `--var-names-attr` | The attribute naming genes (default the first there of the ids, `Accession`, `gene_id` and `gene_ids`, then of the symbols, `Gene`, `gene_name`, `gene_names`, `gene_symbols` and `Name`; symbols first with `--var-names gene_symbols`; without one, genes are numbered) |
 
 Reading gives what `anndata.read_loom` gives, checked against it in CI, with
-three differences: values keep their dtype (velocyto's integer counts stay
-integers, where anndata makes X float32); graphs and global attributes are
-kept, where anndata drops them; and genes are named by id (`Accession`),
-the symbols (`Gene`) staying a column, unless `--var-names gene_symbols` is
-given. Strings are read as loompy reads them, with XML references such as
+four differences: values keep their dtype (velocyto's integer counts stay
+integers, where anndata makes X float32); graphs, global attributes, and a
+main matrix that a layer named `matrix` would hide are kept, where anndata
+drops them; genes are named by id (`Accession`), the symbols (`Gene`)
+staying a column, unless `--var-names gene_symbols` is given; and compound
+attributes, which loompy's validator rejects, so that anndata refuses the
+file, become dataframes (see [SCope looms](#scope-looms)). Strings are read as loompy reads them, with XML references such as
 `&#233;` turned back into characters. Looms from other writers read too:
 R's LoomExperiment (graph vertices stored as floats), Baysor (genes in a
 `Name` attribute, and a `.loom` holding the matrix alone, which is
@@ -55,17 +59,35 @@ recognised by its name), and R's writers' factors and logicals, which
 become categoricals and booleans rather than their codes.
 
 The matrix is read a slab of cells at a time, a whole number of the file's
-64-cell chunks, so each chunk is decompressed once and memory is set by the
-slab, not the file.
+chunks along the cells (loompy writes 64 x 64 chunks), so each chunk is
+decompressed once and memory is set by the slab, not the file. A loom
+chunked otherwise is read as a [plain HDF5 matrix](hdf5.md) is: slabs as
+wide as memory allows cut through a chunk that spans more cells than a slab
+holds, and a chunk that spans the cells is read a few chunks at a time, its
+entries sorted into cells through on-disk buckets.
 
 Writing produces a spec 3.0.0 loom that loompy reads and validates: X (or
 the matrix `--layer` names) as `/matrix`, every layer, obs and var as
 attributes (`CellID`; `Gene` for symbols and `Accession` for ids), 2-D obsm
 and varm, obsp and varp as graphs, and uns scalars as global attributes.
+anndata 0.7's categoricals are written as their labels, as current ones are.
 Strings are written as loompy writes them, ASCII with XML references. A
 loom's matrices are dense by definition: the summary gives their size before
 compression, and above 10 GB a warning says it will take a while. Chunks
 holding only zeros compress to almost nothing.
+
+| Flag | Meaning |
+|---|---|
+| `--layer` | The matrix that becomes `/matrix` (default X): a layer's name, or `raw/X`, written with raw/var's genes and without X and the layers. X, when there is one, is then written as a layer |
+
+A store without X needs `--layer`, and is refused without it before
+anything is written. A loom's attributes share one flat namespace per
+axis: where two elements ask for one name, the loom's own attributes keep
+theirs (`CellID`, `Gene`, `Accession`), then the obs and var columns, then
+the obsm and varm arrays, and the others are left out with a warning. So an
+obs column named `CellID`, or a var column named `Gene` beside the
+`gene_symbols` that `Gene` is written from, is left out, as is an obsm
+entry named like an obs column.
 
 ## SCope looms
 
@@ -97,7 +119,8 @@ with a warning. A clustering named like an obs column already there gets a
 suffix (`Tissue_1`), with a note; one `MetaData` does not name is called
 `clustering_<id>`, and an embedding `X_embedding_<id>`. A value with no
 cluster in `MetaData` is missing. `MetaData` that is neither JSON nor
-base64 of compressed JSON is kept as text, with a warning; the embeddings
+base64 of compressed JSON, or that decompresses to more than 64 MiB, is
+kept as text, with a warning; the embeddings
 and clusterings are then named by id, and a clustering's categories are the
 ids found.
 
@@ -141,17 +164,17 @@ lose their spaces (`TP53 (5g)` becomes `TP53_(5g)`, alike in the AUC and
 the Regulons, with a warning), and cluster markers are written only as
 `ClusterMarkers_<id>` with their metrics (`ClusterMarkers_<id>_avg_logFC` and the like, which
 `clusterMarkerMetrics` then lists, under the names a SCope import recorded), their fields renumbered with the clusters; a
-clustering `--clusterings` names owns `ClusterMarkers_<its id>`. `ClusterID` is always written afresh from the first
-clustering, in place of an obs column of that name, so the two cannot
-disagree. `MetaData` is plain JSON, which SCope reads as it
+clustering `--clusterings` names owns `ClusterMarkers_<its id>`. When there are clusterings, `ClusterID` is written afresh from the first
+one, in place of an obs column of that name, so the two cannot
+disagree; without any, an obs column `ClusterID` is written as any other. `MetaData` is plain JSON, which SCope reads as it
 reads compressed. A clustering that is not categorical is refused, as is a
 table with more columns than HDF5 can hold in one compound attribute (its
 type must fit 64 KiB, a limit pySCENIC's own export shares), before any
-output exists. Attributes are written a block of cells at a time. A loom's
-attributes share one flat namespace per axis, with or without `--scope`:
-where an obs column, an obsm entry or one of SCope's parts ask for one name,
-the first keeps it (loom's and SCope's own attributes, then columns, SCope's
-tables, arrays) and the others are left out with a warning.
+output exists. Attributes are written a block of cells at a time. The
+flat namespace holds SCope's parts too: where an obs column, an obsm entry
+or one of SCope's parts ask for one name, the first keeps it (loom's and
+SCope's own attributes, then columns, SCope's tables, arrays) and the
+others are left out with a warning.
 
 SCope opens looms without loompy's validation, which rejects compound
 attributes; so do `loompy.connect(..., validate=False)` and the pySCENIC
