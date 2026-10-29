@@ -436,10 +436,17 @@ _EXPORT_CORE = frozenset({"gene_ids", "gene_symbols", "probe_ids", "feature_type
 
 
 def _field(var: Any, key: str) -> Any:
-    """A var column as a feature dataset holds it: bool, or strings."""
+    """A var column as a feature dataset holds it: bool, or strings.
+
+    A pandas nullable boolean is bool too while no value is missing, which
+    a 10x file has no way to say.
+    """
     obj = var[key]
     if is_dataset(obj) and "categories" not in obj.attrs and obj.dtype.kind == "b":
         return np.asarray(obj[...], dtype=bool)
+    if is_group(obj) and spec.encoding_type(obj) == spec.NULLABLE_BOOLEAN:
+        if not np.asarray(obj["mask"][...], dtype=bool).any():
+            return np.asarray(obj["values"][...], dtype=bool)
     return read_str_all(obj, parent_group=var)
 
 

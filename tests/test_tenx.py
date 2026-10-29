@@ -474,6 +474,24 @@ def test_a_probe_level_matrix_round_trips_to_the_same_file(tmp_path, flags, suff
         assert before[key][1] == after[key][1], key
 
 
+@pytest.mark.parametrize("dtype", ["bool", "boolean"])
+def test_a_boolean_field_rewritten_by_anndata_exports_as_bool(tmp_path, dtype):
+    """F048: a boolean field went out as 'True'/'False' strings. Read and
+    written again by anndata, as numpy bool or pandas' nullable boolean, it
+    must still go out as bool."""
+    flex, h5ad, back = _flex(tmp_path / "flex.h5"), tmp_path / "x.h5ad", tmp_path / "back.h5"
+    _ok(flex, "-o", h5ad)
+    obj = ad.read_h5ad(h5ad)
+    obj.var["filtered_probes"] = obj.var["filtered_probes"].astype(dtype)
+    obj.write_h5ad(h5ad)
+    _ok(h5ad, "-o", back)
+    with h5py.File(flex) as before, h5py.File(back) as after:
+        expected = before["matrix/features/filtered_probes"]
+        got = after["matrix/features/filtered_probes"]
+        assert got.dtype == expected.dtype == bool
+        assert list(got[...]) == list(expected[...])
+
+
 def test_make_unique_keeps_the_gene_ids_it_suffixes(tmp_path):
     """F045: naming a Flex matrix's features by gene id with --make-unique
     suffixed the ids, and nothing kept the real ones."""
