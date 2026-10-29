@@ -10,7 +10,8 @@ as anndata's `_read_text` finds it:
 * the first column names the rows when its first value is not a number. A
   header with a field more than the values has a corner cell, and one with
   as many (R's `write.table`) names only the columns;
-* names have `"` stripped; blank lines are skipped.
+* names have `"` stripped; blank lines are skipped, and a UTF-8 byte order
+  mark before the first line.
 
 `--transpose` reads a file that holds genes as rows, as count tables often
 do, and `--first-column-names` / `--no-first-column-names` overrides the
@@ -18,7 +19,8 @@ row-name detection.
 
 Values keep integers: a file whose every value is whole gives int32 or
 int64, as MTX import chooses; any other gives float64, which holds what the
-text holds. `recast` can narrow either.
+text holds. `recast` can narrow either. A field that is empty (pandas writes
+NaN so) or not a number is refused by line and column, as anndata refuses it.
 
 The file is read twice, a block of lines at a time, each block parsed by
 numpy with Python work only per line, to cut off its name:
@@ -79,6 +81,9 @@ DENSE_CHUNK_BYTES = 64 << 20
 #: Entries per bucket read when sorting a transposed file into rows.
 BUCKET_ENTRIES = 1 << 20
 
+#: What Windows tools often start a UTF-8 file with; no part of its text.
+BOM = b"\xef\xbb\xbf"
+
 
 def _is_float(text: str) -> bool:
     try:
@@ -128,6 +133,8 @@ def _lines(path: Path, block_bytes: int) -> Iterator[Tuple[List[int], List[bytes
     number = 0
     with open_binary(path) as fh:
         for block in iter_line_blocks(fh, block_bytes):
+            if number == 0 and block.startswith(BOM):
+                block = block[len(BOM):]
             numbers, lines = [], []
             for line in block.split(b"\n"):
                 number += 1
@@ -285,40 +292,52 @@ class _Reader:
                 rests.append(parts[1])
             lines = rests
         width = self.layout.width
+        count = len(lines) * width
         text = b"\n".join(lines)
-        if (_fields(text, self.raw, len(lines)) != width).any():
+        if (_fields(text, self.raw, len(lines)) != width).any() or _misshapen(
+            text, self.raw, count
+        ):
             self._diagnose(numbers, lines)
-        if self.raw is not None:
-            text = text.replace(b"\n", self.raw)
+        # One field more than the block holds, after a delimiter: numpy stops
+        # at its count without looking past the last value, so without it a
+        # last 4.5 parsed as the integer 4, and a last empty field was left
+        # to whatever memory held.
+        text = (self.raw or b"\n").join(lines + [b"0"])
         values = None
         if not self.floats:
-            values = self._numbers(text, np.int64, len(lines) * width)
+            values = self._numbers(text, np.int64, count)
             info = np.iinfo(np.int64)
-            if values is None or values.size != len(lines) * width or (
+            if values is None or (
                 # fromstring saturates at the limits rather than failing.
-                values.size and (values.max() == info.max or values.min() == info.min)
+                values.max() == info.max or values.min() == info.min
             ):
                 values, self.floats = None, True
         if values is None:
-            values = self._numbers(text, np.float64, len(lines) * width)
-        if values is None or values.size != len(lines) * width:
+            values = self._numbers(text, np.float64, count)
+        if values is None:
             self._diagnose(numbers, lines)
         return names, values.reshape(len(lines), width)
 
     def _numbers(self, text: bytes, dtype: Any, count: int) -> Optional[np.ndarray]:
-        """`count` numbers from `text`, whose fields have been counted.
+        """The `count` numbers of `text`, which `_misshapen` has passed and
+        which ends in one more field, a 0; None when one is no number.
 
         The count matters for memory as well as speed: without one, numpy
         grows its buffer as it parses, and the fragments kept the process
-        hundreds of megabytes above the block.
+        hundreds of megabytes above the block. With one, numpy pads what it
+        could not read rather than failing, so the extra field must come
+        back as it was written.
         """
         with warnings.catch_warnings():
             # A token that is no number ends the parse early, with a warning.
             warnings.simplefilter("error", DeprecationWarning)
             try:
-                return np.fromstring(text, dtype=dtype, sep=self.sep, count=count)
+                values = np.fromstring(text, dtype=dtype, sep=self.sep, count=count + 1)
             except (ValueError, DeprecationWarning):
                 return None
+        if values.size != count + 1 or values[count] != 0:
+            return None
+        return values[:count]
 
     def _diagnose(self, numbers: List[int], lines: List[bytes]) -> None:
         """Find the line that would not parse, and refuse it by number."""
@@ -331,6 +350,12 @@ class _Reader:
                     f"{width:,} as the first data line does."
                 )
             for column, value in enumerate(fields, start=1 + self.layout.row_names):
+                if not value.strip():
+                    raise ValueError(
+                        f"{name}: line {number:,}, column {column:,} is empty: a "
+                        "missing value, as pandas writes NaN, or a delimiter that "
+                        "ends the line. Neither is a number."
+                    )
                 if not _is_float(value):
                     raise ValueError(
                         f"{name}: line {number:,}, column {column:,}: {value!r} is "
@@ -356,6 +381,35 @@ def _fields(text: bytes, delimiter: Optional[bytes], n_lines: int) -> np.ndarray
         starts[1:] &= space[:-1]
         marks, extra = np.flatnonzero(starts), 0
     return np.diff(np.searchsorted(marks, ends)) + extra
+
+
+def _misshapen(text: bytes, delimiter: Optional[bytes], count: int) -> bool:
+    """Whether a field of `text` is empty or spaces alone, or, when the
+    delimiter is a space itself (a tab), holds two numbers.
+
+    numpy reads a delimiter that is a space as any run of spaces, so it
+    reads two delimiters in a row as one and a space inside a field as
+    another; either moves every later value of the block. Runs of spaces
+    (`delimiter` None) are fields themselves, so neither can happen.
+    """
+    if delimiter is None:
+        return False
+    buffer = np.frombuffer(text, dtype=np.uint8)
+    edge = buffer == 10
+    edge |= buffer == delimiter[0]
+    solid = _SPACE[buffer]
+    solid |= edge
+    np.logical_not(solid, out=solid)
+    # Edges and solid bytes in order: an empty field is two edges in a row,
+    # or one at either end.
+    kinds = edge[edge | solid]
+    if not kinds.size or kinds[0] or kinds[-1] or (kinds[1:] & kinds[:-1]).any():
+        return True
+    if _SPACE[delimiter[0]]:
+        # Each field one run of solid bytes: as many runs as fields.
+        starts = int(solid[0]) + int(np.count_nonzero(solid[1:] & ~solid[:-1]))
+        return starts != count
+    return False
 
 
 def scan(path: Path, layout: Layout, transpose: bool) -> Scan:
@@ -425,6 +479,12 @@ class TextImport(Converter):
             raise ValueError(
                 f"--delimiter {options.delimiter!r}: give one character, or "
                 "tab, comma or whitespace."
+            )
+        if delimiter is not None and (delimiter.isalnum() or delimiter in "+-."):
+            # numpy reads '1.5' or '1e5' as one number, whatever the delimiter.
+            raise ValueError(
+                f"--delimiter {delimiter!r}: a number can hold it, so values "
+                "could not be told apart. Give another character."
             )
         layout = detect(source, delimiter, options.first_column_names)
         scanned = scan(source, layout, options.transpose)
