@@ -1,49 +1,100 @@
 name: Build & Push Docker image (tag)
 
+# Called by publish.yml once a tag has passed the suite, matched
+# pyproject.toml and reached PyPI; nothing triggers it on its own. Up to
+# 0.17.4 it ran on every tag by itself, so a tag whose tests failed, or that
+# named the wrong version, still pushed an image and moved :latest.
 on:
-  push:
-    tags:
-      - "*"
+  workflow_call:
+    inputs:
+      version:
+        description: The release, already checked against the tag and pyproject.toml
+        required: true
+        type: string
+    secrets:
+      QUAY_USERNAME:
+        required: true
+      QUAY_TOKEN:
+        required: true
 
-concurrency:
-  group: docker-${{ github.ref }}
-  cancel-in-progress: true
+permissions: {}
 
 jobs:
   docker:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: quay.io/cellgeni/adata-cli
+          tags: |
+            type=raw,value=${{ inputs.version }}
+            # push "latest" only for versions WITHOUT hyphens (excludes pre-releases like 1.0.0-beta):
+            type=raw,value=latest,enable=${{ !contains(inputs.version, '-') }}
+
+      # Built into the local daemon first, so that an image which does not
+      # run is never pushed. The push below rebuilds from this builder's
+      # cache. No cache from earlier runs: a release image is built from the
+      # pinned base, duckdb and lock alone.
+      - name: Build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          tags: adata-cli:candidate
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: The image runs, as its own user and as the caller's
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          image=adata-cli:candidate
+          docker run --rm "$image" adata --help > /dev/null
+          reported=$(docker run --rm "$image" adata --version)
+          if [ "$reported" != "$VERSION" ]; then
+            echo "::error::the image reports $reported, the release is $VERSION"
+            exit 1
+          fi
+          if [ "$(docker run --rm "$image" id -u)" = 0 ]; then
+            echo "::error::the image runs as root"
+            exit 1
+          fi
+          docker run --rm "$image" duckdb -c "select 42"
+          # As a pipeline runs it: the caller's user id, on a bind mount.
+          mkdir smoke
+          printf ',g1,g2,g3\nc1,0,1,2\nc2,3,4,5\nc3,6,7,8\n' > smoke/counts.csv
+          run() {
+            docker run --rm --user "$(id -u):$(id -g)" --read-only --tmpfs /tmp \
+              -v "$PWD/smoke":/data "$image" "$@"
+          }
+          run adata convert /data/counts.csv -o /data/counts.h5ad
+          run adata convert /data/counts.h5ad -o /data/counts.zarr
+          run adata view /data/counts.zarr
 
       - name: Login to Quay
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: quay.io
           username: ${{ secrets.QUAY_USERNAME }}
           password: ${{ secrets.QUAY_TOKEN }}
 
-      - name: Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: quay.io/cellgeni/adata-cli
-          tags: |
-            type=ref,event=tag
-            # push "latest" only for tags WITHOUT hyphens (excludes pre-releases like 1.0.0-beta):
-            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
-
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
