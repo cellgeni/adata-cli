@@ -46,7 +46,9 @@ adata convert counts.h5ad -o counts.loom
 
 Reading gives what `anndata.read_loom` gives, checked against it in CI, with
 four differences: values keep their dtype (velocyto's integer counts stay
-integers, where anndata makes X float32); graphs and global attributes are
+integers, where anndata makes X float32), but for float16, which scipy's
+sparse matrices cannot hold, so it becomes float32 unless `--dense` is
+given; graphs and global attributes are
 kept, where anndata drops them, and so is the main matrix: a loom with a
 layer named `matrix` was written from an AnnData that had one, so its main
 matrix, that AnnData's X, is X again, where anndata takes `spliced` and

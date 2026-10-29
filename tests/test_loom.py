@@ -152,6 +152,40 @@ def test_a_velocyto_round_trip_keeps_the_same_matrices_however_often_it_is_made(
         assert np.array_equal(_dense(got.layers[name]), _dense(ref.layers[name])), name
 
 
+@pytest.mark.parametrize("suffix", [".h5ad", ".zarr"])
+def test_a_float16_loom_imports_as_float32_where_it_goes_sparse(tmp_path, suffix):
+    """F049 (moved from B8a): a float16 loom, or one exported from a
+    float16 X, imported as a float16 CSR, which anndata cannot read:
+    scipy's sparse matrices have no float16."""
+    half = (np.arange(24, dtype=np.float16).reshape(4, 6) / 8).astype(np.float16)  # cells x genes
+    source = tmp_path / "half.h5ad"
+    ad.AnnData(
+        X=half,
+        obs=pd.DataFrame(index=[f"c{i}" for i in range(4)]),
+        var=pd.DataFrame(index=[f"g{j}" for j in range(6)]),
+        layers={"counts": half * 2},
+    ).write_h5ad(source)
+    loom = tmp_path / "half.loom"
+    _ok(source, "-o", loom)
+    with h5py.File(loom, "r") as f:
+        assert f["matrix"].dtype == np.float16, "a loom may hold float16"
+
+    out = tmp_path / f"back{suffix}"
+    result = _ok(loom, "-o", out)
+    assert "float16 matrices become float32" in _out(result)
+    got = _read(out)
+    assert got.X.dtype == np.float32 and sparse.issparse(got.X)
+    assert np.array_equal(_dense(got.X), half.astype(np.float32))
+    assert np.array_equal(_dense(got.layers["counts"]), (half * 2).astype(np.float32))
+
+    dense = tmp_path / f"dense{suffix}"
+    result = _ok(loom, "-o", dense, "--dense")
+    assert "become float32" not in _out(result)
+    got = _read(dense)
+    assert got.X.dtype == np.float16, "dense, anndata reads float16 as it is"
+    assert np.array_equal(got.X, half)
+
+
 def test_layer_picks_x(tmp_path):
     truth = write_loom(tmp_path / "velo.loom", velocyto=True)
     out = tmp_path / "u.h5ad"

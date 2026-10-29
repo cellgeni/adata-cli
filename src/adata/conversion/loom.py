@@ -291,6 +291,12 @@ class LoomImport(Converter):
             for name, ds in (("matrix", matrix), *layers.items()):
                 if ds.dtype.kind not in "biuf":
                     raise ValueError(f"{name} holds {ds.dtype} values, which a loom may not.")
+            half = [name for name, ds in (("matrix", matrix), *layers.items()) if ds.dtype == np.float16]
+            if half and not options.dense:
+                warnings.append(
+                    f"float16 matrices become float32: {', '.join(half)}. scipy's sparse "
+                    "matrices, and so anndata's, have no float16; --dense keeps them float16."
+                )
 
             x = options.layer
             if x is None:
@@ -734,15 +740,34 @@ def slab_cells(n_genes: int, itemsize: int, chunk_width: int) -> int:
 
 
 def _write_matrix(ds: h5py.Dataset, root: Any, places: List[str], detail: _Import) -> None:
-    """One loom matrix, read once, written to every place that holds it."""
+    """One loom matrix, read once, written to every place that holds it.
+
+    float16 goes sparse as float32: a CSR of float16, which scipy has no
+    sparse matrix for, is one anndata cannot read back.
+    """
     parents = [
         (root, "X") if place == "X" else (root["layers"], place.split("/", 1)[1])
         for place in places
     ]
+    source = _AsFloat32(ds) if ds.dtype == np.float16 and not detail.dense else ds
     write_dense_matrix(
-        ds, parents, cells_axis=1, dense=detail.dense, compression=detail.compression,
+        source, parents, cells_axis=1, dense=detail.dense, compression=detail.compression,
         zarr_format=detail.zarr_format, slab_bytes=SLAB_BYTES,
     )
+
+
+class _AsFloat32:
+    """A float16 dataset read as float32, a slice at a time: what
+    `write_dense_matrix` reads (shape, chunks, dtype, slices) and no more."""
+
+    dtype = np.dtype(np.float32)
+
+    def __init__(self, ds: h5py.Dataset) -> None:
+        self._ds = ds
+        self.shape, self.chunks = ds.shape, ds.chunks
+
+    def __getitem__(self, key: Any) -> np.ndarray:
+        return np.asarray(self._ds[key]).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
