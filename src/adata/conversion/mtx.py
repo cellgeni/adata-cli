@@ -29,7 +29,6 @@ entries in barcode order.
 from __future__ import annotations
 
 import json
-import re
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -184,26 +183,22 @@ def _read_folder(folder: Path) -> Optional[_Folder]:
     return found
 
 
-#: A run's matrix folder by what it holds, not by genome: STARsolo's
-#: `filtered/` and `raw/`, Cell Ranger's `filtered_feature_bc_matrix/` and so on.
-_RUN_FOLDER = re.compile(r"(filtered|raw)(_\w+_bc_matri(x|ces))?")
-
-
 def _subfolders(path: Path) -> Tuple[Dict[str, _Folder], List[str]]:
-    """The matrix folders in `path`: Cell Ranger 2's, one per genome, by
-    genome; and the names of those that are a run's filtered or raw matrix,
-    which are no genome."""
-    genomes, runs = {}, []
+    """The matrix folders in `path`: Cell Ranger 2's, one per genome (with
+    `genes.tsv`), by genome; and the names of any others -- a run's
+    `filtered/` and `raw/`, as STARsolo's `Gene/` and Cell Ranger's `outs/`
+    hold them -- which are no genome."""
+    genomes, others = {}, []
     for child in sorted(path.iterdir()) if path.is_dir() else []:
         folder = _read_folder(child)
         if folder is None:
             continue
-        if _RUN_FOLDER.fullmatch(child.name):
-            runs.append(child.name)
-        else:
+        if folder.legacy:
             folder.genome = child.name
             genomes[child.name] = folder
-    return genomes, runs
+        else:
+            others.append(child.name)
+    return genomes, others
 
 
 def sniff(path: Path) -> bool:
@@ -226,12 +221,14 @@ def locate(path: Path, genome: Optional[str]) -> _Folder:
             )
         return folder
 
-    genomes, runs = _subfolders(path)
-    if not genomes and runs:
+    genomes, others = _subfolders(path)
+    if not genomes and others:
         raise ValueError(
-            f"{path.name} holds {' and '.join(f'{r}/' for r in runs)}: a run's "
-            f"{'matrices' if len(runs) > 1 else 'matrix'}, not one folder per "
-            f"genome. Give the folder to convert, such as {path.name}/{runs[0]}."
+            f"{path.name} holds the matrix "
+            f"{'folders' if len(others) > 1 else 'folder'} "
+            f"{', '.join(f'{name}/' for name in others)}, not Cell Ranger 2's "
+            "one folder per genome. Give the folder to convert, such as "
+            f"{path.name}/{others[0]}."
         )
     if not genomes:
         raise ValueError(

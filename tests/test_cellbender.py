@@ -448,6 +448,25 @@ def test_the_raw_layer_is_laid_out_as_x(tmp_path, suffix, filtered):
     assert np.array_equal(got.layers["cellranger"].toarray(), _raw_counts()[truth.rows])
 
 
+def test_float16_counts_import_as_float32_in_x_and_both_layers(tmp_path):
+    """F049: float16 data, in the CellBender file or the raw one, was
+    written into a float16 CSR, which anndata cannot read."""
+    truth = _cellbender(tmp_path, filtered=True)
+    raw = _raw_file(tmp_path)
+    for path in (truth.path, raw):
+        with h5py.File(path, "a") as f:
+            data = f["matrix/data"][...].astype(np.float16)
+            del f["matrix/data"]
+            f["matrix/data"] = data
+    out = tmp_path / "out.h5ad"
+    _ok(truth.path, "-o", out, "--raw", raw)
+    got = _read(out)
+    for matrix in (got.X, got.layers["cellbender"], got.layers["cellranger"]):
+        assert matrix.dtype == np.float32
+    assert np.array_equal(got.X.toarray(), _denoised(_raw_counts())[truth.rows])
+    assert np.array_equal(got.layers["cellranger"].toarray(), _raw_counts()[truth.rows])
+
+
 def test_cellbender_flags_are_refused_for_other_formats(tmp_path):
     plain = _raw_file(tmp_path)
     result = _convert(plain, "-o", tmp_path / "o.h5ad", "--min-cell-probability", "0.5")

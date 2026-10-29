@@ -264,14 +264,16 @@ def test_cell_ranger_2_genome_folders(tmp_path, counts):
     [
         ("Solo.out/Gene", ["filtered", "raw"]),
         ("outs", ["filtered_feature_bc_matrix", "raw_feature_bc_matrix"]),
-        ("Solo.out/GeneFull", ["filtered"]),
+        ("count", ["sample_filtered_feature_bc_matrix"]),
     ],
 )
 def test_a_runs_filtered_and_raw_folders_are_not_taken_for_genomes(tmp_path, counts, run, subfolders):
     """F105: a folder holding a run's filtered/ and raw/ matrices, as
     STARsolo's Gene/ and Cell Ranger's outs/ do, was read as Cell Ranger 2's
-    one folder per genome: refused with 'pick one with --genome', and with
-    --genome filtered recorded "filtered" as the genome."""
+    one folder per genome: refused with 'pick one with --genome'; and with
+    one such folder, as Cell Ranger multi's count/ holds, converted with its
+    name recorded as the genome. Only a Cell Ranger 2 folder (genes.tsv) is
+    a genome."""
     root = tmp_path / run
     for name in subfolders:
         write_10x_mtx(root / name, counts, barcodes=_barcodes(), ids=IDS, names=NAMES,
@@ -279,7 +281,7 @@ def test_a_runs_filtered_and_raw_folders_are_not_taken_for_genomes(tmp_path, cou
     out = tmp_path / "out.h5ad"
     result = _convert(root, "-o", out)
     assert result.exit_code == 1
-    assert "not one folder per genome" in _out(result)
+    assert "not Cell Ranger 2's one folder per genome" in _out(result)
     assert f"such as {root.name}/{subfolders[0]}" in _out(result)
     assert not out.exists()
 

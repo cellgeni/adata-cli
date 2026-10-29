@@ -668,12 +668,29 @@ def test_float16_counts_export_as_float32(tmp_path):
 
     for src, layer in ((source, "X"), (tmp_path / "wide.h5ad", "X"), (tmp_path / "wide.h5ad", "csc")):
         out = tmp_path / f"{src.stem}.{layer}.h5"
-        _ok(src, "-o", out, "--layer", layer)
+        result = _ok(src, "-o", out, "--layer", layer)
+        assert "float16 values are written as float32" in _out(result)
         with h5py.File(out) as f:
             assert f["matrix/data"].dtype == np.float32
         got = _read(_ok_import(out, tmp_path))
         assert got.X.dtype == np.float32
         assert np.array_equal(got.X.toarray(), counts)
+
+
+@pytest.mark.parametrize("extra", [[], ["--feature-type", "Gene Expression"]])
+def test_a_float16_matrix_imports_as_float32(tenx, tmp_path, counts, extra):
+    """F049: a 10x file holding float16 data -- as this export wrote one --
+    was imported into a float16 CSR, which anndata cannot read."""
+    with h5py.File(tenx, "a") as f:
+        data = f["matrix/data"][...].astype(np.float16)
+        del f["matrix/data"]
+        f["matrix/data"] = data
+    out = tmp_path / "out.h5ad"
+    _ok(tenx, "-o", out, *extra)
+    got = _read(out)
+    keep = slice(None) if not extra else slice(0, 6)
+    assert got.X.dtype == np.float32
+    assert np.array_equal(got.X.toarray(), counts[:, keep])
 
 
 def test_text_outside_ascii_exports_as_cell_ranger_writes_it(tmp_path):
@@ -689,7 +706,10 @@ def test_text_outside_ascii_exports_as_cell_ranger_writes_it(tmp_path):
         var=pd.DataFrame({"gene_ids": IDS, "feature_types": TYPES}, index=names),
     ).write_h5ad(source)
     out = tmp_path / "out.h5"
-    _ok(source, "-o", out)
+    result = _ok(source, "-o", out)
+    assert "2 feature ids and names are not ASCII (such as 'IFNγ')" in _out(result)
+    assert f"{N_CELLS} barcodes are not ASCII" in _out(result)
+    assert "scanpy shows the references" in _out(result)
     with h5py.File(out) as f:
         for key in ("features/name", "barcodes"):
             assert h5py.check_string_dtype(f[f"matrix/{key}"].dtype).encoding == "ascii"

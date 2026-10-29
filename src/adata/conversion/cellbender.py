@@ -339,7 +339,7 @@ def _plan_raw(
             path=path,
             group=raw.group,
             n_barcodes=raw.n_barcodes,
-            dtype=handle[raw.group]["data"].dtype,
+            dtype=tenx._data_dtype(handle[raw.group]["data"].dtype),
             to_output=to_output,
             in_order=bool(np.all(np.diff(mapped) > 0)),
         )

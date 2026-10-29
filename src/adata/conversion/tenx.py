@@ -314,6 +314,22 @@ class _CheckedIndices(h5py.Dataset):
         return values
 
 
+class _Widened(h5py.Dataset):
+    """A float16 `data`, read as float32: scipy has no float16 sparse
+    matrix, so neither anndata nor scanpy could read X back otherwise."""
+
+    @property
+    def dtype(self) -> np.dtype:
+        return np.dtype(np.float32)
+
+    def __getitem__(self, args: Any, new_dtype: Any = None) -> Any:
+        values = (
+            super().__getitem__(args) if new_dtype is None
+            else super().__getitem__(args, new_dtype)
+        )
+        return np.asarray(values).astype(np.float32)
+
+
 class _AsCsr:
     """A 10x matrix group, seen as the AnnData CSR matrix it already is.
 
@@ -333,6 +349,8 @@ class _AsCsr:
     def __getitem__(self, key: str) -> Any:
         if key == "indices":
             return _CheckedIndices(self._group[key], self._n_features)
+        if key == "data" and self._group[key].dtype == np.float16:
+            return _Widened(self._group[key].id)
         return self._group[key]
 
 
@@ -538,6 +556,14 @@ class TenxExport(Converter):
     ) -> ConversionPlan:
         warnings: List[str] = []
         matrix = plan_matrix_source(source, options, warnings)
+        if _data_dtype(matrix.dtype) != matrix.dtype:
+            warnings.append(
+                f"{matrix.path}'s float16 values are written as float32: scipy "
+                "has no float16 sparse matrix, so nothing could read them back."
+            )
+        text = [v for v in (*matrix.features.ids, *matrix.features.names) if not v.isascii()]
+        if text:
+            warnings.append(_ascii_warning(len(text), "feature ids and names", text[0]))
         with open_store(source, "r", require_anndata=False) as store:
             attrs = _run_attrs(store.root)
         path, n_obs, n_var = matrix.path, matrix.n_obs, matrix.n_var
@@ -572,7 +598,9 @@ class TenxExport(Converter):
 
             obs = root["obs"]
             obs_index, _ = resolve_index(obs, "obs")
-            _write_fixed_strings_streamed(group, "barcodes", obs_index, obs)
+            n_text, example = _write_fixed_strings_streamed(group, "barcodes", obs_index, obs)
+            if n_text:
+                console.print(f"[yellow]Warning:[/] {_ascii_warning(n_text, 'barcodes', example)}")
             flags = obs.get("filtered_barcodes")
             if is_dataset(flags) and "categories" not in flags.attrs and flags.dtype.kind == "b":
                 # Space Ranger's and Flex's barcodes in the filtered matrix,
@@ -661,6 +689,14 @@ def _copy_cast(src: Any, parent: h5py.Group, name: str, dtype: np.dtype, step: i
         dataset[lo : lo + step] = np.asarray(src[lo : lo + step]).astype(dtype)
 
 
+def _ascii_warning(n: int, what: str, example: str) -> str:
+    return (
+        f"{n:,} {what} are not ASCII (such as {example!r}). They are written "
+        "as XML character references, as Cell Ranger writes them: adata "
+        "reads them back as written, scanpy shows the references."
+    )
+
+
 def _ascii(values: Sequence[str]) -> List[bytes]:
     """Text as Cell Ranger writes it: 7-bit ASCII, with XML character
     references for anything else. scanpy decodes these files as ASCII, and
@@ -688,17 +724,23 @@ def _write_fixed_strings(parent: h5py.Group, name: str, values: Sequence[str]) -
 
 def _write_fixed_strings_streamed(
     parent: h5py.Group, name: str, column: Any, frame: Any
-) -> None:
+) -> Tuple[int, str]:
     """Like `_write_fixed_strings`, for a column too long to hold: one pass
-    for the width, one for the data."""
+    for the width, one for the data. Returns how many values are not ASCII,
+    and the first of them."""
     n = element_len(column)
     cache: Dict[str, np.ndarray] = {}
-    width = 1
+    width, n_text, example = 1, 0, ""
     for lo in range(0, n, STRING_STEP):
         block = read_str_chunk(column, lo, min(lo + STRING_STEP, n), cache, frame)
+        text = [v for v in block if not v.isascii()]
+        if text and not n_text:
+            example = text[0]
+        n_text += len(text)
         width = max(width, *map(len, _ascii(block)))
     dataset = _create(parent, name, n, f"S{width}")
     for lo in range(0, n, STRING_STEP):
         hi = min(lo + STRING_STEP, n)
         block = read_str_chunk(column, lo, hi, cache, frame)
         dataset[lo:hi] = np.array(_ascii(block), dtype=f"S{width}")
+    return n_text, example

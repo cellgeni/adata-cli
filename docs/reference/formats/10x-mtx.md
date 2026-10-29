@@ -14,10 +14,10 @@ Every shape Cell Ranger and STARsolo write is read:
 * Cell Ranger 3+ (`filtered_feature_bc_matrix/`), with id, name and feature
   type per feature;
 * Cell Ranger 2 (`filtered_gene_bc_matrices/`), one subfolder per genome:
-  give the parent and `--genome` picks one, or the only one is taken. A
-  folder holding a run's `filtered/` and `raw/` matrices (STARsolo's
-  `Gene/`, Cell Ranger's `outs/`) is not taken for genomes: give the one to
-  convert;
+  give the parent and `--genome` picks one, or the only one is taken. Only
+  folders with `genes.tsv` are taken for genomes: a folder holding other
+  matrix folders, such as a run's `filtered/` and `raw/` (STARsolo's
+  `Gene/`, Cell Ranger's `outs/`), is refused, naming the one to give;
 * STARsolo `Solo.out/Gene/filtered/`, `GeneFull/` and so on, uncompressed,
   with two or three feature columns;
 * STARsolo `Solo.out/Velocyto/raw/`: `spliced.mtx`, `unspliced.mtx` and
