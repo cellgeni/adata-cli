@@ -105,9 +105,8 @@ whole, which is what grows with the number of cells.
 50,000 × 20,000 store, measured on every release: between 70 and 330 MB in
 0.16.1. A request of 1 to 2 GB leaves room for larger stores.
 
-`export array` to stdout holds the array in memory, since a pipe cannot be
-seeked; give `-o` in a pipeline. A loom output is dense by definition, so
-`convert` to `.loom` warns above 10 GB before compression.
+A loom output is dense by definition, so `convert` to `.loom` warns above
+10 GB before compression.
 
 ## Exit codes and output streams
 
@@ -119,7 +118,8 @@ seeked; give `-o` in a pipeline. A loom output is dense by definition, so
 
 Data goes to stdout and everything else (progress, notes, warnings, errors)
 to stderr, so `adata export dataframe in.h5ad obs > obs.csv` is clean, and
-`2> adata.log` keeps the log.
+`2> adata.log` keeps the log. An export piped to a reader that stops early,
+such as `head`, ends quietly with exit code 0.
 
 ## Zarr v2 and v3
 
