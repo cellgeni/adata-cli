@@ -12,7 +12,8 @@ Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 
 Standard Visium spots and Visium HD's 8 and 16 µm bins now bring in Space
 Ranger's own clusters, UMAP and PCA, as the segmented cells and Xenium
-already did, from today's `analysis/` layout and Space Ranger 1's.
+already did, from today's `analysis/` layout and Space Ranger 1's. `adata
+convert` works again on a fresh install, which 0.17.1 and 0.17.2 broke.
 
 ### Added
 
@@ -44,6 +45,19 @@ already did, from today's `analysis/` layout and Space Ranger 1's.
   gain this too.
 - **CellBender's embeddings go through the shared row scatter**
   (`core/scatter.py`) rather than a copy of it; the output is unchanged.
+
+### Fixed
+
+- **`adata convert` works on a fresh install again** ([#88](https://github.com/cellgeni/adata-cli/issues/88)).
+  typer 0.26 and later carry their own copy of click and no longer install
+  it, so the click import that told typed flags from defaults crashed every
+  convert on a new install of 0.17.1 or 0.17.2. Where click was installed
+  anyway, its enum never matched typer's, and every convert was refused for
+  mixing format and matrix flags nobody had typed. Flags are now told apart
+  by name, whichever click typer brings.
+  - A new CI job installs the package from a fresh resolution rather than
+    the lock, checks that every module imports without pandas, scipy,
+    pyarrow or anndata, and runs `convert` with and without click.
 
 ## 0.17.2
 

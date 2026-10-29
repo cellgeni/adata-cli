@@ -145,7 +145,9 @@ ADATA_REQUIRE_VERSION_FIXTURES=1 uv run pytest tests/test_anndata_versions.py -m
 ```
 
 `integration` tests need the network on their first run, to build their
-environments. House style: test names read as sentences, a regression test's
+environments. CI also installs the package alone from a fresh resolution,
+without the lock, to catch an import nothing declares; so don't import
+click, which typer 0.26 and later no longer install. House style: test names read as sentences, a regression test's
 docstring says what used to go wrong, and comments say why. No linter or
 formatter runs; match the code around you.
 

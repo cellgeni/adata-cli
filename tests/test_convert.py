@@ -10,6 +10,7 @@ here.)
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 import h5py
@@ -390,3 +391,76 @@ def test_forwarding_still_validates_like_recast(h5ad, tmp_path):
     )
     assert result.exit_code == 1
     assert "--layout must be one of" in _out(result)
+
+
+# ---------------------------------------------------------------------------
+# whichever click typer brings
+
+
+def _foreign_parameter_sources(monkeypatch) -> None:
+    """Answer `get_parameter_source` with an enum that is not click's own.
+
+    typer 0.26 and later carry their own copy of click, so on a fresh
+    install this is the enum convert sees.
+    """
+    import enum
+
+    import typer
+
+    foreign = enum.Enum(
+        "ParameterSource", "COMMANDLINE ENVIRONMENT DEFAULT DEFAULT_MAP PROMPT"
+    )
+    owner = next(
+        cls for cls in typer.Context.__mro__ if "get_parameter_source" in vars(cls)
+    )
+    original = owner.get_parameter_source
+
+    def get_parameter_source(self, name):
+        source = original(self, name)
+        return None if source is None else foreign[source.name]
+
+    monkeypatch.setattr(owner, "get_parameter_source", get_parameter_source)
+
+
+def test_convert_works_when_click_cannot_be_imported(h5ad, tmp_path, monkeypatch):
+    """F004: `_given` imported click, which typer 0.26 and later no longer
+    install, so every convert on a fresh install died with a traceback."""
+    monkeypatch.setitem(sys.modules, "click", None)
+    monkeypatch.setitem(sys.modules, "click.core", None)
+    out = tmp_path / "out.zarr"
+
+    result = runner.invoke(app, ["convert", str(h5ad), "-o", str(out)])
+
+    assert result.exit_code == 0, _out(result)
+    assert np.array_equal(_read(out).X.toarray(), _read(h5ad).X.toarray())
+
+
+def test_convert_sees_only_typed_flags_whatever_enum_typer_uses(
+    h5ad, tmp_path, monkeypatch
+):
+    """F005: with typer's own enum, no source equalled click's DEFAULT, so
+    every flag looked typed and every convert was refused as mixing format
+    flags with matrix flags the user never gave."""
+    _foreign_parameter_sources(monkeypatch)
+    out = tmp_path / "out.zarr"
+
+    result = runner.invoke(app, ["convert", str(h5ad), "-o", str(out)])
+    assert result.exit_code == 0, _out(result)
+    assert np.array_equal(_read(out).X.toarray(), _read(h5ad).X.toarray())
+
+    # Typed flags are still seen: the old spelling forwards to recast...
+    result = runner.invoke(
+        app, ["convert", str(h5ad), "X", "-o", str(tmp_path / "r.h5ad"),
+              "--dtype", "float64"],
+    )
+    assert result.exit_code == 0, _out(result)
+    assert "deprecated" in _out(result) and "--dtype" in _out(result)
+    assert _read(tmp_path / "r.h5ad").X.dtype == np.dtype("float64")
+
+    # ...and naming both kinds is still refused, listing only what was typed.
+    result = runner.invoke(
+        app, ["convert", str(h5ad), "X", "-o", str(tmp_path / "o.zarr"),
+              "--dtype", "float64", "--to", "zarr"],
+    )
+    assert result.exit_code == 1
+    assert "--to cannot be combined with --dtype" in _out(result)

@@ -268,6 +268,17 @@ For data that fits in memory, it often is: streaming trades time for memory.
 [Benchmarks](reference/benchmarks.md) publishes the rows where the baseline
 wins alongside those where it loses.
 
+## Installing
+
+### `ModuleNotFoundError: No module named 'click'` from `adata convert`
+
+0.17.1 and 0.17.2 imported click, which typer stopped installing in 0.26, so
+`convert` crashed on any new install of them. Where click was installed
+anyway, they refused every convert with `... cannot be combined with
+--inplace, --all, --dtype, --indices-dtype, --layout` instead. 0.17.3 fixes
+both: `pip install -U pyadata-cli`. To stay on 0.17.1 or 0.17.2, install
+`'typer<0.26'` beside it, which brings the click they expect.
+
 ## Optional extras
 
 ### `Reading a pycisTopic pickle needs pandas and scipy, which rebuild its tables and matrices: pip install 'pyadata-cli[pickle]'.`

@@ -81,6 +81,67 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: false
 
+  # What `pip install pyadata-cli` gets today, not what uv.lock pins. 0.17.1
+  # and 0.17.2 imported click, which typer stopped installing in 0.26, so
+  # every `adata convert` on a fresh install crashed while the locked suite
+  # stayed green. This installs the base package alone from a fresh
+  # resolution and checks that it imports nothing undeclared.
+  fresh-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    name: fresh install, no lock
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: false
+
+      - name: Install the base package from a fresh resolution
+        run: |
+          uv venv --python 3.13 fresh
+          uv pip install --python fresh/bin/python .
+          uv pip list --python fresh/bin/python
+
+      - name: Every module imports, and none pulls in an optional dependency
+        run: |
+          fresh/bin/python - <<'PY'
+          import importlib, pkgutil, sys
+          import adata
+          for module in pkgutil.walk_packages(adata.__path__, "adata."):
+              importlib.import_module(module.name)
+          heavy = {"pandas", "scipy", "pyarrow", "anndata"} & set(sys.modules)
+          if heavy:
+              sys.exit(f"importing adata pulled in {sorted(heavy)}")
+          PY
+
+      - name: convert works, with and without click beside typer
+        run: |
+          mkdir smoke && cd smoke
+          printf ',g1,g2,g3\nc1,0,1,2\nc2,3,4,5\nc3,6,7,8\n' > counts.csv
+          smoke() {
+            rm -rf counts.h5ad counts.zarr back.h5ad recast.h5ad
+            ../fresh/bin/adata convert counts.csv -o counts.h5ad
+            ../fresh/bin/adata convert counts.h5ad -o counts.zarr --zarr-format 2
+            ../fresh/bin/adata convert counts.zarr -o back.h5ad
+            ../fresh/bin/adata convert counts.h5ad X -o recast.h5ad --dtype float64
+          }
+          smoke
+          # Another package often brings click; typer's enum must still be
+          # told apart from click's.
+          uv pip install --python ../fresh/bin/python click
+          smoke
+
+      - name: The docs-accuracy suite runs without click
+        run: |
+          uv pip uninstall --python fresh/bin/python click
+          uv pip install --python fresh/bin/python pytest pytest-timeout
+          fresh/bin/python -m pytest -q -p no:cacheprovider tests/test_docs_are_accurate.py
+
   # Builds a store with each pinned anndata release and checks the CLI against
   # it. Split out because it assembles six environments with uv, which needs
   # the network and is far slower than the unit suite.

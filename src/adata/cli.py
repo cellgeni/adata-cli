@@ -561,14 +561,19 @@ _FORMAT_ONLY_FLAGS = {
 
 
 def _given(ctx: typer.Context, flags: dict) -> List[str]:
-    """The flags among `flags` that were actually typed, not defaulted."""
-    from click.core import ParameterSource
+    """The flags among `flags` that were actually typed, not defaulted.
 
-    return [
-        flag
-        for name, flag in flags.items()
-        if ctx.get_parameter_source(name) not in (None, ParameterSource.DEFAULT)
-    ]
+    Sources are compared by name. typer 0.26 and later carry their own copy
+    of click and no longer install click itself, so importing click's
+    `ParameterSource` crashed every convert; and where click is installed
+    anyway, its enum never equals typer's, which made every flag look typed.
+    """
+    given = []
+    for name, flag in flags.items():
+        source = ctx.get_parameter_source(name)
+        if source is not None and source.name != "DEFAULT":
+            given.append(flag)
+    return given
 
 
 @app.command("convert", context_settings={"allow_extra_args": True})
@@ -876,9 +881,9 @@ def convert(
         adata convert multiome.h5ad -o multiome.h5mu
     """
     entries = list(ctx.args)
-    recast_flags = _given(ctx, _RECAST_FLAGS)
 
     try:
+        recast_flags = _given(ctx, _RECAST_FLAGS)
         if recast_flags:
             mixed = _given(ctx, _FORMAT_ONLY_FLAGS)
             if mixed:
