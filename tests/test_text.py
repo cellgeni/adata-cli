@@ -401,12 +401,25 @@ def test_a_byte_order_mark_is_dropped(tmp_path, suffix, content):
         assert np.array_equal(got.X.toarray(), pd.read_csv(marked, header=None).to_numpy())
 
 
-@pytest.mark.parametrize("delimiter", [".", "e", "-", "7"])
+@pytest.mark.parametrize("delimiter", [".", "e", "-", "7", "(", ")", "_"])
 def test_a_delimiter_that_numbers_hold_is_refused(tmp_path, delimiter):
-    """numpy reads '1.5' as one number whatever the delimiter, so with '.'
-    a line held fewer values than it has fields, and the rest were padded."""
+    """numpy reads '1.5' as one number whatever the delimiter, and 'nan(1(2'
+    as one NaN, so with '.' or '(' a line held fewer values than it has
+    fields, and the rest were padded."""
     path = tmp_path / "m.txt"
     path.write_text(f"a{delimiter}b\n1{delimiter}2\n")
     result = _convert(path, "-o", tmp_path / "out.h5ad", "--delimiter", delimiter)
     assert result.exit_code == 1
     assert "a number can hold it" in _out(result)
+
+
+def test_nan_with_parentheses_is_refused_as_anndata_refuses_it(tmp_path):
+    """numpy reads 'nan(...)' as NaN, whatever the parentheses hold, where
+    Python's float and anndata refuse it."""
+    path = tmp_path / "m.csv"
+    path.write_text(",a,b\nc1,nan(1),2\nc2,3,4\n")
+    with pytest.raises(ValueError):
+        _anndata_reads(path, ",")
+    result = _convert(path, "-o", tmp_path / "out.h5ad")
+    assert result.exit_code == 1
+    assert "line 2, column 2: 'nan(1)' is not a number" in _out(result)

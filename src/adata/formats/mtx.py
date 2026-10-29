@@ -49,10 +49,6 @@ FIELDS = ("integer", "real", "pattern")
 #: Entries read from a stored matrix per block, when writing one out.
 EXPORT_BLOCK_ENTRIES = 1 << 20
 
-#: The bytes numpy's `sep=" "` takes for space: tab, newline, vertical tab,
-#: form feed, carriage return and space.
-_SPACE = np.zeros(256, dtype=bool)
-_SPACE[[9, 10, 11, 12, 13, 32]] = True
 
 
 @dataclass(frozen=True)
@@ -70,27 +66,30 @@ class MtxHeader:
         return 2 if self.field == "pattern" else 3
 
 
-def _skip_header(fh: BinaryIO) -> Tuple[str, List[str], str]:
-    """The banner, the comment lines, and the size line, read from `fh`."""
+def _skip_header(fh: BinaryIO) -> Tuple[str, List[str], str, int]:
+    """The banner, the comment lines and the size line, read from `fh`, and
+    the lines read, blank ones too."""
     banner = fh.readline().decode("utf-8", "replace").strip()
     comments: List[str] = []
+    read = 1
     while True:
         line = fh.readline()
         if not line:
             raise ValueError("The MTX file ends before its size line.")
+        read += 1
         text = line.decode("utf-8", "replace").strip()
         if text.startswith("%"):
             comments.append(text)
             continue
         if text:
-            return banner, comments, text
+            return banner, comments, text, read
 
 
 def read_header(path: Path) -> MtxHeader:
     """Parse and check a Matrix Market header; refuse what this cannot read."""
     path = Path(path)
     with open_binary(path) as fh:
-        banner, comments, size = _skip_header(fh)
+        banner, comments, size, _ = _skip_header(fh)
 
     parts = banner.split()
     if not parts or parts[0] != BANNER:
@@ -129,11 +128,20 @@ def read_header(path: Path) -> MtxHeader:
     return MtxHeader(path, fld, n_rows, n_cols, nnz, tuple(comments))
 
 
+def spaces(buffer: np.ndarray) -> np.ndarray:
+    """Which bytes numpy's `sep=" "` takes for space: tab to carriage return,
+    and space. Compared, rather than looked up in a table, which took a
+    fifth as long as numpy's parse of the block."""
+    space = buffer == 32
+    space |= (buffer - 9) <= 4  # 9 to 13; the bytes below 9 wrap past 4
+    return space
+
+
 def _fields_per_line(text: bytes) -> np.ndarray:
     """The fields on each line of `text`, every line at once: the starts of
     runs of other bytes than space, between one newline and the next."""
     buffer = np.frombuffer(text, dtype=np.uint8)
-    space = _SPACE[buffer]
+    space = spaces(buffer)
     keep = ~space
     keep[1:] &= space[:-1]  # where a field starts
     newline = np.equal(buffer, 10, out=space)  # space is not needed again
@@ -153,14 +161,11 @@ def _parse(block: bytes, header: MtxHeader, first_line: int) -> np.ndarray:
         return np.empty((0, header.columns), dtype=dtype)
     # Line by line, not the block's total: a line a field short and a later
     # one a field long add up, and pair values with the wrong coordinates.
+    # Blank lines hold none, and are skipped, as scipy skips them.
     fields = _fields_per_line(text)
-    wrong = np.flatnonzero(fields != header.columns)
+    wrong = np.flatnonzero((fields != header.columns) & (fields != 0))
     if wrong.size:
         line, found = first_line + int(wrong[0]), int(fields[wrong[0]])
-        if not found:
-            raise ValueError(
-                f"{header.path.name}: line {line:,} is a blank line among the entries."
-            )
         raise ValueError(
             f"{header.path.name}: line {line:,} does not hold {header.columns} "
             f"fields: it holds {found}."
@@ -172,7 +177,7 @@ def _parse(block: bytes, header: MtxHeader, first_line: int) -> np.ndarray:
             f"{header.path.name}: a line from line {first_line:,} on is not "
             f"{header.columns} numbers{' (integers)' if dtype is np.int64 else ''}."
         ) from None
-    lines = fields.size
+    lines = int(np.count_nonzero(fields))
     if flat.size != lines * header.columns:  # pragma: no cover - counted above
         raise ValueError(
             f"{header.path.name}: a line from line {first_line:,} on does not "
@@ -202,8 +207,7 @@ def iter_entries(
     """
     seen = 0
     with open_binary(header.path) as fh:
-        _, comments, _ = _skip_header(fh)
-        line = len(comments) + 3
+        line = _skip_header(fh)[3] + 1
         for block in iter_line_blocks(fh, block_bytes):
             table = _parse(block, header, line)
             n = table.shape[0]

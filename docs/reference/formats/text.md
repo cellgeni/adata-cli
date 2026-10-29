@@ -25,7 +25,7 @@ adata convert table.txt -o table.h5ad --delimiter ";" --dense
 
 | Flag | Meaning |
 |---|---|
-| `--delimiter` | A character, `tab` or `whitespace` (runs of spaces and tabs). Default from the extension: `,` for `.csv`, tab for `.tsv` and `.tab`, whitespace for `.txt` and `.data`, as `read_text` splits. A letter, digit, `.`, `+` or `-` is refused: a number can hold it |
+| `--delimiter` | A character, `tab` or `whitespace` (runs of spaces and tabs). Default from the extension: `,` for `.csv`, tab for `.tsv` and `.tab`, whitespace for `.txt` and `.data`, as `read_text` splits. A letter, digit, `.`, `+`, `-`, `(`, `)` or `_` is refused: a number can hold it (numpy reads `nan(...)` as one) |
 | `--transpose` | The file holds genes as rows and cells as columns, as count tables often do |
 | `--first-column-names`, `--no-first-column-names` | Whether the first column names the rows, when detection gets it wrong |
 | `--dense` | Keep X dense (default: CSR) |

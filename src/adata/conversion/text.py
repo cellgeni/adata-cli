@@ -53,6 +53,7 @@ from adata.elements.write import (
     write_scalar,
     write_string_array,
 )
+from adata.formats.mtx import spaces
 from adata.formats.textio import TEXT_BLOCK_BYTES, iter_line_blocks, open_binary
 from adata.storage import (
     COMPRESSIONS,
@@ -294,8 +295,12 @@ class _Reader:
         width = self.layout.width
         count = len(lines) * width
         text = b"\n".join(lines)
-        if (_fields(text, self.raw, len(lines)) != width).any() or _misshapen(
-            text, self.raw, count
+        if (
+            (_fields(text, self.raw, len(lines)) != width).any()
+            or _misshapen(text, self.raw, count)
+            # numpy reads 'nan(...)' as NaN, whatever the parentheses hold,
+            # delimiters too; Python's float, and so anndata, refuses it.
+            or b"(" in text
         ):
             self._diagnose(numbers, lines)
         # One field more than the block holds, after a delimiter: numpy stops
@@ -364,8 +369,6 @@ class _Reader:
         raise ValueError(f"{name}: a line from line {numbers[0]:,} on is not numbers.")
 
 
-_SPACE = np.zeros(256, dtype=bool)
-_SPACE[[9, 10, 11, 12, 13, 32]] = True
 
 
 def _fields(text: bytes, delimiter: Optional[bytes], n_lines: int) -> np.ndarray:
@@ -376,7 +379,7 @@ def _fields(text: bytes, delimiter: Optional[bytes], n_lines: int) -> np.ndarray
     if delimiter is not None:
         marks, extra = np.flatnonzero(buffer == delimiter[0]), 1
     else:
-        space = _SPACE[buffer]
+        space = spaces(buffer)
         starts = ~space
         starts[1:] &= space[:-1]
         marks, extra = np.flatnonzero(starts), 0
@@ -397,7 +400,7 @@ def _misshapen(text: bytes, delimiter: Optional[bytes], count: int) -> bool:
     buffer = np.frombuffer(text, dtype=np.uint8)
     edge = buffer == 10
     edge |= buffer == delimiter[0]
-    solid = _SPACE[buffer]
+    solid = spaces(buffer)
     solid |= edge
     np.logical_not(solid, out=solid)
     # Edges and solid bytes in order: an empty field is two edges in a row,
@@ -405,7 +408,7 @@ def _misshapen(text: bytes, delimiter: Optional[bytes], count: int) -> bool:
     kinds = edge[edge | solid]
     if not kinds.size or kinds[0] or kinds[-1] or (kinds[1:] & kinds[:-1]).any():
         return True
-    if _SPACE[delimiter[0]]:
+    if delimiter in b" \t\n\v\f\r":
         # Each field one run of solid bytes: as many runs as fields.
         starts = int(solid[0]) + int(np.count_nonzero(solid[1:] & ~solid[:-1]))
         return starts != count
@@ -480,8 +483,9 @@ class TextImport(Converter):
                 f"--delimiter {options.delimiter!r}: give one character, or "
                 "tab, comma or whitespace."
             )
-        if delimiter is not None and (delimiter.isalnum() or delimiter in "+-."):
-            # numpy reads '1.5' or '1e5' as one number, whatever the delimiter.
+        if delimiter is not None and (delimiter.isalnum() or delimiter in "+-.()_"):
+            # numpy reads '1.5', '1e5' or 'nan(1_2)' as one number, whatever
+            # the delimiter.
             raise ValueError(
                 f"--delimiter {delimiter!r}: a number can hold it, so values "
                 "could not be told apart. Give another character."

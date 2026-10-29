@@ -119,7 +119,9 @@ def test_cells_as_rows_are_read_within_the_budget(tmp_path, monkeypatch, case):
     assert np.array_equal(_read(path).X.toarray(), counts)
 
 
-def test_an_empty_dataset_writes_an_empty_matrix(tmp_path, backend):
+@pytest.mark.parametrize("dense", [False, True], ids=["csr", "dense"])
+def test_an_empty_dataset_writes_an_empty_matrix(tmp_path, backend, dense):
+    """Dense, h5py refused a chunk of one row for an array of none."""
     with h5py.File(tmp_path / "in.h5", "w") as handle:
         ds = handle.create_dataset(
             "m", shape=(N_GENES, 0), maxshape=(N_GENES, None), dtype=np.float32, chunks=(1, 1)
@@ -128,7 +130,31 @@ def test_an_empty_dataset_writes_an_empty_matrix(tmp_path, backend):
         with open_new(path, backend) as root:
             make_skeleton(root, [], [f"g{j}" for j in range(N_GENES)])
             write_dense_matrix(
-                ds, [(root, "X")], cells_axis=1, dense=False, compression=None,
+                ds, [(root, "X")], cells_axis=1, dense=dense, compression="gzip",
                 zarr_format=backend_zarr_format(backend), slab_bytes=1,
             )
     assert _read(path).X.shape == (0, N_GENES)
+
+
+def test_a_chunk_wider_than_the_cells_is_read_in_slabs(tmp_path, monkeypatch):
+    """A resizable dataset's chunk may span more cells than it holds; taken
+    at its width, it sent a dataset one slab holds through two passes and
+    the buckets."""
+    from adata.conversion import dense
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("sorted through buckets")
+
+    monkeypatch.setattr(dense, "_write_sorted", refuse)
+    counts = np.random.default_rng(0).poisson(0.6, (N_CELLS, N_GENES)).astype(np.float32)
+    path = tmp_path / "out.h5ad"
+    with h5py.File(tmp_path / "in.h5", "w") as handle, open_new(path, "h5ad") as root:
+        ds = handle.create_dataset(
+            "m", data=counts.T, maxshape=(N_GENES, None), chunks=(1, 10 * N_CELLS)
+        )
+        make_skeleton(root, [f"c{i}" for i in range(N_CELLS)], [f"g{j}" for j in range(N_GENES)])
+        write_dense_matrix(
+            ds, [(root, "X")], cells_axis=1, dense=False, compression=None,
+            zarr_format=None, slab_bytes=N_CELLS * N_GENES * ITEMSIZE,
+        )
+    assert np.array_equal(_read(path).X.toarray(), counts)

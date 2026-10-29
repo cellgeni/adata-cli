@@ -71,12 +71,16 @@ def write_dense_matrix(
     dtype = np.dtype(ds.dtype.str)  # without h5py's metadata
     shape = (n_cells, n_genes)
     # Cells the budget holds, every gene of each; a contiguous dataset reads
-    # any slab as cheaply, so its chunk is a cell.
+    # any slab as cheaply, so its chunk is a cell. A resizable dataset's
+    # chunk may be wider than its cells.
     fit = max(1, slab_bytes // max(1, n_genes * dtype.itemsize))
-    chunk = ds.chunks[cells_axis] if ds.chunks else 1
-    step = min(max(n_cells, 1), fit // chunk * chunk if chunk <= fit else fit)
+    chunk = min(ds.chunks[cells_axis], max(n_cells, 1)) if ds.chunks else 1
+    parts = -(-chunk // fit)
+    # Whole chunks; or a chunk cut evenly, so slabs keep to its edges when
+    # they can.
+    step = min(max(n_cells, 1), fit // chunk * chunk if parts == 1 else -(-chunk // parts))
 
-    if -(-chunk // fit) > MAX_REREADS:
+    if parts > MAX_REREADS:
         _write_sorted(
             ds, places, cells_axis=cells_axis, dense=dense, compression=compression,
             zarr_format=zarr_format, slab_bytes=slab_bytes, rows=fit,
@@ -122,7 +126,9 @@ def _dense_targets(
     targets = []
     for parent, name in places:
         kw: Dict[str, Any] = {"chunks": (max(1, min(shape[0], rows)), max(shape[1], 1))}
-        if compression is not None:
+        if not shape[0]:
+            kw = {}  # h5py takes no chunk larger than the array, nor compresses without one
+        elif compression is not None:
             kw = with_compression(
                 kw, compression, shape=shape, dtype=dtype,
                 backend="zarr" if is_zarr_group(parent) else "hdf5",
