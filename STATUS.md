@@ -7,6 +7,7 @@ moves; the plan of record for the current item is in the section below.
 
 | Version | What | Issues |
 |---|---|---|
+| 0.17.3 | Space Ranger's analysis (clusters, UMAP, PCA) for Visium spots and HD bins; `convert` works on fresh installs (broken since 0.7.0) | #85, #88 |
 | 0.17.2 | Visium HD segmented cells (Space Ranger 4): centroids, areas and Space Ranger's analysis | #83 |
 | 0.17.1 | Visium HD, one bin size at a time, with the new `spatial` extra (pyarrow) | #81 |
 | 0.17.0 | `convert` reads Visium (Space Ranger 1–4) and Xenium (XOA 1–4) with positions, images and Xenium's analysis | #79 |
@@ -22,37 +23,40 @@ The conversion epic's sub-issues (#21–#30) are all done and ticked in #20.
 
 ## In progress
 
-0.17.3: Space Ranger's own `analysis/` for standard spots and HD bins, as
-the segmented cells have it, and CellBender's embeddings onto
-`core/scatter.py`.
+The fixes from the October 2026 audit, epic #87: 164 findings in 16
+batches, one PR and one sub-issue each. Batches in a wave own disjoint files
+and run in parallel; a batch that shares files with another starts once that
+one has merged.
+
+| Wave | Batches | Release |
+|---|---|---|
+| 0 | B0 #88 | 0.17.3 |
+| 1 | B1 #89, B2a #90, B2b #91, B3a #92, B7 #98 | 0.17.4: data safety |
+| 2 | B3b #93, B4 #94, B5 #95, B8a #99, B8b #100, B9 #102 | 0.17.5: fidelity |
+| 3 | B6a #96, B6b #97, B8c #101 | 0.17.6: streaming |
+| 4 | B10 #103 | 0.17.6 |
 
 Decisions:
-- Read by default when there, as for cells and Xenium: `graphclust`,
-  `X_umap`, `X_pca`. 8 and 16 µm bins have their own; 2 µm have none.
-- Space Ranger 1's folder names (`graphclust/`, `2_components/`,
-  `10_components/`) are read too, after today's.
-- Space Ranger leaves bins with no counts out of the analysis (half the
-  8 µm bins of the tiny sample), so tables lacking as many rows share one
-  warning.
-- squidpy's spot size for cells stays as Space Ranger wrote it; the docs
-  keep the one-line fix.
+- Every batch ships as a 0.17.x patch.
+- `concat` orders an outer join's var and merged categories as anndata does
+  (sorted), and the changelog says so (B3b).
+- Pickle reading is hardened, and the docs say pickles are trusted input
+  (B8c).
+- A full disk aborts inside HDF5, beyond the tool's reach, so writers check
+  free space against the output's estimated size first (B1).
+- Each PR carries its changelog entry in its description, and the release PR
+  collects them, so parallel batches do not conflict in `docs/changelog.md`.
 
 Steps:
-- [x] `spatial.py`: candidate paths, a noun for the warning, one warning
-  per count.
-- [x] `visium.py`: plan and write the analysis for spots and bins.
-- [x] Tests: fixtures, mapping, refusals, `--unfiltered`,
-  `--split-feature-types`, perf guard, squidpy/pandas comparisons.
-- [x] CellBender `_write_embeddings` onto `RowScatter`.
-- [x] Docs: visium.md, troubleshooting, commands table.
-- [x] Real data: tiny HD sample at 8 and 16 µm, 10x's SR 1.1 Adult Mouse
-  Brain with its analysis.
-- [ ] Review, CI, merge; release 0.17.3.
+- [x] B0: `convert` on fresh installs (#88), in 0.17.3
+- [ ] Wave 1, then 0.17.4
+- [ ] Wave 2, then 0.17.5
+- [ ] Waves 3 and 4, then 0.17.6
 
 ## Follow-ups noticed
 
 - `cell_id` (with `in_cell`, `in_nucleus`) on 2 µm bins, from Space Ranger
-  4's `barcode_mappings.parquet` (0.17.4).
+  4's `barcode_mappings.parquet` (a 0.17.x after the audit fixes).
 - Dropped: spatial bundles whose matrix is a MEX folder only. 10x always
   writes the `.h5` beside it, and the refusal points to `--from 10x-mtx`.
 
