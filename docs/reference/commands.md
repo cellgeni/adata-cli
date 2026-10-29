@@ -286,8 +286,9 @@ concatenate to n_obs × 0.
 
 obs columns keep their dtypes: categoricals union their category sets
 (numeric categories stay numeric, and anndata 0.7's categoricals are read by
-label), nullable columns keep their masks, and a column missing from one
-input is padded rather than dropped. Missing values stay missing:
+label), and nullable columns keep their masks. Under `--join outer` a column
+missing from one input is padded rather than dropped. Missing values stay
+missing:
 
 - Text with missing values (from a categorical, a nullable column, or an
   input without the column) is written as a categorical whose missing rows
@@ -296,8 +297,13 @@ input is padded rather than dropped. Missing values stay missing:
 - Integers padded for an input without the column become float with NaN, as
   pandas pads them; booleans become `nullable-boolean`.
 - A column plain in one input and nullable in another is nullable in the
-  output (int64 with Int64 is Int64), and a nullable integer with a nullable
-  boolean promotes to a nullable integer.
+  output (int64 with Int64 is Int64, bool with boolean is boolean), and a
+  nullable integer with a nullable boolean promotes to a nullable integer.
+  A float column stays float, with NaN where a value is missing, since
+  there is no nullable float.
+- A column that is text in one input and numbers in another is written as
+  text if the numbers are nullable, and dropped with a warning if they are
+  plain.
 
 obsm entries present in every input are stacked: arrays as they are, sparse
 matrices as X is, and dataframes (a SCope import's `RegulonsAUC`) as obs is,

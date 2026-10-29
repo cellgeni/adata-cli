@@ -259,6 +259,38 @@ def test_anndata_07_categoricals_mix_with_current_ones(tmp_path):
     assert _cells(got.obs["cell_type"]) == _cells(_reference([a, b]).obs["cell_type"]) == ["B", "T", "NK", None]
 
 
+def _legacy_zarr(path: Path, cells, genes, labels, codes) -> Path:
+    """A Zarr v2 store as anndata 0.7 wrote it: the codes dataset's
+    `categories` attribute is the path of its labels, not a reference."""
+    import zarr
+
+    def text(group, name, values):
+        group.create_array(name, shape=(len(values),), dtype=str)[:] = np.array(values, dtype=object)
+
+    root = zarr.open_group(str(path), mode="w", zarr_format=2)
+    for name, index, column in (("obs", cells, (labels, codes)), ("var", genes, None)):
+        group = root.create_group(name)
+        group.attrs.update({"_index": "_index", "encoding-type": "dataframe", "encoding-version": "0.1.0",
+                            "column-order": ["n", "ct"] if column else ["n"]})
+        text(group, "_index", index)
+        group.create_array("n", data=np.arange(len(index)))
+        if column:
+            text(group.create_group("__categories"), "ct", column[0])
+            codes_ds = group.create_array("ct", data=np.asarray(column[1], dtype=np.int8))
+            codes_ds.attrs["categories"] = "__categories/ct"
+    root.create_array("X", data=np.ones((len(cells), len(genes)), dtype=np.float32))
+    zarr.consolidate_metadata(str(path))
+    return path
+
+
+def test_anndata_07_categoricals_on_zarr_are_found_through_their_frame(tmp_path):
+    """F010 on Zarr, where a 0.7 categorical names its labels by path."""
+    a = _legacy_zarr(tmp_path / "a.zarr", ["a0", "a1", "a2"], ["g1", "g2"], ["T", "B"], [0, 1, 0])
+    b = _legacy_zarr(tmp_path / "b.zarr", ["b0", "b1"], ["g1", "g2"], ["NK", "T"], [0, 1])
+    got = _concat([a, b], tmp_path / "out.zarr")
+    assert _cells(got.obs["ct"]) == _cells(_reference([a, b]).obs["ct"]) == ["T", "B", "T", "NK", "T"]
+
+
 @pytest.mark.parametrize("merge", ["same", "first"])
 def test_anndata_07_var_categoricals_are_merged_by_label(tmp_path, merge):
     """F010: --merge read a 0.7 var categorical's `codes` member, which a
@@ -353,6 +385,24 @@ def test_a_mixed_text_column_an_input_lacks_keeps_both_kinds_of_missing(tmp_path
     assert _cells(got.obs["label"]) == expected == ["x", None, "", None]
 
 
+@pytest.mark.parametrize(
+    "text",
+    [categorical(["x", "y"], [0, 1]), masked(spec.NULLABLE_STRING_ARRAY, ["a", ""], [False, True])],
+    ids=["categorical", "nullable-string"],
+)
+def test_text_meeting_a_nullable_number_column_stays_text(tmp_path, backend, text):
+    """F052-F054 review: once nullable numbers were concatenated as numbers,
+    a column that was text in one input and a nullable number in another
+    was dropped, where it used to be kept as text. It is kept again, its
+    numbers rendered and its missing values still missing."""
+    a = _on(backend, tmp_path, "a", ["a0", "a1"], ["g1"], obs={"c": text})
+    b = _on(backend, tmp_path, "b", ["b0", "b1"], ["g1"],
+            obs={"c": masked(spec.NULLABLE_INTEGER, [5, 0], [False, True])})
+    got = _concat([a, b], backend_path(tmp_path, backend, "out"))
+    expected = [None if v is None else str(v) for v in _cells(_reference([a, b]).obs["c"])]
+    assert _cells(got.obs["c"]) == expected
+
+
 # ---------------------------------------------------------------------------
 # F051: categories that are not text
 
@@ -381,6 +431,37 @@ def test_categories_that_are_not_text_keep_their_dtype(tmp_path, first, second):
     assert sorted(got.obs["group"].cat.categories) == sorted(ref.obs["group"].cat.categories)
     assert _cells(got.obs["group"]) == _cells(ref.obs["group"])
     assert list(got.var["tier"].cat.categories) == [7]
+
+
+@pytest.mark.parametrize(
+    "values, empty",
+    [([True, False], "anndata"), ([1, 2], "anndata"), ([1, 2], "adata")],
+    ids=["bool-and-anndata-empty", "int-and-anndata-empty", "int-and-adata-empty"],
+)
+def test_an_empty_category_set_does_not_turn_categories_into_text(tmp_path, values, empty):
+    """F051: an all-missing categorical has no categories, stored as float64
+    by anndata and as text by this tool. Its dtype decided the union's, so
+    the other input's booleans or integers came out as strings.
+
+    Values are checked against anndata. The dtype is the other input's:
+    anndata itself makes integers float64 here, an artefact of appending its
+    empty float64 categories, which an integer label has no need of."""
+    a = ad.AnnData(X=np.ones((len(values), 1), dtype=np.float32),
+                   obs=pd.DataFrame({"g": pd.Categorical(values)}, index=[f"a{i}" for i in range(len(values))]),
+                   var=pd.DataFrame(index=["g1"]))
+    a.write_h5ad(tmp_path / "a.h5ad")
+    if empty == "anndata":
+        ad.AnnData(X=np.ones((1, 1), dtype=np.float32),
+                   obs=pd.DataFrame({"g": pd.Categorical([np.nan])}, index=["b0"]),
+                   var=pd.DataFrame(index=["g1"])).write_h5ad(tmp_path / "b.h5ad")
+    else:
+        _store(tmp_path / "b.h5ad", ["b0"], ["g1"], obs={"g": categorical([], [-1])})
+    paths = [tmp_path / "a.h5ad", tmp_path / "b.h5ad"]
+    got = _concat(paths, tmp_path / "out.h5ad")
+    assert got.obs["g"].cat.categories.dtype.kind == np.asarray(values).dtype.kind
+    assert _cells(got.obs["g"]) == values + [None]
+    if empty == "anndata":
+        assert _cells(got.obs["g"]) == _cells(_reference(paths).obs["g"])
 
 
 def test_categories_of_different_kinds_fall_back_to_text(tmp_path):
@@ -615,13 +696,13 @@ def test_csr_rows_stay_sorted_when_an_input_orders_var_differently(tmp_path, bac
 
 
 @pytest.mark.parametrize("join", ["inner", "outer"])
-@pytest.mark.parametrize("layout", ["csr", "dense"])
+@pytest.mark.parametrize("layout", ["csr", "csc", "dense"])
 def test_inputs_without_variables_concatenate(tmp_path, backend, join, layout):
     """F117: inputs with no var at all were refused with 'Use --join outer',
     even under --join outer. anndata concatenates them to n_obs x 0."""
     def empty(n):
         values = np.zeros((n, 0), dtype=np.float32)
-        return sparse.csr_matrix(values) if layout == "csr" else values
+        return {"csr": sparse.csr_matrix, "csc": sparse.csc_matrix}.get(layout, np.asarray)(values)
 
     a = _on(backend, tmp_path, "a", ["a0", "a1"], [], X=empty(2), obs={"n": dense(1, 2)})
     b = _on(backend, tmp_path, "b", ["b0"], [], X=empty(1), obs={"n": dense(3)})

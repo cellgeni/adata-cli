@@ -296,13 +296,16 @@ def _ordered(col: Any, frame: Any = None) -> bool:
 
 def _category_labels(per_input: List[np.ndarray]) -> List[np.ndarray]:
     """Category sets cast to one dtype: their own when they are all numbers,
-    or all booleans; text otherwise, the one form every value has."""
-    kinds = {c.dtype.kind for c in per_input}
+    or all booleans; text otherwise, the one form every value has. An empty
+    set has no say: anndata writes an all-missing categorical's categories
+    as float64, and this tool as text."""
+    voters = [c for c in per_input if c.size]
+    kinds = {c.dtype.kind for c in voters}
     if kinds and kinds <= set("iuf"):
-        dtype = np.result_type(*[c.dtype for c in per_input])
+        dtype = np.result_type(*[c.dtype for c in voters])
         return [c.astype(dtype) for c in per_input]
     if kinds == {"b"}:
-        return per_input
+        return [c.astype(bool) for c in per_input]
     return [
         c if c.dtype == object else np.asarray(decode_str_array(c).tolist(), dtype=object)
         for c in per_input
@@ -440,7 +443,10 @@ def _concat_text(
     for col, frame, length in zip(columns, frames, lengths):
         if col is not None:
             values[offset : offset + length], missing[offset : offset + length] = _text(col, frame)
-            nullable = nullable or _column_kind(col) == "masked"
+            nullable = nullable or (
+                _column_kind(col) == "masked"
+                and _masked_encoding(col) == spec.NULLABLE_STRING_ARRAY
+            )
         offset += length
     _write_text(parent, name, values, missing, nullable=nullable)
 
@@ -488,13 +494,20 @@ def _concat_obs_column(
     `frames` are the dataframes the columns come from, which a 0.7
     categorical needs to find its categories on Zarr.
     """
-    families = {_family(c) for c in columns if c is not None}
+    present = [c for c in columns if c is not None]
+    families = {_family(c) for c in present}
+    # Text meeting nullable numbers is kept as text, the numbers rendered and
+    # their mask kept; meeting plain numbers it is dropped below. Both as
+    # before, since anndata cannot write either mix itself.
+    nullable_numbers = all(
+        _column_kind(c) == "masked" for c in present if _family(c) == "number"
+    )
 
     if families == {"categorical"}:
         _concat_categorical(parent, name, columns, frames, lengths)
     elif families == {"number"}:
         _concat_numbers(parent, name, columns, lengths)
-    elif families <= {"text", "categorical"}:
+    elif families <= {"text", "categorical", "number"} and nullable_numbers:
         _concat_text(parent, name, columns, frames, lengths)
     else:
         kinds = sorted({_column_kind(c) for c in columns if c is not None})
