@@ -10,13 +10,17 @@ nav_order: 6
 split-pipe writes, for the combined run and for each sample it was given,
 `DGE_filtered/` (cells) and `DGE_unfiltered/` (every barcode), each holding
 `count_matrix.mtx` (cells x genes), `all_genes.csv` and
-`cell_metadata.csv`:
+`cell_metadata.csv`, each plain or gzipped:
 
 ```
-run/all-sample/DGE_filtered/   (all-well/ in older versions)
+run/all-sample/DGE_filtered/
 run/all-sample/DGE_unfiltered/
 run/<sample>/DGE_filtered/ ...
 ```
+
+This is the layout split-pipe 1.6.1 writes, which the import was checked
+against. A run laid out otherwise, as older versions' may be, is not
+recognised.
 
 Give the run folder, a sample folder or a `DGE_*` folder:
 

@@ -17,9 +17,10 @@ plain or gzipped -- in one of the shapes these tools write:
   (`GSM123_matrix.mtx.gz`, `GSM123_barcodes.tsv.gz`, ...).
 
 The matrix is stored genes x cells, so each file column is read as a row of
-X. The result matches `scanpy.read_10x_mtx(gex_only=False)` column for
-column, except that integer counts stay integers -- as in the 10x HDF5
-import -- where scanpy gives float32.
+X. With `--var-names gene_symbols`, the result has the names and columns
+`scanpy.read_10x_mtx(gex_only=False)` gives, except that integer counts stay
+integers -- as in the 10x HDF5 import -- where scanpy gives float32; by
+default features are named by gene id instead.
 
 Export writes a Cell Ranger 3 folder: gzipped files, three feature columns,
 entries in barcode order.
@@ -28,10 +29,11 @@ entries in barcode order.
 from __future__ import annotations
 
 import json
+import re
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from rich.console import Console
@@ -182,15 +184,26 @@ def _read_folder(folder: Path) -> Optional[_Folder]:
     return found
 
 
-def _genome_folders(path: Path) -> Dict[str, _Folder]:
-    """Cell Ranger 2's layout: one matrix folder per genome, by genome."""
-    found = {}
+#: A run's matrix folder by what it holds, not by genome: STARsolo's
+#: `filtered/` and `raw/`, Cell Ranger's `filtered_feature_bc_matrix/` and so on.
+_RUN_FOLDER = re.compile(r"(filtered|raw)(_\w+_bc_matri(x|ces))?")
+
+
+def _subfolders(path: Path) -> Tuple[Dict[str, _Folder], List[str]]:
+    """The matrix folders in `path`: Cell Ranger 2's, one per genome, by
+    genome; and the names of those that are a run's filtered or raw matrix,
+    which are no genome."""
+    genomes, runs = {}, []
     for child in sorted(path.iterdir()) if path.is_dir() else []:
         folder = _read_folder(child)
-        if folder is not None:
+        if folder is None:
+            continue
+        if _RUN_FOLDER.fullmatch(child.name):
+            runs.append(child.name)
+        else:
             folder.genome = child.name
-            found[child.name] = folder
-    return found
+            genomes[child.name] = folder
+    return genomes, runs
 
 
 def sniff(path: Path) -> bool:
@@ -198,7 +211,7 @@ def sniff(path: Path) -> bool:
     if not path.is_dir() or is_zarr_path(path):
         return False
     try:
-        return _read_folder(path) is not None or bool(_genome_folders(path))
+        return _read_folder(path) is not None or any(_subfolders(path))
     except ValueError:
         # An ambiguous folder is still a matrix folder; `locate` says why.
         return True
@@ -213,7 +226,13 @@ def locate(path: Path, genome: Optional[str]) -> _Folder:
             )
         return folder
 
-    genomes = _genome_folders(path)
+    genomes, runs = _subfolders(path)
+    if not genomes and runs:
+        raise ValueError(
+            f"{path.name} holds {' and '.join(f'{r}/' for r in runs)}: a run's "
+            f"{'matrices' if len(runs) > 1 else 'matrix'}, not one folder per "
+            f"genome. Give the folder to convert, such as {path.name}/{runs[0]}."
+        )
     if not genomes:
         raise ValueError(
             f"{path} is not a 10x or STARsolo matrix folder: it needs "
@@ -479,11 +498,28 @@ def _write_uns(root: Any, folder: _Folder, metadata: Dict[str, Any]) -> None:
 
 
 def _check_text(values: Sequence[str], what: str) -> None:
+    """Refuse what the TSV readers would not read back as written.
+
+    A tab or a line break splits the field. pandas (and so scanpy) and R
+    take a field that starts with a double quote for a quoted one, and read
+    on to the next quote, across tabs and lines; and both skip a blank line,
+    which is what an empty barcode makes.
+    """
     for value in values:
         if "\t" in value or "\n" in value or "\r" in value:
             raise ValueError(
                 f"A {what} contains a tab or a line break, which would break "
                 f"the TSV file: {value!r}."
+            )
+        if value.startswith('"'):
+            raise ValueError(
+                f"A {what} starts with a double quote, which pandas and R read "
+                f"as the start of a quoted field: {value!r}."
+            )
+        if not value and what == "barcode":
+            raise ValueError(
+                "A barcode is empty: its line would be blank, which pandas and "
+                "R skip, so every barcode after it would move up a row."
             )
 
 

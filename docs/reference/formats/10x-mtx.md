@@ -14,7 +14,10 @@ Every shape Cell Ranger and STARsolo write is read:
 * Cell Ranger 3+ (`filtered_feature_bc_matrix/`), with id, name and feature
   type per feature;
 * Cell Ranger 2 (`filtered_gene_bc_matrices/`), one subfolder per genome:
-  give the parent and `--genome` picks one, or the only one is taken;
+  give the parent and `--genome` picks one, or the only one is taken. A
+  folder holding a run's `filtered/` and `raw/` matrices (STARsolo's
+  `Gene/`, Cell Ranger's `outs/`) is not taken for genomes: give the one to
+  convert;
 * STARsolo `Solo.out/Gene/filtered/`, `GeneFull/` and so on, uncompressed,
   with two or three feature columns;
 * STARsolo `Solo.out/Velocyto/raw/`: `spliced.mtx`, `unspliced.mtx` and
@@ -36,10 +39,11 @@ The import flags are those of the [10x HDF5 format](10x-h5.md) (`--genome`,
 `--var-names`, `--make-unique`, `--feature-type`, `--split-feature-types`),
 plus `--compression` for the output store, which is gzip on h5ad unless
 given. Features are named by gene id unless `--var-names gene_symbols` is
-given; with it, reading gives what `scanpy.read_10x_mtx(gex_only=False)`
-gives, column for column, except that integer counts stay integers (int32, int64
-when a value needs it) where scanpy converts them to float32; a `real` matrix
-is read as float64. Duplicate entries are summed, as scipy does.
+given; with it, reading gives the var names and columns
+`scanpy.read_10x_mtx(gex_only=False)` gives, checked against scanpy in CI,
+except that integer counts stay integers (int32, int64 when a value needs
+it) where scanpy converts them to float32; a `real` matrix is read as
+float64. Duplicate entries are summed, as scipy does.
 
 The matrix is read in two streaming passes, so its size is not a limit: the
 first checks the whole folder -- barcode and feature counts against the
@@ -51,6 +55,9 @@ beside the output.
 Exporting needs `--to 10x-mtx`, since a folder has no extension to say so,
 and writes a Cell Ranger 3 folder: gzipped (`--compression none` for plain
 files), three feature columns, entries in barcode order, from X or the
-matrix `--layer` names. Feature ids and types come from var as for the
-[HDF5 export](10x-h5.md), with the same `--force` placeholders. A barcode or feature holding a
-tab or a line break is refused, since it would break the TSV file.
+matrix `--layer` names. Feature ids, names and types come from var as for
+the [HDF5 export](10x-h5.md), with the same `--force` placeholders. Names
+that the TSV readers would not read back are refused: one holding a tab or a
+line break, which would break the file; one starting with a double quote,
+which pandas (and so scanpy) and R take for a quoted field; and an empty
+barcode, whose blank line they skip.
