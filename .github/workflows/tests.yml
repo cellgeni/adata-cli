@@ -50,10 +50,12 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      # Prefer an action over curl|sh
+      # Prefer an action over curl|sh. Every workflow names the same uv, so a
+      # release builds and publishes with the uv this suite ran on.
       - name: Set up uv
         uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3.2.4
         with:
+          version: "0.13.1"
           enable-cache: false
 
       - name: Install dependencies (frozen)
@@ -125,6 +127,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3.2.4
         with:
+          version: "0.13.1"
           enable-cache: false
 
       - name: Install the base package from a fresh resolution
@@ -193,6 +196,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3.2.4
         with:
+          version: "0.13.1"
           enable-cache: false
 
       - name: actionlint
@@ -223,6 +227,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3.2.4
         with:
+          version: "0.13.1"
           enable-cache: true
 
       - name: Install dependencies (frozen)
@@ -271,6 +276,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3.2.4
         with:
+          version: "0.13.1"
           enable-cache: true
 
       - name: Install dependencies (frozen)
@@ -323,6 +329,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3.2.4
         with:
+          version: "0.13.1"
           enable-cache: true
 
       # Resolved apart from uv.lock, so that each direct dependency is at its

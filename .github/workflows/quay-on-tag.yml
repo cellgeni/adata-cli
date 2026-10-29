@@ -33,6 +33,25 @@ jobs:
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
+      # :latest is the newest final release. Up to 0.17.4 it moved for any
+      # tag without a hyphen, which takes in 1.0.0rc1 and a backport tagged
+      # after a later release. Those keep their own tag and leave :latest be.
+      - name: Is this the newest release?
+        id: latest
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          newest=$(git ls-remote --tags --refs origin \
+            | sed 's#.*refs/tags/##' \
+            | { grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' || true; } \
+            | sort -V | tail -n 1)
+          echo "newest release: ${newest:-none}; this one: $VERSION"
+          if [ "$VERSION" = "$newest" ]; then
+            echo "latest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "latest=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
@@ -40,8 +59,7 @@ jobs:
           images: quay.io/cellgeni/adata-cli
           tags: |
             type=raw,value=${{ inputs.version }}
-            # push "latest" only for versions WITHOUT hyphens (excludes pre-releases like 1.0.0-beta):
-            type=raw,value=latest,enable=${{ !contains(inputs.version, '-') }}
+            type=raw,value=latest,enable=${{ steps.latest.outputs.latest == 'true' }}
 
       # Built into the local daemon first, so that an image which does not
       # run is never pushed. The push below rebuilds from this builder's

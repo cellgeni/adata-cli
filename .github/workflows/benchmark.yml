@@ -58,6 +58,7 @@ jobs:
       # the numbers committed to main.
       - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3.2.4
         with:
+          version: "0.13.1"
           enable-cache: false
 
       # The checked-out source, not the published wheel. Benchmarking the
