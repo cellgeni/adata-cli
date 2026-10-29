@@ -109,14 +109,47 @@ def test_the_main_matrix_is_kept_when_a_layer_is_also_named_matrix(tmp_path):
     with h5py.File(truth.path, "a") as f:
         f["layers"].create_dataset("matrix", data=f["matrix"][...] + 100)
         main, named = f["matrix"][...], f["layers/matrix"][...]
+
+    # A layer named matrix: written from an AnnData, whose X is the main one.
     out = tmp_path / "out.h5ad"
     result = _ok(truth.path, "-o", out)
+    assert "X = matrix, layers: " in _out(result)
+    got = _read(out)
+    assert np.array_equal(_dense(got.X), main.T)
+    assert np.array_equal(_dense(got.layers["matrix"]), named.T)
+    assert np.array_equal(_dense(got.layers["spliced"]), truth.layers["spliced"])
+
+    # spliced asked for: the main matrix takes the next free name.
+    out = tmp_path / "spliced.h5ad"
+    result = _ok(truth.path, "-o", out, "--layer", "spliced")
     assert "The main matrix is written as layers['matrix_1']: a layer is already named 'matrix'." in _out(result)
     assert "X = spliced, layers: matrix_1, " in _out(result)
     got = _read(out)
     assert np.array_equal(_dense(got.layers["matrix_1"]), main.T)
     assert np.array_equal(_dense(got.layers["matrix"]), named.T)
     assert np.array_equal(_dense(got.X), truth.layers["spliced"])
+
+
+def test_a_velocyto_round_trip_keeps_the_same_matrices_however_often_it_is_made(tmp_path):
+    """F047: keeping the main matrix as layers["matrix_1"] made each loom ->
+    h5ad -> loom cycle of a velocyto file add a copy of X; the main matrix
+    of a loom written from an AnnData is that AnnData's X."""
+    truth = write_loom(tmp_path / "velo.loom", velocyto=True)
+    first = tmp_path / "0.h5ad"
+    _ok(truth.path, "-o", first)
+    path = first
+    for cycle in (1, 2):
+        loom, path = tmp_path / f"{cycle}.loom", tmp_path / f"{cycle}.h5ad"
+        _ok(tmp_path / f"{cycle - 1}.h5ad", "-o", loom)
+        result = _ok(loom, "-o", path)
+        assert "Warning" not in _out(result)
+    ref, got = ad.read_h5ad(first), ad.read_h5ad(path)
+    # anndata 0.13 lists a None key among the layers; the integration tests skip it too.
+    names = lambda a: sorted(k for k in a.layers.keys() if k)  # noqa: E731
+    assert names(got) == names(ref) == ["ambiguous", "matrix", "spliced", "unspliced"]
+    assert np.array_equal(_dense(got.X), _dense(ref.X))
+    for name in names(ref):
+        assert np.array_equal(_dense(got.layers[name]), _dense(ref.layers[name])), name
 
 
 def test_layer_picks_x(tmp_path):
@@ -409,6 +442,36 @@ def test_a_store_without_x_writes_the_layer_named_and_leaves_x_out(tmp_path):
     assert result.exit_code == 1
     assert "This store has no X: name the matrix to write with --layer (there are counts, spliced)." in _out(result)
     assert not (tmp_path / "plain.loom").exists()
+
+
+def test_a_layer_named_x_is_written_from_itself_and_x_beside_it(tmp_path):
+    """F102 (review): a layer named X was written from the top-level X,
+    and with --layer naming another matrix it was listed twice, failing
+    half way with HDF5's `name already exists`."""
+    obj = ad.AnnData(
+        X=np.ones((3, 2), dtype=np.float32),
+        obs=pd.DataFrame(index=["a", "b", "c"]),
+        var=pd.DataFrame(index=["g1", "g2"]),
+        layers={"X": np.full((3, 2), 7, dtype=np.float32), "counts": np.full((3, 2), 3, dtype=np.float32)},
+    )
+    source = tmp_path / "x.h5ad"
+    obj.write_h5ad(source)
+    ref = ad.read_h5ad(source)
+
+    plain = tmp_path / "plain.loom"
+    _ok(source, "-o", plain)
+    with h5py.File(plain, "r") as f:
+        assert np.array_equal(f["matrix"][...], _dense(ref.X).T)
+        assert np.array_equal(f["layers/X"][...], _dense(ref.layers["X"]).T)
+
+    named = tmp_path / "counts.loom"
+    result = _ok(source, "-o", named, "--layer", "counts")
+    assert "X is written as layers/X_1: a layer is already named 'X'." in _out(result)
+    with h5py.File(named, "r") as f:
+        assert np.array_equal(f["matrix"][...], _dense(ref.layers["counts"]).T)
+        assert sorted(f["layers"]) == ["X", "X_1"]
+        assert np.array_equal(f["layers/X"][...], _dense(ref.layers["X"]).T)
+        assert np.array_equal(f["layers/X_1"][...], _dense(ref.X).T)
 
 
 def test_columns_named_like_a_looms_own_attributes_are_left_out_with_a_warning(tmp_path):

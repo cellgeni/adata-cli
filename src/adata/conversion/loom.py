@@ -18,9 +18,11 @@ are obsm. Four things differ, on purpose (docs/reference/formats/loom.md
 lists the same four):
 
 * values keep their dtype, where anndata casts X to float32;
-* graphs become obsp/varp, global attributes `uns["loom"]`, and a main
-  matrix that a layer named `matrix` would hide `layers["matrix_1"]`,
-  where anndata drops them;
+* graphs become obsp/varp and global attributes `uns["loom"]`, where
+  anndata drops them; and the main matrix is never dropped: with a layer
+  named `matrix` (a loom written from an AnnData that had one), X is the
+  main matrix, where anndata takes `spliced` and lets the layer replace
+  the main matrix;
 * var is named by gene id when the file records one, as `convert` names
   every other format;
 * compound attributes become dataframes in obsm and varm, a column per
@@ -292,7 +294,11 @@ class LoomImport(Converter):
 
             x = options.layer
             if x is None:
-                x = "spliced" if "spliced" in layers else ""
+                # A layer named matrix says the loom was written from an
+                # AnnData, its X as the main matrix and anndata's
+                # layers["matrix"] beside it: that X comes back as X, so a
+                # round trip neither drops the main matrix nor copies it.
+                x = "spliced" if "spliced" in layers and "matrix" not in layers else ""
             elif x == "matrix":
                 x = ""
             elif x not in layers:
@@ -306,7 +312,7 @@ class LoomImport(Converter):
                 sources[name].append(f"layers/{name}")
             if x != "":
                 # anndata's place for the main matrix; when a layer of that
-                # name (from an exported AnnData) takes it, the next free one,
+                # name takes it (--layer naming another), the next free one,
                 # so neither is lost.
                 main = claim("matrix", set(layers))
                 sources[""].append(f"layers/{main}")
@@ -346,7 +352,13 @@ class LoomImport(Converter):
             for axis in (obs, var):
                 if axis.names in axis.columns:
                     axis.columns.remove(axis.names)
-            attrs = _global_attrs(handle)
+            too_large: List[str] = []
+            attrs = _global_attrs(handle, too_large)
+            if too_large:
+                warnings.append(
+                    f"Not read: global attributes {', '.join(too_large)} -- each holds more than "
+                    f"{scope.MAX_METADATA_BYTES:,} bytes once decompressed."
+                )
             found = None
             if scope.is_scope(attrs, handle.get("col_attrs", empty).keys()):
                 metadata = attrs.get(scope.METADATA)
@@ -473,14 +485,25 @@ class LoomImport(Converter):
                     _write_matrix(ds, root, places, detail)
 
 
-def _global_attrs(handle: h5py.File) -> Dict[str, Any]:
-    """Global attributes, spec 3's datasets and older root attributes alike."""
+def _global_attrs(handle: h5py.File, skipped: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Global attributes, spec 3's datasets and older root attributes alike.
+
+    A dataset is read only if it holds at most `scope.MAX_METADATA_BYTES`
+    once read: one compressed, or never written, can hold far more than
+    the file does. (A root attribute cannot be compressed.) Those that
+    hold more are left out, their names added to `skipped`.
+    """
     found: Dict[str, Any] = {key: value for key, value in handle.attrs.items()}
     attrs = handle.get("attrs")
     if isinstance(attrs, h5py.Group):
         for key, ds in attrs.items():
-            if isinstance(ds, h5py.Dataset):
-                found[key] = ds[()]
+            if not isinstance(ds, h5py.Dataset):
+                continue
+            if ds.size * ds.dtype.itemsize > scope.MAX_METADATA_BYTES:
+                if skipped is not None:
+                    skipped.append(key)
+                continue
+            found[key] = ds[()]
     return found
 
 
@@ -737,7 +760,8 @@ _ASCII = h5py.string_dtype(encoding="ascii")
 @dataclass
 class _Export:
     matrix: str
-    layers: List[str]
+    #: (loom layer, the element it is written from)
+    layers: List[Tuple[str, str]]
     obs_columns: List[str]
     var_columns: List[str]
     obsm: List[str]
@@ -788,29 +812,34 @@ class LoomExport(Converter):
                 if "raw" in root and is_group(root["raw"]) and "X" in root["raw"]:
                     names.append("raw/X")
                 raise ValueError(
-                    f"This store has no X: name the matrix to write with --layer (there are {', '.join(names)})."
+                    "This store has no X: name the matrix to write with --layer "
+                    f"(there are {', '.join(names)})."
                     if names else "This store has no X, nor a layer to write in its place."
                 )
             main = _matrix(root, path, (n_obs, n_var))
-            layers = []
+            #: (loom layer, the element it is written from)
+            layers: List[Tuple[str, str]] = []
             if raw:
                 # raw/X has raw/var's genes; X and the layers have var's.
-                if "layers" in root and len(root["layers"]) or path != "X":
+                if "X" in root or ("layers" in root and len(root["layers"])):
                     warnings.append(
                         "Not written: X and the layers -- they follow var, and "
                         "raw/X follows raw/var."
                     )
             else:
-                # X too, when --layer names another matrix and there is an X.
-                others = (["X"] if path != "X" and "X" in root else []) + [
-                    f"layers/{name}" for name in (root["layers"] if "layers" in root else [])
-                ]
-                for other in others:
-                    if other == path:
-                        continue
+                names = [n for n in (root["layers"] if "layers" in root else []) if f"layers/{n}" != path]
+                others = [(name, f"layers/{name}") for name in names]
+                if path != "X" and "X" in root:
+                    # X too, when --layer names another matrix: as layer X,
+                    # unless a layer of the store's has that name.
+                    name = claim("X", set(names))
+                    if name != "X":
+                        warnings.append(f"X is written as layers/{name}: a layer is already named 'X'.")
+                    others.insert(0, (name, "X"))
+                for name, other in others:
                     try:
                         _matrix(root, other, (n_obs, n_var))
-                        layers.append(other.split("/", 1)[-1])
+                        layers.append((name, other))
                     except ValueError as exc:
                         warnings.append(f"Not written: {other}: {exc}")
             obs_columns = _columns(root["obs"], obs_name, warnings, "obs")
@@ -858,7 +887,7 @@ class LoomExport(Converter):
         summary = (
             f"{src_format} → loom 3.0.0{' (SCope)' if found is not None else ''}, "
             f"{n_var:,} genes x {n_obs:,} cells from "
-            f"{path}{', layers: ' + ', '.join(layers) if layers else ''}"
+            f"{path}{', layers: ' + ', '.join(name for name, _ in layers) if layers else ''}"
             f"{', ' + found.describe() if found is not None and found.describe() else ''}; "
             f"dense {_size(dense)} before compression"
         )
@@ -894,10 +923,9 @@ class LoomExport(Converter):
             with console.status(f"[cyan]Writing {detail.matrix} dense...[/]"):
                 _export_matrix(resolve(root, detail.matrix), out, "matrix")
             layers = out.create_group("layers")
-            for name in detail.layers:
+            for name, where in detail.layers:
                 with console.status(f"[cyan]Writing layer {name} dense...[/]"):
-                    obj = root["X"] if name == "X" else root["layers"][name]
-                    _export_matrix(obj, layers, name)
+                    _export_matrix(resolve(root, where), layers, name)
 
             with console.status("[cyan]Writing the attributes...[/]"):
                 cols = out.create_group("col_attrs")

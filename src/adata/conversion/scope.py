@@ -583,8 +583,9 @@ def plan_export(
             numeric, other = [], []
             for column in dataframe_columns(obj, resolve_index(obj)[1]):
                 member = obj[column]
+                # Not anndata 0.7's categorical, whose codes are numbers too.
                 ok = (spec.encoding_type(member) in (None, spec.ARRAY) and getattr(member, "ndim", 0) == 1
-                      and member.dtype.kind in "biuf")
+                      and member.dtype.kind in "biuf" and not is_categorical(member))
                 (numeric if ok else other).append(column)
             if other:
                 warnings.append(f"Not written in {where}/{key}: {', '.join(other)} -- a SCope "

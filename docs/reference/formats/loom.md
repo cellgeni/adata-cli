@@ -27,7 +27,7 @@ adata convert counts.h5ad -o counts.loom
 
 | loom | AnnData |
 |---|---|
-| `/matrix`, or `/layers/spliced` when there is one | `X`, CSR (`--dense` keeps it dense) |
+| `/matrix`, or `/layers/spliced` when there is one and no layer is named `matrix` | `X`, CSR (`--dense` keeps it dense) |
 | `/layers/<name>`, and `/matrix` when X is a layer | `layers[<name>]`, `layers["matrix"]` (`layers["matrix_1"]` when a layer is named `matrix`) |
 | `col_attrs` with one value per cell / several | obs columns / obsm |
 | `row_attrs`, the same way | var columns / varm |
@@ -37,7 +37,7 @@ adata convert counts.h5ad -o counts.loom
 
 | Flag | Meaning |
 |---|---|
-| `--layer` | The loom layer that becomes X: `matrix` (the main one) or a layer name (default `spliced` when there is one, else `matrix`) |
+| `--layer` | The loom layer that becomes X: `matrix` (the main one) or a layer name (default `spliced` when there is one and no layer is named `matrix`, else `matrix`) |
 | `--dense` | Keep X and the layers dense |
 | `--var-names` | `gene_ids` (default) to name genes by id, `gene_symbols` by symbol; each falls back to the other when the loom records only one |
 | `--make-unique` | Suffix repeated gene names (`-1`, `-2`, ...) as anndata's `var_names_make_unique` does |
@@ -46,9 +46,11 @@ adata convert counts.h5ad -o counts.loom
 
 Reading gives what `anndata.read_loom` gives, checked against it in CI, with
 four differences: values keep their dtype (velocyto's integer counts stay
-integers, where anndata makes X float32); graphs, global attributes, and a
-main matrix that a layer named `matrix` would hide are kept, where anndata
-drops them; genes are named by id (`Accession`), the symbols (`Gene`)
+integers, where anndata makes X float32); graphs and global attributes are
+kept, where anndata drops them, and so is the main matrix: a loom with a
+layer named `matrix` was written from an AnnData that had one, so its main
+matrix, that AnnData's X, is X again, where anndata takes `spliced` and
+lets the layer replace the main matrix; genes are named by id (`Accession`), the symbols (`Gene`)
 staying a column, unless `--var-names gene_symbols` is given; and compound
 attributes, which loompy's validator rejects, so that anndata refuses the
 file, become dataframes (see [SCope looms](#scope-looms)). Strings are read as loompy reads them, with XML references such as
@@ -78,7 +80,7 @@ holding only zeros compress to almost nothing.
 
 | Flag | Meaning |
 |---|---|
-| `--layer` | The matrix that becomes `/matrix` (default X): a layer's name, or `raw/X`, written with raw/var's genes and without X and the layers. X, when there is one, is then written as a layer |
+| `--layer` | The matrix that becomes `/matrix` (default X): a layer's name, with X, when there is one, written as a layer (`X_1` if a layer is named `X`); or `raw/X`, written with raw/var's genes and without X and the layers |
 
 A store without X needs `--layer`, and is refused without it before
 anything is written. A loom's attributes share one flat namespace per
@@ -118,9 +120,10 @@ name holding `/`, which HDF5 and Zarr cannot store, has it replaced by `_`,
 with a warning. A clustering named like an obs column already there gets a
 suffix (`Tissue_1`), with a note; one `MetaData` does not name is called
 `clustering_<id>`, and an embedding `X_embedding_<id>`. A value with no
-cluster in `MetaData` is missing. `MetaData` that is neither JSON nor
-base64 of compressed JSON, or that decompresses to more than 64 MiB, is
-kept as text, with a warning; the embeddings
+cluster in `MetaData` is missing. A global attribute that holds more than
+64 MiB once read is not read, with a warning. `MetaData` that is neither
+JSON nor base64 of compressed JSON, or that decompresses to more than
+64 MiB, is kept as text, with a warning; the embeddings
 and clusterings are then named by id, and a clustering's categories are the
 ids found.
 

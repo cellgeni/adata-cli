@@ -1028,3 +1028,58 @@ def test_bounded_metadata_reads_as_zlib_reads_a_stream_cut_short_or_followed_by_
     except zlib.error:
         expected = None
     assert scope.read_metadata(text)[0] == expected
+
+
+def test_metadata_stored_compressed_past_the_bound_is_not_read(tmp_path, monkeypatch):
+    """F139 (review): spec 3 keeps MetaData in a dataset, which HDF5 itself
+    can compress; that was read whole before the bound on MetaData's own
+    compression was checked."""
+    from adata.conversion import scope
+
+    monkeypatch.setattr(scope, "MAX_METADATA_BYTES", 4096)
+    truth = write_scope_loom(tmp_path / "scope.loom", compressed=False)
+    padded = json.dumps(dict(truth.metadata, padding="x" * 5000)).encode()
+    with h5py.File(truth.path, "a") as f:
+        del f["attrs/MetaData"]
+        f["attrs"].create_dataset("MetaData", data=np.array([padded]), compression="gzip")
+        assert f["attrs/MetaData"].id.get_storage_size() < 4096 < len(padded)
+    out = tmp_path / "out.h5ad"
+    result = _ok(truth.path, "-o", out)
+    assert "Not read: global attributes MetaData -- each holds more than 4,096 bytes once decompressed." in _out(result)
+    got = _read(out)
+    assert "metadata" not in got.uns["scope"]
+    assert "MetaData" not in got.uns["loom"]["attrs"]
+    assert np.array_equal(got.obsm["X_embedding_0"], truth.embeddings["0"]), "named by id, as without MetaData"
+
+    # Within the bound, a dataset of one string reads as ever.
+    with h5py.File(truth.path, "a") as f:
+        del f["attrs/MetaData"]
+        f["attrs"].create_dataset("MetaData", data=np.array([json.dumps(truth.metadata).encode()]), compression="gzip")
+    monkeypatch.setattr(scope, "MAX_METADATA_BYTES", 64 << 20)
+    _ok(truth.path, "-o", tmp_path / "small.h5ad")
+    assert json.loads(_read(tmp_path / "small.h5ad").uns["scope"]["metadata"]) == truth.metadata
+
+
+def test_an_anndata_07_categorical_in_a_table_is_left_out_as_a_current_one_is(tmp_path, sample_legacy_v010_h5ad):
+    """F008 (review): in an obsm dataframe, anndata 0.7's categorical (codes
+    with a `categories` reference) passed for a number column, and its codes
+    were written as a field of the SCope table."""
+    with h5py.File(sample_legacy_v010_h5ad, "a") as f:
+        # What anndata 0.7 also wrote, and anndata needs to read the file back.
+        f["obs"].attrs["column-order"] = np.array([b"cell_type", b"n_counts"])
+        f["var"].attrs["column-order"] = np.array([], dtype="S1")
+        frame = f.create_group("obsm").create_group("RegulonsAUC")
+        frame.attrs.update({"_index": "_index", "encoding-type": "dataframe", "encoding-version": "0.1.0"})
+        frame.create_dataset("_index", data=f["obs/obs_names"][...])
+        frame.create_dataset("A(+)", data=np.array([0.1, 0.2, 0.3, 0.4]))
+        labels = frame.create_group("__categories").create_dataset("grp", data=np.array([b"x", b"y"]))
+        frame.create_dataset("grp", data=np.array([1, 0, 1, 0], dtype=np.int8)).attrs["categories"] = labels.ref
+        frame.attrs["column-order"] = np.array([b"A(+)", b"grp"])
+    ref = ad.read_h5ad(sample_legacy_v010_h5ad)
+    assert ref.obsm["RegulonsAUC"]["grp"].dtype == "category"
+    out = tmp_path / "out.loom"
+    result = _ok(sample_legacy_v010_h5ad, "-o", out, "--scope")
+    assert "Not written in obsm/RegulonsAUC: grp -- a SCope table holds numbers only." in _out(result)
+    loom = _scope_loom(out)
+    assert loom["cols"]["RegulonsAUC"].dtype.names == ("A(+)",)
+    assert list(loom["cols"]["RegulonsAUC"]["A(+)"]) == list(ref.obsm["RegulonsAUC"]["A(+)"])
