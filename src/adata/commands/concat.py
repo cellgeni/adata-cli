@@ -21,7 +21,10 @@ def concat_stores(
     space_check: bool = True,
     **kwargs: object,
 ) -> None:
-    check_output(output, files)
+    if not output.exists():
+        # concat never replaces an output (it refuses one that exists), but
+        # a new one may still name a path inside a Zarr input.
+        check_output(output, files)
     # About the sum of the inputs: an inner join keeps less, an outer join's
     # dense fill can add some.
     check_free_space(

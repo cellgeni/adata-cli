@@ -47,8 +47,6 @@ def export_json(
     finally:
         if out_fh is not sys.stdout:
             out_fh.close()
-    if out_fh is not sys.stdout:
-        console.print(f"[green]Wrote[/] {out}")
 
 
 def _attrs_to_jsonable(attrs: Any, max_elements: int) -> Dict[str, Any]:

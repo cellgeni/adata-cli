@@ -148,6 +148,7 @@ adata convert multiome.h5ad -o multiome.h5mu
 | `--compression` | `none`, `gzip` or `lzf` for h5ad; `none`, `gzip`, `zstd` or `blosc` for Zarr; `gzip` (default) or `none` for an MTX folder |
 | `--overwrite` | Replace an existing output |
 | `--force` | Convert despite a lossy, inflating or placeholder result |
+| `--no-space-check` | Write even if the disk looks too small; see [Writing outputs](#writing-outputs) |
 
 | Format | Extension | Read | Write |
 |---|---|---|---|
@@ -181,7 +182,8 @@ Every check runs before anything is written. The output is written beside
 its destination (`out.adata-tmp.zarr`) and moved into place only once
 complete, so a failed conversion leaves nothing behind. An existing output is
 refused unless `--overwrite` is given, and is replaced only once its
-successor is finished.
+successor is finished. `--overwrite` replaces a store, or a Matrix Market
+folder holding only its own files, never a folder holding anything else.
 
 To change a matrix's dtype, layout or density instead, use
 [`recast`](#recast).
@@ -439,12 +441,14 @@ leaves anything behind; see
 
 **Free space is checked first.** A disk that fills part way through an HDF5
 write can stop the process inside the HDF5 library, where nothing can clean
-up. So `subset`, `recast`, `split`, `concat` and each `import` subcommand
-estimate the output's size and refuse to start when the output's filesystem
-has less free than that. The estimate follows the source's size on disk:
-the fraction a `subset` or `split` keeps, the whole store for `recast` (more
-if a cast widens the values or densifies a matrix), the inputs together for
-`concat`, the store plus the file for `import`. It is an estimate, and a
+up. So `subset`, `recast`, `split`, `concat`, `convert` and each `import`
+subcommand estimate the output's size and refuse to start when the output's
+filesystem has less free than that. The estimate follows the source's size
+on disk: the fraction a `subset` or `split` keeps, the whole store for
+`recast` (more if a cast widens the values or densifies a matrix), the inputs
+together for `concat`, the store plus the file for `import`, the input file
+or store for `convert` (a folder input, such as Space Ranger's `outs/`, holds
+images and BAMs the output never carries, so it is not measured). It is an estimate, and a
 quota can be smaller than the free space it sees, so `--no-space-check`
 skips it.
 

@@ -24,6 +24,7 @@ import shutil
 import signal
 import socket
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, List, Optional, Sequence, Tuple
@@ -60,6 +61,30 @@ def _remove(path: Path) -> None:
 
 def _exists(path: Path) -> bool:
     return path.exists() or path.is_symlink()
+
+
+def _discard(path: Path, settle: float = 0.5) -> None:
+    """Remove a failed write's temporary, and keep it removed.
+
+    zarr writes chunks from its own event-loop thread, and an exception in
+    ours (a failed chunk, or SIGTERM landing mid-write) does not stop the
+    writes already in flight: they can recreate part of a store while it is
+    being deleted. A directory is therefore removed until it stays gone.
+    """
+    if not (path.is_dir() and not path.is_symlink()):
+        _remove(path)
+        return
+    deadline = time.monotonic() + settle
+    while True:
+        try:
+            _remove(path)
+        except OSError:  # a file appeared under rmtree; go round again
+            if time.monotonic() >= deadline:
+                raise
+        time.sleep(0.05)
+        if not _exists(path) or time.monotonic() >= deadline:
+            break
+    _remove(path)
 
 
 class Terminated(SystemExit):
@@ -256,6 +281,9 @@ def staged_outputs(outputs: Sequence[Path]) -> Iterator[List[Path]]:
     temps = [_temp_for(p) for p in outputs]
     backups = [_sibling(p, "adata-old") for p in outputs]
 
+    for output in outputs:
+        output.parent.mkdir(parents=True, exist_ok=True)
+
     with _Signals() as signals:
         locks = _claim([lock_for(p) for p in outputs])
         try:
@@ -266,7 +294,7 @@ def staged_outputs(outputs: Sequence[Path]) -> Iterator[List[Path]]:
             except BaseException:
                 with signals.hold():
                     for temp in temps:
-                        _remove(temp)
+                        _discard(temp)
                 raise
 
             with signals.hold():

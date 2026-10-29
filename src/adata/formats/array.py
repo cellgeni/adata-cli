@@ -55,7 +55,6 @@ def export_npy(
     try:
         if ds.shape == ():
             mm[...] = ds[()]
-            console.print(f"[green]Wrote[/] {out}")
             return
 
         if ds.ndim == 1:
@@ -68,7 +67,6 @@ def export_npy(
                         f"[magenta]Exporting {obj}: {start}-{end} of {n}...[/]"
                     )
                     mm[start:end] = ds[start:end]
-            console.print(f"[green]Wrote[/] {out}")
             return
 
         n0 = int(ds.shape[0])
@@ -81,7 +79,6 @@ def export_npy(
                     f"[magenta]Exporting {obj}: {start}-{end} of {n0}...[/]"
                 )
                 mm[start:end, ...] = ds[start:end, ...]
-        console.print(f"[green]Wrote[/] {out}")
     finally:
         del mm
 

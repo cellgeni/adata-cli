@@ -827,6 +827,7 @@ def convert(
     layout: Optional[str] = typer.Option(None, "--layout", hidden=True),
     in_memory: bool = typer.Option(False, "--in-memory", hidden=True),
     chunk_rows: int = _chunk_option(1024, "Row chunk size", hidden=True),
+    no_space_check: bool = _space_check_option(),
 ) -> None:
     """
     Convert a store to another format.
@@ -927,6 +928,7 @@ def convert(
                 in_memory=in_memory,
                 force=force,
                 zarr_format=zarr_format,
+                space_check=not no_space_check,
             )
             return
 
@@ -994,6 +996,7 @@ def convert(
                 default_embedding=default_embedding,
                 mod=mod,
             ),
+            space_check=not no_space_check,
         )
     except Exception as e:
         console.print(f"[bold red]Error:[/] {escape(str(e))}")

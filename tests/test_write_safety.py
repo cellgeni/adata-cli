@@ -779,7 +779,7 @@ def test_export_writes_through_a_staged_file(tmp_path):
     result = runner.invoke(app, _args(["export", "dataframe", src, "obs", "-o", out]))
     assert result.exit_code == 0, _out(result)
     assert list(pd.read_csv(out, index_col=0).index) == ["c0", "c1", "c2", "c3"]
-    assert f"Wrote {out}" in _out(result)
+    assert "Wrote" in _out(result) and "adata-tmp" not in _out(result)
     assert _debris(tmp_path) == []
 
 
@@ -1229,3 +1229,55 @@ def test_every_leftover_is_named_at_once(tmp_path):
     assert "a.adata-tmp.h5ad" in text and "b.adata-tmp.h5ad" in text
     assert sorted(p.name for p in parts.iterdir()) == ["a.adata-tmp.h5ad",
                                                        "b.adata-tmp.h5ad"]
+
+
+# ---------------------------------------------------------------------------
+# convert: the same output check and free-space check
+
+
+def test_convert_overwrite_will_not_replace_a_folder_that_is_not_a_store(tmp_path):
+    """F037: `convert base.h5ad -o proj --to h5ad --overwrite` replaced the
+    folder proj/, which held other files, with an HDF5 file."""
+    src = _rich_store(tmp_path / "in.h5ad")
+    folder = _folder(tmp_path, "proj")
+    kept = _snapshot(folder)
+
+    for argv in (
+        ["convert", src, "-o", folder, "--to", "h5ad", "--overwrite"],
+        ["convert", src, "-o", folder, "--to", "10x-mtx", "--overwrite"],
+    ):
+        result = runner.invoke(app, _args(argv))
+        assert result.exit_code == 1, (argv, _out(result))
+        assert _snapshot(folder) == kept
+    assert _debris(tmp_path) == []
+
+
+def test_convert_checks_free_space_first(tmp_path, monkeypatch):
+    """F022: the HDF5 copy convert makes is where a full disk was seen to
+    abort the process (SIGABRT in H5Ocopy), leaving the temporary behind."""
+    src = _rich_store(tmp_path / "in.h5ad")
+    _tiny_disk(monkeypatch)
+
+    result = runner.invoke(app, _args(["convert", src, "-o", tmp_path / "o.zarr"]))
+    assert result.exit_code == 1
+    assert "Not enough free space" in _out(result)
+    assert not (tmp_path / "o.zarr").exists()
+
+    result = runner.invoke(app, _args(["convert", src, "-o", tmp_path / "o.zarr",
+                                       "--no-space-check"]))
+    assert result.exit_code == 0, _out(result)
+    assert _read(tmp_path / "o.zarr").shape == (4, 4)
+
+
+def test_a_file_written_into_a_folder_being_read_is_allowed(tmp_path):
+    """Only a Zarr input is guarded against outputs inside it: writing next
+    to a Space Ranger outs/ or into the MTX folder being read is fine."""
+    src = _rich_store(tmp_path / "in.h5ad")
+    folder = tmp_path / "mtx"
+    made = runner.invoke(app, _args(["convert", src, "-o", folder,
+                                     "--to", "10x-mtx", "--force"]))
+    assert made.exit_code == 0, _out(made)
+
+    result = runner.invoke(app, _args(["convert", folder, "-o", folder / "c.h5ad"]))
+    assert result.exit_code == 0, _out(result)
+    assert _read(folder / "c.h5ad").shape == (4, 4)

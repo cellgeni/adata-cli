@@ -41,10 +41,14 @@ def is_zarr_path(path: Path) -> bool:
     return False
 
 
-def _inside(path: Path, directory: Path) -> bool:
-    """Does `path` lie inside `directory` (a Zarr store, say)?"""
-    directory = Path(directory)
-    if not directory.is_dir():
+def _inside(path: Path, store: Path) -> bool:
+    """Does `path` lie inside `store`, a Zarr store, among its chunks?
+
+    Only a Zarr store: a file written into a Space Ranger `outs/` or an MTX
+    folder that is being read does no harm.
+    """
+    directory = Path(store)
+    if not is_zarr_path(directory):
         return False
     return any(
         parent.exists() and same_path(parent, directory)
