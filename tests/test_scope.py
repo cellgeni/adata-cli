@@ -1083,3 +1083,24 @@ def test_an_anndata_07_categorical_in_a_table_is_left_out_as_a_current_one_is(tm
     loom = _scope_loom(out)
     assert loom["cols"]["RegulonsAUC"].dtype.names == ("A(+)",)
     assert list(loom["cols"]["RegulonsAUC"]["A(+)"]) == list(ref.obsm["RegulonsAUC"]["A(+)"])
+
+
+def test_a_global_attribute_declared_larger_than_the_bound_is_not_read(tmp_path, monkeypatch):
+    """F139 (verifier's repro): a chunked dataset under /attrs whose chunks
+    were never written takes almost nothing on disk, but was read back
+    whole at the size it declares."""
+    from adata.conversion import scope
+
+    monkeypatch.setattr(scope, "MAX_METADATA_BYTES", 4096)
+    truth = write_loom(tmp_path / "fill.loom")
+    with h5py.File(truth.path, "a") as f:
+        f["attrs"].create_dataset("Big", shape=(1 << 20,), dtype=np.uint8, chunks=(1 << 16,))
+        assert f["attrs/Big"].id.get_storage_size() == 0
+    out = tmp_path / "out.h5ad"
+    result = _ok(truth.path, "-o", out)
+    assert "Not read: global attributes Big -- each holds more than 4,096 bytes once decompressed." in _out(result)
+    attrs = _read(out).uns["loom"]["attrs"]
+    assert "Big" not in attrs
+    with h5py.File(truth.path, "r") as f:
+        kept = [k for k in f["attrs"] if k != "Big"]
+    assert kept and all(k in attrs for k in kept), "the others are read as ever"
