@@ -114,7 +114,9 @@ def write_categorical(
 ) -> Any:
     """Write a `categorical` group of `categories` + `codes`.
 
-    A code of -1 denotes a missing value, as the spec requires.
+    A code of -1 denotes a missing value, as the spec requires. Categories
+    given as a numeric or boolean array keep that dtype, as anndata writes
+    them; anything else is written as text.
     """
     if replace:
         _replace(parent, name)
@@ -122,7 +124,10 @@ def write_categorical(
     spec.set_encoding(group, spec.CATEGORICAL)
     group.attrs["ordered"] = bool(ordered)
 
-    write_string_array(group, "categories", categories)
+    if isinstance(categories, np.ndarray) and categories.dtype.kind in "biuf":
+        write_dense(group, "categories", categories)
+    else:
+        write_string_array(group, "categories", categories)
     write_dense(group, "codes", np.asarray(codes, dtype=_codes_dtype(len(categories))))
     return group
 
