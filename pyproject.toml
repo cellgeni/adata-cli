@@ -64,24 +64,26 @@ Changelog = "https://cellgeni.github.io/adata-cli/changelog/"
 
 [project.optional-dependencies]
 # Reading pycisTopic's pickles: pandas and scipy rebuild their tables and
-# matrices. Imported only by that converter.
+# matrices. Imported only on that converter's path.
 pickle = [
-    # scipy before 1.15 caps numpy below 2.3. pandas 2.3 is the oldest that
-    # anndata 0.13, the tests' oracle, installs beside.
-    "pandas>=2.3",
+    # pandas 2.2.3 is what tests/test_external_readers.py converts a pickle
+    # under (the floors job runs dev's pandas 3); 2.2.0 and 2.2.1 predate
+    # numpy 2. scipy before 1.15 caps numpy below 2.3.
+    "pandas>=2.2.3",
     "scipy>=1.15",
 ]
 # Reading Visium HD: its bin positions are Parquet only. Imported only by
-# the Visium converter, and only for an HD input.
+# the Visium converter, and only for an HD input. 18 is the first with
+# wheels for Python 3.13.
 spatial = [
-    "pyarrow>=17",
+    "pyarrow>=18",
 ]
 dev = [
-    # pandas 3, not the pickle extra's 2.3: anndata writes nullable strings
+    # pandas 3, not the pickle extra's 2.2.3: anndata writes nullable strings
     # only where pandas infers them, and the test fixtures rely on that.
     "pandas>=3.0",
     "scipy>=1.15",
-    "pyarrow>=17",
+    "pyarrow>=18",
     # The oracle for the centroids and areas of segmented cells
     # (tests/test_geojson.py). Older releases fail on numpy 2.3.
     "shapely>=2.0.6",
