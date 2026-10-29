@@ -565,6 +565,26 @@ def test_a_quote_inside_a_name_reads_back_in_pandas(tmp_path, counts):
     assert list(features[1].fillna("")) == names
 
 
+def test_a_probe_level_matrix_exports_its_probe_ids(tmp_path, counts):
+    """F045: an imported Flex matrix exported its gene ids as the feature
+    ids, the same for several probes, and lost the probe ids."""
+    from tests.conftest import write_10x_h5
+
+    pd = pytest.importorskip("pandas")
+    probes = [f"ENSG{i // 2}|G{i // 2}|h{i}" for i in range(len(IDS))]
+    h5 = write_10x_h5(
+        tmp_path / "flex.h5", counts, barcodes=_barcodes(), ids=probes,
+        names=[f"G{i // 2}|h{i}" for i in range(len(IDS))],
+        probe_gene_ids=[f"ENSG{i // 2}" for i in range(len(IDS))],
+    )
+    store, out = tmp_path / "flex.h5ad", tmp_path / "out"
+    _ok(h5, "-o", store, "--make-unique")
+    _ok(store, "-o", out, "--to", "10x-mtx")
+    # As scanpy's read_10x_mtx reads it.
+    features = pd.read_csv(out / "features.tsv.gz", header=None, sep="\t")
+    assert list(features[0]) == probes
+
+
 def test_a_folder_output_needs_to(cr3, tmp_path):
     store = tmp_path / "s.h5ad"
     _ok(cr3, "-o", store)
