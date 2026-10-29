@@ -84,7 +84,45 @@ int64`.
 Reading a store and writing it at once would destroy it: a Zarr store opened
 for writing is emptied before a single element has been read. Use `--inplace`,
 which writes beside the source and swaps the result in at the end, or give
-another output path. `split` says `Choose another --output-dir`.
+another output path. `split` says `Choose another --output-dir`, and `export`
+says it of a file named after the input or inside a Zarr input.
+
+The output can be the input under another name: a symlink, a hard link, or,
+on macOS and Windows, the same name in another case (`Data.h5ad` and
+`data.h5ad` are one file there).
+
+### `Give --output/-o or --inplace, not both: --inplace replaces the input.`
+
+`--inplace` rewrites the source and `-o` names a new store; pick one. Before
+0.17.4 `-o` was silently ignored and the source rewritten.
+
+### `'results' is a directory, not a Zarr store: refusing to replace it.`
+
+A store output replaces an existing store, never a folder of other files.
+`subset -o` names the store to write, not a folder to write it into (that is
+`split -o`). Name a file such as `results/subset.h5ad`. A file that is not
+HDF5 is refused the same way (`... exists and is not an HDF5 file or a Zarr
+store`), and `export` refuses a folder as its output file.
+
+### `No obs selected: none of the names in 'barcodes.txt' is in the store's obs index. Nothing was written.`
+
+The name list matched no row. The usual cause is a suffix: Cell Ranger's
+barcodes end in `-1`, and a list without it matches nothing. Compare a few
+names with `adata export dataframe data.h5ad obs --columns _index --head 5`.
+
+### `Not enough free space for 'out.h5ad': it needs about 12.3 GB and /scratch has 4.1 GB free.`
+
+Checked before writing, because a disk that fills part way through an HDF5
+write can stop the process inside the HDF5 library (`Aborted`, or a
+segmentation fault after the `Error:` line), with no chance to clean up. Free
+some space, or write to another filesystem.
+
+The size is an estimate from the source's size on disk (see
+[Writing outputs](reference/commands.md#writing-outputs)). If it is wrong,
+for instance because the output compresses better than the source, pass
+`--no-space-check`. The check sees the filesystem's free space, not your
+quota: on a cluster's scratch space the quota can run out first, and `lfs
+quota` or `quota` shows how much of it is left.
 
 ### `'out.zarr' already exists. Pass --overwrite to replace it.`
 
@@ -208,10 +246,13 @@ lack different rows warn apart.
 
 ### `'out.adata-tmp.h5ad' already exists, probably left by an interrupted run. Check what it holds, remove it, and try again.`
 
-A run was killed outright, by the out-of-memory killer or a scheduler's time
-limit, before it could clean up. Commands write to `out.adata-tmp.<ext>` and
-rename it into place at the end, moving an existing output aside to
-`out.adata-old.<ext>` first:
+A run was killed outright, by the out-of-memory killer (SIGKILL), before it
+could clean up, or the HDF5 library stopped it when the disk filled. A
+scheduler's time limit or `scancel` sends SIGTERM first, which cleans up and
+leaves nothing. Commands write to `out.adata-tmp.<ext>` and rename it into
+place at the end, moving an existing output aside to `out.adata-old.<ext>`
+first. When there are several, as after a `split`, the message lists them
+all:
 
 - **`*.adata-tmp.*`** is always incomplete. Delete it.
 - **`*.adata-old.*`** is the previous output, left because the run died
@@ -222,6 +263,23 @@ rename it into place at the end, moving an existing output aside to
 The command refuses rather than deleting either itself, since an `adata-old`
 store may be the only copy of your data. See
 [Pipelines and containers](guides/pipelines.md#outputs-appear-whole-or-not-at-all).
+
+### `'out.h5ad.adata-lock' exists: another adata run is writing 'out.h5ad', or one was killed before it could clean up.`
+
+Each run claims its outputs with a lock file while it writes, so two runs
+cannot write the same output at once. If another run is writing it (a
+pipeline's retry while the first attempt still runs, a duplicated array
+task), wait for it or write elsewhere. The lock holds the host and process
+id of the run that made it. If no such run is alive, it was killed outright:
+delete the lock, and any `adata-tmp` or `adata-old` beside it as above.
+
+### `Could not finish writing 'out.adata-tmp.h5ad': ...`
+
+The last write, made as the store is closed, failed: usually a full disk or
+quota, sometimes a network filesystem dropping out. The incomplete store was
+removed and the existing output, or with `--inplace` the source, is
+untouched. Before 0.17.4 this error was swallowed and the unreadable store
+renamed into place with exit code 0.
 
 ## Zarr
 
