@@ -117,7 +117,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-          persist-credentials: true
+          persist-credentials: true # zizmor: ignore[artipacked] it pushes to main
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -138,7 +138,7 @@ jobs:
           fi
           git commit -m "Benchmark results for $REF_NAME [skip ci]"
           # Another job may have landed on main in the meantime.
-          for attempt in 1 2 3; do
+          for _ in 1 2 3; do
             if git push origin main; then exit 0; fi
             git pull --rebase origin main
           done

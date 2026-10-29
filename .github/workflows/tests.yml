@@ -147,7 +147,8 @@ jobs:
 
       - name: convert works, with and without click beside typer
         run: |
-          mkdir smoke && cd smoke
+          mkdir smoke
+          cd smoke || exit 1
           printf ',g1,g2,g3\nc1,0,1,2\nc2,3,4,5\nc3,6,7,8\n' > counts.csv
           smoke() {
             rm -rf counts.h5ad counts.zarr back.h5ad recast.h5ad
