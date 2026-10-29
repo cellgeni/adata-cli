@@ -36,13 +36,23 @@ classifiers = [
     "Typing :: Typed",
 ]
 
+# Every module src/adata imports is declared, here or in an extra, rather
+# than left to arrive with another package. CI's floors job installs each
+# floor and runs the unit suite on it. The caps keep out the next major of
+# the libraries whose API the code is written against. typer is still 0.x
+# and can break in a minor (0.26 stopped installing click), but a cap at the
+# next minor would turn away each new typer until we release, so it is 1.0.
 dependencies = [
-    "h5py>=3.15.1",
-    "numpy>=2.3.5",
-    "pillow>=12.1.0",
+    "h5py>=3.15.1,<4",
+    # Zarr v2 compressors (storage/__init__.py).
+    "numcodecs>=0.14",
+    "numpy>=2.3.5,<3",
+    # 13.0.0 fixes the decoder advisories that reach `import image` and the
+    # Visium and Xenium tissue images.
+    "pillow>=13.0.0",
     "rich>=14.2.0",
-    "typer>=0.20.0",
-    "zarr>=3.1.5",
+    "typer>=0.20.0,<1",
+    "zarr>=3.1.5,<4",
 ]
 
 [project.urls]
@@ -54,28 +64,34 @@ Changelog = "https://cellgeni.github.io/adata-cli/changelog/"
 
 [project.optional-dependencies]
 # Reading pycisTopic's pickles: pandas and scipy rebuild their tables and
-# matrices. Imported only by that converter.
+# matrices. Imported only on that converter's path.
 pickle = [
-    "pandas>=2.2",
-    "scipy>=1.13",
+    # pandas 2.2.3 is what tests/test_external_readers.py converts a pickle
+    # under (the floors job runs dev's pandas 3); 2.2.0 and 2.2.1 predate
+    # numpy 2. scipy before 1.15 caps numpy below 2.3.
+    "pandas>=2.2.3",
+    "scipy>=1.15",
 ]
 # Reading Visium HD: its bin positions are Parquet only. Imported only by
-# the Visium converter, and only for an HD input.
+# the Visium converter, and only for an HD input. 18 is the first with
+# wheels for Python 3.13.
 spatial = [
-    "pyarrow>=17",
+    "pyarrow>=18",
 ]
 dev = [
-    "pandas>=2.2",
-    "scipy>=1.13",
-    "pyarrow>=17",
+    # pandas 3, not the pickle extra's 2.2.3: anndata writes nullable strings
+    # only where pandas infers them, and the test fixtures rely on that.
+    "pandas>=3.0",
+    "scipy>=1.15",
+    "pyarrow>=18",
     # The oracle for the centroids and areas of segmented cells
-    # (tests/test_geojson.py).
-    "shapely>=2.0",
-    "pytest>=8.3.4",
+    # (tests/test_geojson.py). Older releases fail on numpy 2.3.
+    "shapely>=2.0.6",
+    "pytest>=9.0.3",
     "pytest-cov>=6.0.0",
     # Turns a hang into a failure with a traceback. Without it a stuck test
     # burns the CI job's whole timeout and reports nothing useful.
-    "pytest-timeout>=2.3.0",
+    "pytest-timeout>=2.3.1",
     # Used only by tests/test_anndata_roundtrip.py, to check that what this
     # tool reads and writes matches what anndata itself produces.
     "anndata>=0.13",
