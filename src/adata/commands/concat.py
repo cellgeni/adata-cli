@@ -28,6 +28,6 @@ def concat_stores(
     # About the sum of the inputs: an inner join keeps less, an outer join's
     # dense fill can add some.
     check_free_space(
-        output, sum(disk_size(f) for f in files), check=space_check
+        output, lambda: sum(disk_size(f) for f in files), check=space_check
     )
     concat_on_disk(files, output, console, **kwargs)  # type: ignore[arg-type]

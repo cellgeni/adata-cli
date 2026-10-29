@@ -102,7 +102,8 @@ A store output replaces an existing store, never a folder of other files.
 `subset -o` names the store to write, not a folder to write it into (that is
 `split -o`). Name a file such as `results/subset.h5ad`. A file that is not
 HDF5 is refused the same way (`... exists and is not an HDF5 file or a Zarr
-store`), and `export` refuses a folder as its output file.
+store`), and `export` refuses a folder or a store as its output file. An
+empty folder may be replaced.
 
 ### `No obs selected: none of the names in 'barcodes.txt' is in the store's obs index. Nothing was written.`
 
@@ -112,10 +113,11 @@ names with `adata export dataframe data.h5ad obs --columns _index --head 5`.
 
 ### `Not enough free space for 'out.h5ad': it needs about 12.3 GB and /scratch has 4.1 GB free.`
 
-Checked before writing, because a disk that fills part way through an HDF5
-write can stop the process inside the HDF5 library (`Aborted`, or a
-segmentation fault after the `Error:` line), with no chance to clean up. Free
-some space, or write to another filesystem.
+Checked before writing an HDF5 output, because a disk that fills part way
+through an HDF5 write can stop the process inside the HDF5 library
+(`Aborted`, or a segmentation fault after the `Error:` line), with no chance
+to clean up. Free some space, or write to another filesystem. A Zarr output
+is not checked: running out of space there is an ordinary error.
 
 The size is an estimate from the source's size on disk (see
 [Writing outputs](reference/commands.md#writing-outputs)). If it is wrong,
@@ -264,14 +266,16 @@ The command refuses rather than deleting either itself, since an `adata-old`
 store may be the only copy of your data. See
 [Pipelines and containers](guides/pipelines.md#outputs-appear-whole-or-not-at-all).
 
-### `'out.h5ad.adata-lock' exists: another adata run is writing 'out.h5ad', or one was killed before it could clean up.`
+### `'out.h5ad.adata-lock' exists: another adata run (process 4242 on node7) is writing 'out.h5ad', or was killed before it could clean up.`
 
 Each run claims its outputs with a lock file while it writes, so two runs
 cannot write the same output at once. If another run is writing it (a
 pipeline's retry while the first attempt still runs, a duplicated array
-task), wait for it or write elsewhere. The lock holds the host and process
-id of the run that made it. If no such run is alive, it was killed outright:
-delete the lock, and any `adata-tmp` or `adata-old` beside it as above.
+task), wait for it or write elsewhere. A lock left by a run killed on the
+same host is taken over without asking; this message means the run is alive,
+or ran on another host, where it cannot be checked. If it is no longer
+running, delete the lock and run again: any `adata-tmp` or `adata-old` it
+left is then reported, as above.
 
 ### `Could not finish writing 'out.adata-tmp.h5ad': ...`
 

@@ -153,8 +153,10 @@ These are easy to break without any test noticing straight away:
     once every new output is in place.
   - It refuses to start if leftovers from an interrupted run exist, naming
     them all.
-  - It claims each output with an `O_EXCL` lock file (`out.h5ad.adata-lock`)
-    for the whole write, so two runs cannot write one output.
+  - It claims each output with an `O_EXCL` lock file (`out.h5ad.adata-lock`,
+    holding host and pid) for the whole write, so two runs cannot write one
+    output. A lock whose process is dead on this host is taken over.
+  - It follows an output that is a symlink, so the link survives.
   - SIGTERM and SIGHUP raise `Terminated` (a `SystemExit`) inside it, so a
     scheduler's kill gets the same cleanup as a failure.
   - Before replacing an existing output it fsyncs the new one and gives it
@@ -175,8 +177,10 @@ These are easy to break without any test noticing straight away:
   the directory that is still being read.
 - **Check free space before writing a large store**, with
   `util/staging.check_free_space`, against an estimate from `disk_size` of
-  the source. A full disk part way through an HDF5 write can abort inside
-  the library, where no cleanup runs. Honour `--no-space-check`.
+  the source, passed as a function so a Zarr output (which is not checked:
+  a full disk there is an ordinary error) never walks the source. A full
+  disk part way through an HDF5 write can abort inside the library, where
+  no cleanup runs. Honour `--no-space-check`.
 - **Validate before the output exists.** Resolve selections, check casts and
   build plans first, so that a refusal writes nothing. An empty selection is
   a refusal, never an empty store.

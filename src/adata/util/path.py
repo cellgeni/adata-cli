@@ -80,13 +80,15 @@ def check_output(
       opening it to write empties a Zarr input before it has been read, and
       truncates an HDF5 one;
     - a store output (`store=True`) that names an existing directory which
-      is not a Zarr store, or an existing non-empty file which is not HDF5,
-      is refused: replacing it would delete a folder of files, or a text
-      file, that `-o` named by mistake;
-    - a file output (`store=False`, an export) that names a directory is
-      refused for the same reason.
+      is neither a Zarr store nor empty, or an existing non-empty file which
+      is not HDF5, is refused: replacing it would delete a folder of files,
+      or a text file, that `-o` named by mistake;
+    - a file output (`store=False`, an export) that names a directory or an
+      existing store is refused for the same reason: an export never writes
+      a store.
 
-    An existing store is still replaced; that is what `-o` asks for.
+    An existing store is still replaced by a store; that is what `-o` asks
+    for.
     """
     output = Path(output)
     for source in inputs:
@@ -103,7 +105,7 @@ def check_output(
     if not (output.exists() or output.is_symlink()):
         return
     if output.is_dir():
-        if store and is_zarr_path(output):
+        if store and (is_zarr_path(output) or not any(output.iterdir())):
             return
         raise ValueError(
             f"'{output}' is a directory"
@@ -112,10 +114,17 @@ def check_output(
             + (" or store" if store else "")
             + " to write instead."
         )
-    if store and output.is_file() and output.stat().st_size and not _is_hdf5(output):
+    if not output.is_file() or not output.stat().st_size:
+        return
+    if store and not _is_hdf5(output):
         raise ValueError(
             f"'{output}' exists and is not an HDF5 file or a Zarr store: "
             "refusing to replace it. Remove it first if it should go."
+        )
+    if not store and _is_hdf5(output):
+        raise ValueError(
+            f"'{output}' is an HDF5 file: refusing to replace it with an "
+            "export. Name the file to write."
         )
 
 

@@ -32,13 +32,15 @@ EXTENSION_FORMAT = {
 }
 
 
-def _copy_source(file: Path, temp: Path, output: Path, console: Console) -> None:
+def _copy_source(
+    file: Path, temp: Path, output: Path, inplace: bool, console: Console
+) -> None:
     """Copy `file` to `temp`, converting it if `output` is the other backend."""
     src_backend = detect_backend(file)
     dst_backend = detect_backend(temp)
     if src_backend == dst_backend:
         copy_path(file, temp)
-        if output != file:
+        if not inplace:
             console.print(f"[dim]Copied {file} → {output}[/]")
         return
 
@@ -66,10 +68,13 @@ def import_into(
     """
     others = [input_file] if input_file is not None else []
     target = output_target(file, output, inplace, others=others)
-    needed = disk_size(file) + (disk_size(input_file) if input_file else 0)
     with staged_outputs([target]) as (temp,):
-        check_free_space(target, needed, check=space_check)
-        _copy_source(file, temp, target, console)
+        check_free_space(
+            target,
+            lambda: disk_size(file) + (disk_size(input_file) if input_file else 0),
+            check=space_check,
+        )
+        _copy_source(file, temp, target, inplace, console)
         write(temp)
     return target
 

@@ -26,7 +26,7 @@ from adata.core.recast import (
 )
 from adata.elements import spec
 from adata.elements.write import ensure_anndata_skeleton
-from adata.storage import copy_tree, detect_backend, is_group, open_store
+from adata.storage import copy_tree, detect_backend, is_dataset, is_group, open_store
 from adata.util.path import output_target
 from adata.util.staging import check_free_space, disk_size, staged_outputs
 
@@ -130,7 +130,7 @@ def recast_store(
 
             check_free_space(
                 dst_path,
-                disk_size(file) * max([1.0] + [_growth(p) for p in plans.values()]),
+                lambda: disk_size(file) + sum(_extra(p) for p in plans.values()),
                 check=space_check,
             )
 
@@ -154,30 +154,49 @@ def recast_store(
         console.print(f"[green]Wrote[/] {dst_path}")
 
 
-def _growth(plan: Plan) -> float:
-    """How many times its current size a matrix will be once converted.
+def _extra(plan: Plan) -> float:
+    """Bytes on disk a matrix will gain once converted (none if it shrinks).
 
-    From the uncompressed sizes, so a guess for compressed stores, but it
-    catches the cases that matter: a wider dtype, and densifying.
+    Its growth in memory, scaled by how well the matrix compresses on disk
+    now. A guess for a densified matrix, whose zeros may compress better,
+    but sized by the one matrix, not by the whole store.
     """
     src = plan.source
     current = _stored_bytes(src.obj)
     if current <= 0:
-        return 1.0
+        return 0.0
     if plan.layout == "dense":
         cells = 1
         for extent in src.shape:
             cells *= int(extent)
-        return cells * plan.data_dtype.itemsize / current
-    if not src.sparse:
-        return 1.0  # sparsifying is done to shrink; its nnz is not known yet
-    nnz = int(src.obj["data"].shape[0])
-    pointers = int(src.obj["indptr"].shape[0])
-    projected = (
-        nnz * (plan.data_dtype.itemsize + plan.index_dtype.itemsize)
-        + pointers * plan.pointer_dtype.itemsize
-    )
-    return projected / current
+        projected = cells * plan.data_dtype.itemsize
+    elif src.sparse:
+        nnz = int(src.obj["data"].shape[0])
+        pointers = int(src.obj["indptr"].shape[0])
+        projected = (
+            nnz * (plan.data_dtype.itemsize + plan.index_dtype.itemsize)
+            + pointers * plan.pointer_dtype.itemsize
+        )
+    else:
+        return 0.0  # sparsifying is done to shrink; its nnz is not known yet
+    return max(0.0, projected - current) * _on_disk(src.obj) / current
+
+
+def _on_disk(obj: Any) -> int:
+    """Bytes a matrix's datasets take on disk, compressed."""
+    targets = [obj] if is_dataset(obj) else [
+        obj[k] for k in ("data", "indices", "indptr") if k in obj
+    ]
+    total = 0
+    for item in targets:
+        try:
+            if hasattr(item, "id"):
+                total += int(item.id.get_storage_size())
+            else:
+                total += int(item.nbytes_stored())
+        except Exception:  # pragma: no cover - a backend that cannot say
+            total += int(getattr(item, "nbytes", 0))
+    return total
 
 
 def _write(src: Any, dst: Any, plans: dict, **options: Any) -> None:

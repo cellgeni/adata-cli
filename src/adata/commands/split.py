@@ -69,7 +69,7 @@ def split_store(
     if not groups:
         raise ValueError(f"Column {column!r} produced no groups.")
 
-    names = unique_names(order)
+    names = _distinct(unique_names(order), order)
     console.print(
         f"[cyan]Splitting on {axis}[{column}]: "
         f"{len(order)} group{'s' if len(order) != 1 else ''}[/]"
@@ -105,7 +105,7 @@ def split_store(
         kept = sum(count for _, _, count in planned)
         check_free_space(
             planned[0][1],
-            disk_size(file) * (kept / n_rows if n_rows else 1.0),
+            lambda: disk_size(file) * (kept / n_rows if n_rows else 1.0),
             check=space_check,
         )
 
@@ -132,6 +132,26 @@ def split_store(
 
     console.print(f"[green]Wrote[/] {len(planned)} stores to {output_dir}")
     return planned
+
+
+def _distinct(names: Dict[str, str], order: List[str]) -> Dict[str, str]:
+    """Stems no two of which name one file, whatever the filesystem.
+
+    `B` and `b` are one file on macOS and Windows, and `unique_names` can
+    give `a_1` to a label `a ` beside one that is `a_1` already: either way
+    two groups were written to one path.
+    """
+    taken: set = set()
+    distinct: Dict[str, str] = {}
+    for label in order:
+        stem = candidate = names[label]
+        count = 0
+        while candidate.casefold() in taken:
+            count += 1
+            candidate = f"{stem}_{count}"
+        taken.add(candidate.casefold())
+        distinct[label] = candidate
+    return distinct
 
 
 def _write_manifest(

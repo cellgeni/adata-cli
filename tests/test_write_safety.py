@@ -250,8 +250,10 @@ def test_concat_leaves_nothing_behind_if_writing_fails(tmp_path, suffix, monkeyp
 
 import os
 import signal
+import stat
 import subprocess
 import sys
+import threading
 
 import h5py
 import zarr
@@ -613,15 +615,15 @@ def _tiny_disk(monkeypatch, free: int = 1):
     monkeypatch.setattr(staging.shutil, "disk_usage", disk_usage)
 
 
-def test_every_store_writer_checks_free_space_first(tmp_path, backend, monkeypatch):
+def test_every_store_writer_checks_free_space_first(tmp_path, monkeypatch):
     """F022: a full disk part way through an HDF5 write can abort the process
     inside the library, skipping all cleanup. Every writer that can produce
-    a large store now checks the disk first, and refuses before writing."""
-    src = _source(tmp_path, backend)
-    other = _source(tmp_path, backend, "other")
+    a large HDF5 store now checks the disk first, and refuses before writing."""
+    src = _rich_store(tmp_path / "in.h5ad")
+    other = _rich_store(tmp_path / "other.h5ad")
     before = _snapshot(src)
     _tiny_disk(monkeypatch)
-    out = backend_path(tmp_path, backend, "out")
+    out = tmp_path / "out.h5ad"
 
     for argv in (
         ["subset", src, "--inplace", "-q", "grp == a"],
@@ -638,6 +640,22 @@ def test_every_store_writer_checks_free_space_first(tmp_path, backend, monkeypat
         assert not out.exists()
         assert not list((tmp_path / "parts").glob("*.*")) if (tmp_path / "parts").exists() else True
     assert _debris(tmp_path) == []
+
+
+def test_a_zarr_output_is_not_measured(tmp_path, monkeypatch):
+    """A Zarr store that runs out of space fails with an ordinary error and
+    is cleaned up, so it is not checked: walking a source of millions of
+    chunk files to size it would cost more than it saves."""
+    from adata.util import staging
+
+    src = _rich_store(tmp_path / "in.zarr")
+    _tiny_disk(monkeypatch)
+    monkeypatch.setattr(staging, "disk_size", _fail)
+
+    result = runner.invoke(app, _args(["subset", src, "-o", tmp_path / "o.zarr",
+                                       "-q", "grp == a"]))
+    assert result.exit_code == 0, _out(result)
+    assert _read(tmp_path / "o.zarr").shape == (2, 4)
 
 
 def test_no_space_check_writes_anyway(tmp_path, monkeypatch):
@@ -662,12 +680,36 @@ def test_the_subset_estimate_follows_the_selection(tmp_path, monkeypatch):
     src = _rich_store(tmp_path / "in.h5ad")
     seen = []
     monkeypatch.setattr(
-        subset_mod, "check_free_space", lambda out, needed, check: seen.append(needed)
+        subset_mod, "check_free_space", lambda out, needed, check: seen.append(needed())
     )
     for query in ("grp == a", "grp in a,b"):
         runner.invoke(app, _args(["subset", src, "-o", tmp_path / f"{len(seen)}.h5ad",
                                   "-q", query]))
     assert seen == [pytest.approx(disk_size(src) / 2), disk_size(src)]
+
+
+def test_the_recast_estimate_counts_only_the_matrix_that_grows(tmp_path, monkeypatch):
+    """F022 review: the estimate multiplied the whole store by one matrix's
+    growth, asking for 10 GB to densify a sparse layer into an 81 MB store."""
+    from adata.commands import recast as recast_mod
+    from adata.util.staging import disk_size
+
+    sp = pytest.importorskip("scipy.sparse")
+    src = tmp_path / "in.h5ad"
+    ad.AnnData(
+        X=np.random.default_rng(0).random((300, 200), dtype="float32"),
+        layers={"small": sp.random(300, 200, density=0.001, format="csr",
+                                   dtype="float32", random_state=0)},
+    ).write_h5ad(src)
+    seen = []
+    monkeypatch.setattr(recast_mod, "check_free_space",
+                        lambda out, needed, check: seen.append(needed()))
+
+    out = tmp_path / "dense.h5ad"
+    result = runner.invoke(app, _args(["recast", src, "layers/small", "-o", out,
+                                       "--layout", "dense", "--force"]))
+    assert result.exit_code == 0, _out(result)
+    assert disk_size(out) * 0.8 < seen[0] < disk_size(out) * 1.5
 
 
 # ---------------------------------------------------------------------------
@@ -1066,27 +1108,30 @@ def test_a_second_run_on_the_same_output_is_refused_while_the_first_writes(
 
     src = _source(tmp_path, backend)
     out = backend_path(tmp_path, backend, "out")
-    real = subset_mod._write_targets
+    real = subset_mod.check_free_space
     second = []
 
-    def write(*args, **kwargs):
+    def check(*args, **kwargs):
+        # Before the first run's temporary exists: the window in which both
+        # runs used to pass the leftover check.
         if not second:
             second.append(runner.invoke(
                 app, _args(["subset", src, "-o", out, "-q", "grp == b"])
             ))
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(subset_mod, "_write_targets", write)
+    monkeypatch.setattr(subset_mod, "check_free_space", check)
     first = runner.invoke(app, _args(["subset", src, "-o", out, "-q", "grp == a"]))
     assert first.exit_code == 0, _out(first)
     assert second[0].exit_code == 1
-    assert "another adata run is writing" in _out(second[0])
+    assert "is writing" in _out(second[0])
     assert list(_read(out).obs_names) == ["c0", "c2"]
     assert _debris(tmp_path) == []
 
 
-def test_a_lock_left_by_a_killed_run_is_refused_not_removed(tmp_path):
-    """F083: a lock is never taken over: its run may still be writing."""
+def test_a_lock_from_another_host_is_refused_not_removed(tmp_path):
+    """F083: a lock whose run cannot be checked is never taken over: that
+    run may still be writing, on another node of a cluster."""
     src = _rich_store(tmp_path / "in.h5ad")
     out = _rich_store(tmp_path / "out.h5ad")
     kept = _snapshot(out)
@@ -1095,9 +1140,43 @@ def test_a_lock_left_by_a_killed_run_is_refused_not_removed(tmp_path):
 
     result = runner.invoke(app, _args(["subset", src, "-o", out, "-q", "grp == a"]))
     assert result.exit_code == 1
-    assert "another adata run is writing" in _out(result)
+    assert "is writing" in _out(result)
     assert lock.read_text() == "node7 12345\n"
     assert _snapshot(out) == kept
+
+
+def test_a_lock_held_by_a_live_run_on_this_host_is_refused(tmp_path):
+    import socket
+
+    src = _rich_store(tmp_path / "in.h5ad")
+    lock = tmp_path / "out.h5ad.adata-lock"
+    lock.write_text(f"{socket.gethostname()} {os.getppid()}\n")
+
+    result = runner.invoke(app, _args(["subset", src, "-o", tmp_path / "out.h5ad",
+                                       "-q", "grp == a"]))
+    assert result.exit_code == 1
+    assert "is writing" in _out(result)
+    assert lock.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process ids")
+def test_a_lock_left_by_a_killed_run_on_this_host_is_taken_over(tmp_path):
+    """F083 review: a run killed outright before its temporary existed (the
+    out-of-memory killer during a long query) left only its lock, and every
+    rerun was refused, where before the lock nothing at all was left."""
+    import socket
+
+    src = _rich_store(tmp_path / "in.h5ad")
+    out = tmp_path / "out.h5ad"
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    lock = tmp_path / "out.h5ad.adata-lock"
+    lock.write_text(f"{socket.gethostname()} {gone.pid}\n")
+
+    result = runner.invoke(app, _args(["subset", src, "-o", out, "-q", "grp == a"]))
+    assert result.exit_code == 0, _out(result)
+    assert _read(out).shape == (2, 4)
+    assert _debris(tmp_path) == []
 
 
 # ---------------------------------------------------------------------------
@@ -1158,27 +1237,37 @@ def test_inplace_and_output_together_are_refused(tmp_path, backend, command):
 # F137: fsync
 
 
-def test_a_replaced_output_is_synced_before_the_old_one_goes(tmp_path, monkeypatch):
+@pytest.mark.skipif(sys.platform == "win32", reason="os.sync is POSIX")
+@pytest.mark.parametrize("suffix_", [".h5ad", ".zarr"])
+def test_a_replaced_output_is_synced_before_the_old_one_goes(tmp_path, monkeypatch, suffix_):
     """F137 (plausible; needs a power cut to see): --inplace deleted the
     original while the new store might still be only in the page cache. The
-    successor's files are now synced before the original is renamed aside."""
+    successor is now synced (an HDF5 file by fsync, a Zarr tree by one
+    sync) before the original is renamed aside, and the directory after."""
     from adata.util import staging
 
-    src = _rich_store(tmp_path / "in.zarr")
+    src = _rich_store(tmp_path / f"in{suffix_}")
     events = []
-    real_fsync, real_rename = os.fsync, Path.rename
-    monkeypatch.setattr(staging.os, "fsync", lambda fd: (events.append("fsync"), real_fsync(fd))[1])
+    real_fsync, real_sync, real_rename = os.fsync, os.sync, Path.rename
+
+    def fsync(fd):
+        events.append("dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "fsync")
+        return real_fsync(fd)
 
     def rename(self, target):
         events.append(f"rename {Path(self).name} -> {Path(target).name}")
         return real_rename(self, target)
 
+    monkeypatch.setattr(staging.os, "fsync", fsync)
+    monkeypatch.setattr(staging.os, "sync", lambda: (events.append("sync"), real_sync())[1])
     monkeypatch.setattr(Path, "rename", rename)
     result = runner.invoke(app, _args(["subset", src, "--inplace", "-q", "grp == a"]))
     assert result.exit_code == 0, _out(result)
-    first_rename = next(i for i, e in enumerate(events) if e.startswith("rename"))
-    assert events[:first_rename].count("fsync") > 5  # every file, every directory
-    assert events[first_rename] == "rename in.zarr -> in.adata-old.zarr"
+    renames = [i for i, e in enumerate(events) if e.startswith("rename")]
+    flush = "fsync" if suffix_ == ".h5ad" else "sync"
+    assert flush in events[: renames[0]]
+    assert events[renames[0]] == f"rename in{suffix_} -> in.adata-old{suffix_}"
+    assert "dir" in events[renames[-1]:]
 
 
 # ---------------------------------------------------------------------------
@@ -1255,18 +1344,18 @@ def test_convert_overwrite_will_not_replace_a_folder_that_is_not_a_store(tmp_pat
 def test_convert_checks_free_space_first(tmp_path, monkeypatch):
     """F022: the HDF5 copy convert makes is where a full disk was seen to
     abort the process (SIGABRT in H5Ocopy), leaving the temporary behind."""
-    src = _rich_store(tmp_path / "in.h5ad")
+    src = _rich_store(tmp_path / "in.zarr")
     _tiny_disk(monkeypatch)
 
-    result = runner.invoke(app, _args(["convert", src, "-o", tmp_path / "o.zarr"]))
+    result = runner.invoke(app, _args(["convert", src, "-o", tmp_path / "o.h5ad"]))
     assert result.exit_code == 1
     assert "Not enough free space" in _out(result)
-    assert not (tmp_path / "o.zarr").exists()
+    assert not (tmp_path / "o.h5ad").exists()
 
-    result = runner.invoke(app, _args(["convert", src, "-o", tmp_path / "o.zarr",
+    result = runner.invoke(app, _args(["convert", src, "-o", tmp_path / "o.h5ad",
                                        "--no-space-check"]))
     assert result.exit_code == 0, _out(result)
-    assert _read(tmp_path / "o.zarr").shape == (4, 4)
+    assert _read(tmp_path / "o.h5ad").shape == (4, 4)
 
 
 def test_a_file_written_into_a_folder_being_read_is_allowed(tmp_path):
@@ -1281,3 +1370,153 @@ def test_a_file_written_into_a_folder_being_read_is_allowed(tmp_path):
     result = runner.invoke(app, _args(["convert", folder, "-o", folder / "c.h5ad"]))
     assert result.exit_code == 0, _out(result)
     assert _read(folder / "c.h5ad").shape == (4, 4)
+
+
+# ---------------------------------------------------------------------------
+# From the review of #111
+
+
+@pytest.mark.parametrize("command", ["import", "export"])
+def test_an_output_that_is_a_symlink_is_written_through(tmp_path, command):
+    """F073 review: `import ... -o work/link.h5ad` and `export ... -o link.csv`
+    wrote through the link before staging; staged, they replaced the link
+    with a private file and left its target unchanged."""
+    src = _rich_store(tmp_path / "in.h5ad")
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    if command == "import":
+        real = _rich_store(shared / "real.h5ad")
+        argv = ["import", "array", src, "obsm/X_new", _npy(tmp_path)]
+    else:
+        real = shared / "real.csv"
+        real.write_text("old")
+        argv = ["export", "dataframe", src, "obs"]
+    link = tmp_path / f"link{real.suffix}"
+    link.symlink_to(real)
+
+    result = runner.invoke(app, _args(argv + ["-o", link]))
+    assert result.exit_code == 0, _out(result)
+    assert link.is_symlink() and link.resolve() == real.resolve()
+    if command == "import":
+        assert "X_new" in _read(real).obsm
+    else:
+        assert list(pd.read_csv(real, index_col=0).index) == ["c0", "c1", "c2", "c3"]
+    assert _debris(tmp_path) == [] and _debris(shared) == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX devices and FIFOs")
+def test_export_writes_to_devices_and_pipes_as_they_are(tmp_path):
+    """F023 review: staged, `-o /dev/null` failed for want of a lock beside
+    it, and `-o fifo` renamed the pipe away and left a regular file there,
+    while the reader waited on the pipe for ever."""
+    src = _rich_store(tmp_path / "in.h5ad")
+
+    result = runner.invoke(app, _args(["export", "dataframe", src, "obs", "-o", os.devnull]))
+    assert result.exit_code == 0, _out(result)
+    assert stat.S_ISCHR(os.stat(os.devnull).st_mode)
+
+    fifo = tmp_path / "obs.fifo"
+    os.mkfifo(fifo)
+    got = []
+    reader = threading.Thread(target=lambda: got.append(fifo.read_text()))
+    reader.start()
+    result = runner.invoke(app, _args(["export", "dataframe", src, "obs", "-o", fifo]))
+    reader.join(timeout=30)
+    assert result.exit_code == 0, _out(result)
+    assert got and got[0].startswith("_index,grp")
+    assert stat.S_ISFIFO(os.stat(fifo).st_mode)
+    assert _debris(tmp_path) == []
+
+
+def test_export_will_not_replace_a_store(tmp_path):
+    """F023 review: `export dataframe a.h5ad obs -o b.h5ad` (for b.csv)
+    replaced the store b.h5ad with 36 bytes of CSV and exited 0."""
+    src = _rich_store(tmp_path / "a.h5ad")
+    other = _rich_store(tmp_path / "b.h5ad")
+    kept = _snapshot(other)
+
+    for target in (other, _rich_store(tmp_path / "c.zarr")):
+        result = runner.invoke(app, _args(["export", "dataframe", src, "obs", "-o", target]))
+        assert result.exit_code == 1, _out(result)
+    assert _snapshot(other) == kept
+
+
+def test_an_empty_folder_can_be_the_output(tmp_path, backend):
+    """F037 review: a pre-created empty `out.zarr/` was refused as "not a
+    Zarr store"; before the check it was replaced, as it should be."""
+    src = _source(tmp_path, backend)
+    out = backend_path(tmp_path, backend, "out")
+    out.mkdir()
+
+    result = runner.invoke(app, _args(["subset", src, "-o", out, "-q", "grp == a"]))
+    assert result.exit_code == 0, _out(result)
+    assert _read(out).shape == (2, 4)
+
+
+def test_split_labels_that_differ_only_in_case_get_their_own_stores(tmp_path):
+    """Review of #111: labels `B` and `b` are one file on macOS and Windows,
+    so the two groups were written to one path and the split refused with
+    a misleading message. They now get distinct names everywhere."""
+    src = tmp_path / "in.h5ad"
+    obj = ad.AnnData(
+        X=np.arange(6, dtype="float32").reshape(3, 2),
+        obs=pd.DataFrame({"grp": pd.Categorical(["B", "b", "b"])},
+                         index=["c0", "c1", "c2"]),
+        var=pd.DataFrame(index=["g0", "g1"]),
+    )
+    obj.write_h5ad(src)
+    parts = tmp_path / "parts"
+
+    result = runner.invoke(app, _args(["split", src, "--by", "grp", "-o", parts]))
+    assert result.exit_code == 0, _out(result)
+    assert list(_read(parts / "B.h5ad").obs_names) == ["c0"]
+    assert list(_read(parts / "b_1.h5ad").obs_names) == ["c1", "c2"]
+
+
+def test_an_mtx_output_will_not_replace_a_file(tmp_path):
+    """Review of #111: `convert in.h5ad -o notes.txt --to 10x-mtx
+    --overwrite` replaced the file with a folder it then could not enter
+    (the file's mode, copied onto it, had no execute bit)."""
+    src = _rich_store(tmp_path / "in.h5ad")
+    notes = tmp_path / "notes.txt"
+    notes.write_text("keep me")
+
+    result = runner.invoke(app, _args(["convert", src, "-o", notes, "--to", "10x-mtx",
+                                       "--overwrite", "--force"]))
+    assert result.exit_code == 1
+    assert notes.read_text() == "keep me"
+    assert _debris(tmp_path) == []
+
+
+def test_a_signal_held_during_the_swap_is_raised_even_if_the_swap_fails():
+    """Review of #111: a SIGTERM held while the swap ran was dropped if the
+    swap then failed, so the run exited 1 rather than 143."""
+    from adata.util.staging import Terminated, _Signals
+
+    with _Signals() as signals:
+        with pytest.raises(Terminated) as raised:
+            with signals.hold():
+                os.kill(os.getpid(), signal.SIGTERM)
+                raise OSError("the rename failed")
+    assert raised.value.code == 128 + signal.SIGTERM
+
+
+def test_an_old_copy_that_cannot_be_deleted_does_not_fail_the_run(tmp_path, monkeypatch):
+    """Review of #111: every output was in place, but a backup that could
+    not be removed (a read-only subtree, NFS's .nfs files) exited 1."""
+    from adata.util import staging
+
+    out = tmp_path / "out.h5ad"
+    out.write_text("old")
+    real = staging._remove
+
+    def remove(path):
+        if "adata-old" in path.name:
+            raise PermissionError(13, "Permission denied", str(path))
+        real(path)
+
+    monkeypatch.setattr(staging, "_remove", remove)
+    with pytest.warns(UserWarning, match="could not delete the old copy"):
+        with staging.staged_outputs([out]) as (temp,):
+            temp.write_text("new")
+    assert out.read_text() == "new"

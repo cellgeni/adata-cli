@@ -67,6 +67,11 @@ def convert_store(
             check_output(out, [file])
         elif same_path(file, out):
             raise ValueError(f"Output path is the input: {out}")
+        elif out.exists() and not out.is_dir():
+            raise ValueError(
+                f"'{out}' is a file: an MTX output is a folder. Name a new "
+                "folder to write."
+            )
         elif out.is_dir() and any(p.name not in MTX_FILES for p in out.iterdir()):
             raise ValueError(
                 f"'{out}' holds files other than a Matrix Market folder's: "
@@ -80,8 +85,10 @@ def convert_store(
     # library, past any cleanup. Guessed from a store or file source; a
     # folder (Space Ranger's outs/, a Xenium bundle) holds images and BAMs
     # the output never carries, so it is not measured.
-    if plan.outputs and (file.is_file() or is_zarr_path(file)):
-        check_free_space(plan.outputs[0], disk_size(file), check=space_check)
+    if plan.outputs and dst_format != "10x-mtx" and (
+        file.is_file() or is_zarr_path(file)
+    ):
+        check_free_space(plan.outputs[0], lambda: disk_size(file), check=space_check)
 
     console.print(f"[cyan]Converting[/] {file}: {plan.summary}")
     for warning in plan.warnings:

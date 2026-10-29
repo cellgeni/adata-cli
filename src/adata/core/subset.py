@@ -1148,7 +1148,9 @@ def subset_h5ad(
 
             check_free_space(
                 dst_path,
-                disk_size(file) * _kept(src, "obs", obs_idx) * _kept(src, "var", var_idx),
+                lambda: disk_size(file)
+                * _kept(src, "obs", obs_idx)
+                * _kept(src, "var", var_idx),
                 check=space_check,
             )
 

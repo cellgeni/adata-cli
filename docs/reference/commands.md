@@ -262,7 +262,9 @@ adata split data.h5ad --by cluster -o out/ --min-size 50
 | `--zarr-format` | Zarr version to write; defaults to the source's |
 | `--no-space-check` | Write even if the disk looks too small; see [Writing outputs](#writing-outputs) |
 
-Labels are sanitised for use as filenames; collisions get a numeric suffix.
+Labels are sanitised for use as filenames; collisions get a numeric suffix,
+and so do labels that differ only in case (`B`, `b_1`), which would be one
+file on macOS and Windows.
 Every store is written beside its destination and moved into place only once
 all of them are complete, and the manifest is written last, so a split that
 fails leaves no partial stores. An output that would land on the input is
@@ -413,10 +415,11 @@ What every command that writes a store or file checks, and how it writes.
 input, under any name that reaches it: a symlink, `..`, a hard link, or a
 change of case on a case-insensitive filesystem (macOS, Windows). A store
 output (`-o` on `subset`, `recast`, `concat`, `import`, and `create`'s path)
-may replace an existing store, but not a folder that is not a Zarr store or
-a file that is not HDF5: `-o results/`, as if it were `split`'s folder, used
-to delete `results/` and everything in it. `--inplace` and `-o` together are
-refused, rather than `-o` being ignored.
+may replace an existing store (or an empty folder), but not a folder that is
+not a Zarr store or a file that is not HDF5: `-o results/`, as if it were
+`split`'s folder, used to delete `results/` and everything in it. An
+`export` output may not be a folder or a store. `--inplace` and `-o`
+together are refused, rather than `-o` being ignored.
 
 **It is written beside its destination** (`out.adata-tmp.h5ad`) and renamed
 into place only once complete; an existing output is renamed aside to
@@ -425,13 +428,18 @@ any point, including the last flush to disk when the store is closed, leaves
 the existing output (or, with `--inplace`, the source) as it was. Before an
 existing output is replaced, its successor is synced to disk, so a power cut
 just after cannot lose both, and it takes over the old one's permissions and
-group: a private `0640` store stays private. With `--inplace`, a symlinked
-store is followed: the store it points at is replaced, and the link kept.
+group: a private `0640` store stays private. An output that is a symlink,
+or a symlinked source with `--inplace`, is followed: the store or file it
+points at is replaced, and the link kept. An `export` to a device or a pipe
+(`/dev/null`, a FIFO, `>(gzip > out.gz)`) is written as it is.
 
 **One run at a time per output.** A run claims each output with a lock file
-beside it (`out.h5ad.adata-lock`) for as long as it writes, so a second run
-writing the same output, a pipeline's retry while the first attempt still
-runs, is refused instead of mixing its data into the first's.
+beside it (`out.h5ad.adata-lock`, naming its host and process) for as long
+as it writes, so a second run writing the same output, a pipeline's retry
+while the first attempt still runs, is refused instead of mixing its data
+into the first's. A lock left by a run that was killed on the same host is
+taken over; one from another host is refused, since that run may still be
+writing.
 
 **A scheduler's SIGTERM** (a time limit, `scancel`, `bkill`), or SIGHUP from
 a closed terminal, gets the same cleanup as a failure: the partial output is
@@ -439,16 +447,19 @@ removed and the command exits with code 143 (129 for SIGHUP). Only SIGKILL
 leaves anything behind; see
 [Leftovers](../troubleshooting.md#leftovers-from-an-interrupted-run).
 
-**Free space is checked first.** A disk that fills part way through an HDF5
-write can stop the process inside the HDF5 library, where nothing can clean
-up. So `subset`, `recast`, `split`, `concat`, `convert` and each `import`
-subcommand estimate the output's size and refuse to start when the output's
-filesystem has less free than that. The estimate follows the source's size
-on disk: the fraction a `subset` or `split` keeps, the whole store for
-`recast` (more if a cast widens the values or densifies a matrix), the inputs
-together for `concat`, the store plus the file for `import`, the input file
-or store for `convert` (a folder input, such as Space Ranger's `outs/`, holds
-images and BAMs the output never carries, so it is not measured). It is an estimate, and a
+**Free space is checked first, for an HDF5 output.** A disk that fills part
+way through an HDF5 write can stop the process inside the HDF5 library,
+where nothing can clean up. So `subset`, `recast`, `split`, `concat`,
+`convert` and each `import` subcommand, writing an HDF5 store (`.h5ad`,
+`.loom`, `.h5`, `.h5mu`), estimate its size and refuse to start when the
+output's filesystem has less free than that. A Zarr store that runs out of
+space fails with an ordinary error and is removed, so it is not checked. The
+estimate follows the source's size on disk: the fraction a `subset` or
+`split` keeps, the whole store for `recast` plus what the converted matrices
+gain (a wider dtype, a densified matrix), the inputs together for `concat`,
+the store plus the file for `import`, the input file or store for `convert`
+(a folder input, such as Space Ranger's `outs/`, holds images and BAMs the
+output never carries, so it is not measured). It is an estimate, and a
 quota can be smaller than the free space it sees, so `--no-space-check`
 skips it.
 

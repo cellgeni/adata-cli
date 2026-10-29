@@ -13,8 +13,13 @@ nowhere, and the next run refuses to start until that has been dealt with.
 
 Two runs writing the same output would race past that check, so each output
 is claimed first with a lock file (`out.h5ad.adata-lock`) that only one run
-can create. A scheduler's SIGTERM (or a closed terminal's SIGHUP) is turned
-into an exception where it lands, so it gets the same cleanup as a failure.
+can create. A lock left by a run that was killed on this host is taken over;
+one from another host, whose run cannot be checked, is refused. A
+scheduler's SIGTERM (or a closed terminal's SIGHUP) is turned into an
+exception where it lands, so it gets the same cleanup as a failure.
+
+An output that is a symlink is written through: the file or store it points
+at is replaced, and the link kept.
 """
 
 from __future__ import annotations
@@ -25,9 +30,10 @@ import signal
 import socket
 import threading
 import time
+import warnings
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, List, Optional, Sequence, Tuple
+from typing import Callable, Iterator, List, Optional, Sequence, Tuple, Union
 
 from adata.util.path import is_zarr_path
 
@@ -147,8 +153,73 @@ class _Signals:
             yield
         finally:
             self.deferred = False
-        if self.pending is not None:
-            raise Terminated(128 + self.pending)
+            if self.pending is not None:
+                # Even over a failure in the body: the run was asked to stop,
+                # and its exit code should say so.
+                signum, self.pending = self.pending, None
+                raise Terminated(128 + signum)
+
+
+def _holder(lock: Path) -> Optional[Tuple[str, int]]:
+    """The host and process id a lock file names, if it can be read."""
+    try:
+        host, pid = lock.read_text().split()
+        return host, int(pid)
+    except (OSError, ValueError):
+        return None
+
+
+def _dead(holder: Optional[Tuple[str, int]]) -> bool:
+    """Is the run that made a lock gone? Knowable only on its own host."""
+    if holder is None or os.name == "nt":
+        return False
+    host, pid = holder
+    if host != socket.gethostname() or pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:  # alive, as another user
+        return False
+    return False
+
+
+def _take_over(lock: Path, holder: Tuple[str, int]) -> bool:
+    """Remove a dead run's lock, unless another run got to it first.
+
+    Renamed aside first, so two runs taking over the same stale lock cannot
+    both delete it: the one that finds a fresh lock under its name instead
+    puts it back and gives way.
+    """
+    aside = lock.with_name(f"{lock.name}.{os.getpid()}.stale")
+    try:
+        os.rename(lock, aside)
+    except FileNotFoundError:
+        return True
+    if _holder(aside) == holder:
+        aside.unlink()
+        return True
+    try:
+        os.link(aside, lock)
+    except OSError:  # pragma: no cover - a third run claimed it meanwhile
+        pass
+    aside.unlink()
+    return False
+
+
+def _refusal(lock: Path, holder: Optional[Tuple[str, int]]) -> FileExistsError:
+    output = lock.name[: -len(".adata-lock")]
+    who = (
+        f"another adata run (process {holder[1]} on {holder[0]})"
+        if holder
+        else "another adata run"
+    )
+    return FileExistsError(
+        f"'{lock}' exists: {who} is writing '{output}', or was killed before "
+        "it could clean up. If that run is no longer alive, delete the lock "
+        "and try again."
+    )
 
 
 def _claim(locks: Sequence[Path]) -> List[Path]:
@@ -157,16 +228,14 @@ def _claim(locks: Sequence[Path]) -> List[Path]:
     stamp = f"{socket.gethostname()} {os.getpid()}\n".encode()
     try:
         for lock in locks:
-            try:
-                fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-            except FileExistsError:
-                raise FileExistsError(
-                    f"'{lock}' exists: another adata run is writing "
-                    f"'{lock.name[: -len('.adata-lock')]}', or one was killed "
-                    "before it could clean up. If none is running, remove the "
-                    "lock (and any .adata-tmp or .adata-old file beside it) "
-                    "and try again."
-                ) from None
+            for attempt in range(2):
+                try:
+                    fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                    break
+                except FileExistsError:
+                    holder = _holder(lock)
+                    if not (attempt == 0 and _dead(holder) and _take_over(lock, holder)):
+                        raise _refusal(lock, holder) from None
             held.append(lock)
             try:
                 os.write(fd, stamp)
@@ -187,14 +256,18 @@ def _release(locks: Sequence[Path]) -> None:
 
 
 def _fsync_tree(path: Path) -> None:
-    """Push a file, or every file in a directory tree, out to the disk.
+    """Push a file, or a directory tree, out to the disk.
 
-    Only the bytes matter: a directory that cannot be opened for fsync (some
-    filesystems refuse) is skipped, but a file that fails to sync is an
-    error, because its contents may never reach the disk.
+    A file that fails to sync is an error: its contents may never reach the
+    disk. A Zarr store can hold millions of chunk files, and an fsync each
+    is a round trip per file on a network filesystem, so a tree is flushed
+    with one `sync()` where there is one.
     """
     if path.is_dir() and not path.is_symlink():
-        for root, dirs, files in os.walk(path):
+        if hasattr(os, "sync"):
+            os.sync()
+            return
+        for root, dirs, files in os.walk(path):  # pragma: no cover - Windows
             for name in files:
                 _fsync_file(Path(root) / name)
             _fsync_dir(Path(root))
@@ -234,6 +307,8 @@ def _keep_permissions(source: Path, target: Path) -> None:
         st = source.stat()
     except OSError:
         return
+    if source.is_dir() != target.is_dir():
+        return  # a file's mode would lock a directory's owner out of it
     try:
         os.chmod(target, st.st_mode & 0o7777)
     except OSError:  # pragma: no cover - not ours to change
@@ -277,7 +352,7 @@ def staged_outputs(outputs: Sequence[Path]) -> Iterator[List[Path]]:
     A replaced output passes its permissions on to its successor, which is
     synced to disk before the old one is deleted.
     """
-    outputs = [Path(p) for p in outputs]
+    outputs = [_follow(Path(p)) for p in outputs]
     temps = [_temp_for(p) for p in outputs]
     backups = [_sibling(p, "adata-old") for p in outputs]
 
@@ -285,8 +360,10 @@ def staged_outputs(outputs: Sequence[Path]) -> Iterator[List[Path]]:
         output.parent.mkdir(parents=True, exist_ok=True)
 
     with _Signals() as signals:
-        locks = _claim([lock_for(p) for p in outputs])
+        locks: List[Path] = []
         try:
+            with signals.hold():
+                locks = _claim([lock_for(p) for p in outputs])
             _leftovers(temps + backups)
 
             try:
@@ -300,7 +377,18 @@ def staged_outputs(outputs: Sequence[Path]) -> Iterator[List[Path]]:
             with signals.hold():
                 _swap(outputs, temps, backups)
         finally:
-            _release(locks)
+            with signals.hold():
+                _release(locks)
+
+
+def _follow(path: Path) -> Path:
+    """Where an output that is a symlink really is.
+
+    Renaming the link aside and the new store into its place made the link
+    a private copy, and left the store it pointed at, which others read
+    through the link, unchanged.
+    """
+    return Path(os.path.realpath(path)) if path.is_symlink() else path
 
 
 def _swap(outputs: List[Path], temps: List[Path], backups: List[Path]) -> None:
@@ -345,9 +433,19 @@ def _swap(outputs: List[Path], temps: List[Path], backups: List[Path]) -> None:
     if any(replacing):
         for parent in {output.parent for output in outputs}:
             _fsync_dir(parent)
-    for _, backup, had_output in swapped:
-        if had_output:
+    for output, backup, had_output in swapped:
+        if not had_output:
+            continue
+        try:
             _remove(backup)
+        except OSError as error:
+            # Every output is in place: the run succeeded. The old copy
+            # will block the next run, which says what to do with it.
+            warnings.warn(
+                f"Wrote '{output}', but could not delete the old copy at "
+                f"'{backup}': {error}. Delete it before the next run.",
+                stacklevel=4,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -380,15 +478,28 @@ def _human(n: float) -> str:
     return f"{n:,.1f} TB"  # pragma: no cover - unreachable
 
 
-def check_free_space(output: Path, needed: float, *, check: bool = True) -> None:
-    """Refuse to start an output that the disk it goes on cannot hold.
+def check_free_space(
+    output: Path,
+    needed: Union[float, Callable[[], float]],
+    *,
+    check: bool = True,
+) -> None:
+    """Refuse to start an HDF5 output that the disk it goes on cannot hold.
 
     A full disk part way through an HDF5 write can abort the process inside
     the HDF5 library, where no exception reaches us and nothing is cleaned
-    up. Checking first is the only defence. `needed` is an estimate, so
+    up. Checking first is the only defence. A Zarr store that runs out of
+    space fails with an ordinary error and is cleaned up, so it is not
+    checked, and the source is not measured for it: `needed` may be a
+    function, called only when the check runs. It is an estimate, so
     `check=False` (`--no-space-check`) skips it.
     """
-    if not check or needed <= 0:
+    output = _follow(Path(output))
+    if not check or output.suffix == ".zarr" or is_zarr_path(output):
+        return
+    if callable(needed):
+        needed = needed()
+    if needed <= 0:
         return
     directory = Path(output).absolute().parent
     while not directory.exists() and directory != directory.parent:

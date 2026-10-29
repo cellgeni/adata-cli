@@ -9,6 +9,8 @@ name a folder.
 
 from __future__ import annotations
 
+import os
+import stat
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, List, Optional
@@ -33,6 +35,15 @@ def _output(file: Path, out: Optional[Path], console: Console) -> Iterator[Optio
         return
     out = Path(out)
     check_output(out, [file], store=False)
+    try:
+        mode = os.stat(out).st_mode
+    except FileNotFoundError:
+        mode = None
+    if mode is not None and not stat.S_ISREG(mode):
+        # A device or a pipe (/dev/null, a FIFO, `>(gzip > x)`): written as
+        # it is. Staging would rename it aside and put a file in its place.
+        yield out
+        return
     out.parent.mkdir(parents=True, exist_ok=True)
     with staged_outputs([out]) as (temp,):
         yield temp

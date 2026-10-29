@@ -107,10 +107,11 @@ before changing anything that writes:
   `util/staging.staged_outputs`: write to `out.adata-tmp.<ext>`, move an
   existing output aside to `out.adata-old.<ext>`, rename into place, then
   delete the old one. It refuses to start over leftovers (naming them all),
-  claims each output with a lock file (`out.h5ad.adata-lock`) so two runs
-  cannot write one output, turns SIGTERM and SIGHUP into its cleanup, and
-  fsyncs a replacement and gives it the old output's mode and group before
-  the old one goes. With `--inplace` the source is the output, so open it
+  claims each output with a lock file (`out.h5ad.adata-lock`, taken over
+  when its process is dead on this host) so two runs cannot write one
+  output, follows an output that is a symlink, turns SIGTERM and SIGHUP into
+  its cleanup, and syncs a replacement and gives it the old output's mode and
+  group before the old one goes. With `--inplace` the source is the output, so open it
   *inside* the staging block, where it is closed before being renamed aside.
 - **`Store.close` raises.** A failed HDF5 flush or Zarr consolidation leaves
   an incomplete store; raising it is what lets staging discard it. It stays
@@ -123,9 +124,11 @@ before changing anything that writes:
   replace; and `--inplace` with `-o` is refused. A symlinked `--inplace`
   source is followed, so the link survives. Opening a Zarr output for writing
   empties the directory being read.
-- **Check free space before writing a large store**, with
-  `util/staging.check_free_space`. A full disk part way through an HDF5 write
-  can abort inside the library, past any cleanup. `--no-space-check` skips it.
+- **Check free space before writing a large HDF5 store**, with
+  `util/staging.check_free_space`, giving the estimate as a function so a
+  Zarr output never measures the source. A full disk part way through an
+  HDF5 write can abort inside the library, past any cleanup.
+  `--no-space-check` skips it.
 - **Validate before the output exists.** Resolve selections, check casts and
   plan, so that a refusal writes nothing. An empty selection is a refusal,
   not an empty store.
