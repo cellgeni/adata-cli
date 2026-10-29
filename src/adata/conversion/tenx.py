@@ -300,7 +300,10 @@ class _CheckedIndices(h5py.Dataset):
         self._n_features = n_features
 
     def __getitem__(self, args: Any, new_dtype: Any = None) -> Any:
-        values = super().__getitem__(args, new_dtype)
+        values = (
+            super().__getitem__(args) if new_dtype is None
+            else super().__getitem__(args, new_dtype)
+        )
         array = np.asarray(values)
         if array.size and (array.min() < 0 or array.max() >= self._n_features):
             bad = int(array.max()) if array.max() >= self._n_features else int(array.min())
