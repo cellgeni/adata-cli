@@ -1,0 +1,1051 @@
+{
+  "tier": "ci",
+  "tier_shape": [
+    50000,
+    20000,
+    0.05
+  ],
+  "var_heavy_shape": [
+    2000,
+    36601
+  ],
+  "generated": "2026-10-29T17:06:00Z",
+  "ref": "0.17.3",
+  "platform": "Linux x86_64",
+  "python": "3.12.3",
+  "memory_limit_bytes": 12884901888,
+  "page_cache_dropped": true,
+  "repeats": 3,
+  "versions": {
+    "adata-cli": "0.17.3",
+    "anndata": "0.13.4",
+    "geopandas": "1.2.0",
+    "scanpy": "1.12.5"
+  },
+  "results": [
+    {
+      "case": "startup",
+      "contender": "adata-cli",
+      "wall_s": 0.639,
+      "maxrss_bytes": 75653120,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 0,
+      "output_files": 0,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        1.003,
+        0.639,
+        0.649
+      ]
+    },
+    {
+      "case": "startup",
+      "contender": "anndata",
+      "wall_s": 1.608,
+      "maxrss_bytes": 135987200,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 0,
+      "output_files": 0,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        3.808,
+        1.608,
+        1.658
+      ]
+    },
+    {
+      "case": "startup",
+      "contender": "scanpy",
+      "wall_s": 3.441,
+      "maxrss_bytes": 263372800,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 0,
+      "output_files": 0,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        8.243,
+        3.441,
+        3.531
+      ]
+    },
+    {
+      "case": "concat-inner",
+      "contender": "adata-cli",
+      "wall_s": 12.453,
+      "maxrss_bytes": 182427648,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 583279667,
+      "output_files": 1,
+      "stderr_tail": "\u001b[36mConcatenating \u001b[0m\u001b[1;36m2\u001b[0m\u001b[36m stores: \u001b[0m\u001b[1;36m100000\u001b[0m\u001b[36m obs x \u001b[0m\u001b[1;36m20000\u001b[0m\u001b[36m var \u001b[0m\u001b[1;36m(\u001b[0m\u001b[36minner join\u001b[0m\u001b[1;36m)\u001b[0m\n  \u001b[2mci-\u001b[0m\u001b[1;2;36m0\u001b[0m: \u001b[1;36m50000\u001b[0m obs from ci-\u001b[1;36m0.\u001b[0mh5ad\n  \u001b[2mci-\u001b[0m\u001b[1;2;36m1\u001b[0m: \u001b[1;36m50000\u001b[0m obs from ci-\u001b[1;36m1.\u001b[0mh5ad\n\u001b[32mWrote\u001b[0m \u001b[35m/home/runner/work/_temp/bench/out/\u001b[0m\u001b[95mconcat-inner.h5ad\u001b[0m \u001b[1m(\u001b[0m\u001b[1;36m100000\u001b[0m obs x \u001b[1;36m20000\u001b[0m \nvar\u001b[1m)\u001b[0m",
+      "input_bytes": 582301961,
+      "runs": 3,
+      "wall_s_all": [
+        12.453,
+        12.658,
+        12.453
+      ]
+    },
+    {
+      "case": "concat-inner",
+      "contender": "anndata (concat_on_disk)",
+      "wall_s": 6.25,
+      "maxrss_bytes": 452399104,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 831906064,
+      "output_files": 1,
+      "stderr_tail": "",
+      "input_bytes": 582301961,
+      "runs": 3,
+      "wall_s_all": [
+        6.251,
+        6.337,
+        6.25
+      ]
+    },
+    {
+      "case": "concat-inner",
+      "contender": "anndata (in memory)",
+      "wall_s": 12.34,
+      "maxrss_bytes": 1840308224,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 580294281,
+      "output_files": 1,
+      "stderr_tail": "",
+      "input_bytes": 582301961,
+      "runs": 3,
+      "wall_s_all": [
+        12.419,
+        12.34,
+        12.37
+      ]
+    },
+    {
+      "case": "concat-inner",
+      "contender": "scanpy",
+      "status": "n/a",
+      "note": "scanpy has no concat of its own; it re-exports anndata's"
+    },
+    {
+      "case": "concat-merge-same",
+      "contender": "adata-cli",
+      "wall_s": 1.841,
+      "maxrss_bytes": 200224768,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 45655831,
+      "output_files": 1,
+      "stderr_tail": "\u001b[36mConcatenating \u001b[0m\u001b[1;36m2\u001b[0m\u001b[36m stores: \u001b[0m\u001b[1;36m4000\u001b[0m\u001b[36m obs x \u001b[0m\u001b[1;36m36601\u001b[0m\u001b[36m var \u001b[0m\u001b[1;36m(\u001b[0m\u001b[36minner join\u001b[0m\u001b[1;36m)\u001b[0m\n  \u001b[2mvar-heavy-\u001b[0m\u001b[1;2;36m0\u001b[0m: \u001b[1;36m2000\u001b[0m obs from var-heavy-\u001b[1;36m0.\u001b[0mh5ad\n  \u001b[2mvar-heavy-\u001b[0m\u001b[1;2;36m1\u001b[0m: \u001b[1;36m2000\u001b[0m obs from var-heavy-\u001b[1;36m1.\u001b[0mh5ad\n\u001b[32mWrote\u001b[0m \u001b[35m/home/runner/work/_temp/bench/out/\u001b[0m\u001b[95mconcat-merge-same.h5ad\u001b[0m \u001b[1m(\u001b[0m\u001b[1;36m4000\u001b[0m obs x \u001b[1;36m36601\u001b[0m\nvar\u001b[1m)\u001b[0m",
+      "input_bytes": 47225963,
+      "runs": 3,
+      "wall_s_all": [
+        1.849,
+        1.842,
+        1.841
+      ]
+    },
+    {
+      "case": "concat-merge-same",
+      "contender": "anndata (concat_on_disk)",
+      "wall_s": 2.325,
+      "maxrss_bytes": 249135104,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 63205915,
+      "output_files": 1,
+      "stderr_tail": "",
+      "input_bytes": 47225963,
+      "runs": 3,
+      "wall_s_all": [
+        2.325,
+        2.347,
+        2.354
+      ]
+    },
+    {
+      "case": "concat-merge-same",
+      "contender": "anndata (in memory)",
+      "wall_s": 2.764,
+      "maxrss_bytes": 290234368,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 44610596,
+      "output_files": 1,
+      "stderr_tail": "",
+      "input_bytes": 47225963,
+      "runs": 3,
+      "wall_s_all": [
+        2.764,
+        2.782,
+        2.768
+      ]
+    },
+    {
+      "case": "subset-query",
+      "contender": "adata-cli",
+      "wall_s": 4.256,
+      "maxrss_bytes": 218746880,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 147085698,
+      "output_files": 1,
+      "stderr_tail": "\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[1A\u001b[2K\u001b[32m\u2713\u001b[0m \u001b[32mSubsetting obs\u001b[0m       \n\u001b[32m\u2713\u001b[0m \u001b[32mSubsetting var\u001b[0m       \n\u001b[32m\u2713\u001b[0m \u001b[32mSubsetting X\u001b[0m         \n\u001b[32m\u2713\u001b[0m \u001b[32mSubsetting obsm:X_pca\u001b[0m\n\u001b[32m\u2713\u001b[0m \u001b[32mSubsetting uns\u001b[0m       \n\u001b[?25h",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        4.256,
+        4.262,
+        4.273
+      ]
+    },
+    {
+      "case": "subset-query",
+      "contender": "anndata (backed)",
+      "wall_s": 5.072,
+      "maxrss_bytes": 693854208,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 146642970,
+      "output_files": 1,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        5.081,
+        5.072,
+        5.091
+      ]
+    },
+    {
+      "case": "subset-query",
+      "contender": "anndata (in memory)",
+      "wall_s": 5.368,
+      "maxrss_bytes": 988164096,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 146642970,
+      "output_files": 1,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        5.368,
+        5.405,
+        5.397
+      ]
+    },
+    {
+      "case": "subset-query",
+      "contender": "scanpy (filter_cells)",
+      "wall_s": 9.084,
+      "maxrss_bytes": 1565298688,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 291163286,
+      "output_files": 1,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        9.174,
+        9.084,
+        9.208
+      ]
+    },
+    {
+      "case": "h5ad-to-zarr",
+      "contender": "adata-cli",
+      "wall_s": 6.704,
+      "maxrss_bytes": 162152448,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 151559564,
+      "output_files": 4717,
+      "stderr_tail": "\u001b[?25h\n\u001b[1A\u001b[2K\u001b[?25l\u001b[32m\u280b\u001b[0m \u001b[36mCopying varm...\u001b[0m\n\u001b[?25h\n\u001b[1A\u001b[2K\u001b[?25l\u001b[32m\u280b\u001b[0m \u001b[36mCopying varp...\u001b[0m\n\u001b[?25h\n\u001b[1A\u001b[2K\u001b[32mWrote\u001b[0m \u001b[35m/home/runner/work/_temp/bench/out/\u001b[0m\u001b[95mh5ad-to-zarr.zarr\u001b[0m",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        6.704,
+        6.733,
+        6.733
+      ]
+    },
+    {
+      "case": "h5ad-to-zarr",
+      "contender": "anndata (in memory)",
+      "wall_s": 6.028,
+      "maxrss_bytes": 813355008,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 136819009,
+      "output_files": 55,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        6.028,
+        6.04,
+        6.096
+      ]
+    },
+    {
+      "case": "h5ad-to-zarr",
+      "contender": "scanpy",
+      "status": "n/a",
+      "note": "no streaming converter; scanpy defers to anndata"
+    },
+    {
+      "case": "inspect",
+      "contender": "adata-cli",
+      "wall_s": 0.691,
+      "maxrss_bytes": 76976128,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 0,
+      "output_files": 0,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        0.71,
+        0.691,
+        0.692
+      ]
+    },
+    {
+      "case": "inspect",
+      "contender": "anndata (read_elem on obs)",
+      "wall_s": 1.847,
+      "maxrss_bytes": 162922496,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 0,
+      "output_files": 0,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        1.86,
+        1.859,
+        1.847
+      ]
+    },
+    {
+      "case": "inspect",
+      "contender": "anndata (full load)",
+      "wall_s": 3.254,
+      "maxrss_bytes": 586895360,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 0,
+      "output_files": 0,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        3.303,
+        3.254,
+        3.327
+      ]
+    },
+    {
+      "case": "export-obs",
+      "contender": "adata-cli",
+      "wall_s": 0.82,
+      "maxrss_bytes": 90566656,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 1848117,
+      "output_files": 1,
+      "stderr_tail": "\u001b[?25l\u001b[32m\u280b\u001b[0m \u001b[35mExporting rows 20000-30000 of 50000...\u001b[0m\n\u001b[2K\u001b[32m\u2819\u001b[0m \u001b[35mExporting rows 40000-50000 of 50000...\u001b[0m\n\u001b[2K\u001b[32m\u2819\u001b[0m \u001b[35mExporting rows 40000-50000 of 50000...\u001b[0m\n\u001b[?25h\n\u001b[1A\u001b[2K",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        0.831,
+        0.85,
+        0.82
+      ]
+    },
+    {
+      "case": "export-obs",
+      "contender": "anndata (read_elem on obs)",
+      "wall_s": 1.854,
+      "maxrss_bytes": 163782656,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 1798110,
+      "output_files": 1,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        1.862,
+        1.854,
+        1.872
+      ]
+    },
+    {
+      "case": "export-obs",
+      "contender": "anndata (full load)",
+      "wall_s": 3.311,
+      "maxrss_bytes": 586547200,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 1798110,
+      "output_files": 1,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        3.32,
+        3.337,
+        3.311
+      ]
+    },
+    {
+      "case": "split-by-sample",
+      "contender": "adata-cli",
+      "wall_s": 6.715,
+      "maxrss_bytes": 203714560,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 302600014,
+      "output_files": 9,
+      "stderr_tail": "\u001b[32m\u2713\u001b[0m \u001b[32mSubsetting X\u001b[0m         \n\u001b[32m\u2713\u001b[0m \u001b[32mSubsetting obsm:X_pca\u001b[0m\n\u001b[32m\u2713\u001b[0m \u001b[32mSubsetting uns\u001b[0m       \n\u001b[?25h\u001b[2mManifest written to \u001b[0m\n\u001b[2;35m/home/runner/work/_temp/bench/out/split-by-sample-out/\u001b[0m\u001b[2;95mci-0_manifest.csv\u001b[0m\n\u001b[32mWrote\u001b[0m \u001b[1;36m8\u001b[0m stores to \u001b[35m/home/runner/work/_temp/bench/out/\u001b[0m\u001b[95msplit-by-sample-out\u001b[0m",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        6.715,
+        6.801,
+        6.791
+      ]
+    },
+    {
+      "case": "split-by-sample",
+      "contender": "anndata (hand-written loop)",
+      "wall_s": 7.893,
+      "maxrss_bytes": 688902144,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 301681470,
+      "output_files": 8,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        7.893,
+        7.944,
+        7.932
+      ]
+    },
+    {
+      "case": "ls",
+      "contender": "adata-cli",
+      "wall_s": 0.678,
+      "maxrss_bytes": 76419072,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 0,
+      "output_files": 0,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        0.679,
+        0.678,
+        0.689
+      ]
+    },
+    {
+      "case": "ls",
+      "contender": "h5py (visit)",
+      "wall_s": 1.658,
+      "maxrss_bytes": 139206656,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 0,
+      "output_files": 0,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        1.658,
+        1.67,
+        1.712
+      ]
+    },
+    {
+      "case": "ls",
+      "contender": "h5ls -r",
+      "wall_s": 0.0,
+      "maxrss_bytes": 0,
+      "exit_code": 127,
+      "status": "n/a",
+      "output_bytes": 0,
+      "output_files": 0,
+      "stderr_tail": "h5ls is not installed",
+      "input_bytes": 291155190,
+      "runs": 1,
+      "wall_s_all": [
+        0.0
+      ]
+    },
+    {
+      "case": "create",
+      "contender": "adata-cli",
+      "wall_s": 0.728,
+      "maxrss_bytes": 90353664,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 3395320,
+      "output_files": 1,
+      "stderr_tail": "\u001b[32mCreated\u001b[0m \u001b[35m/home/runner/work/_temp/bench/out/\u001b[0m\u001b[95mcreate.h5ad\u001b[0m \u001b[1m(\u001b[0m\u001b[1;36m50000\u001b[0m obs x \u001b[1;36m20000\u001b[0m var, \nempty\u001b[1m)\u001b[0m",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        0.74,
+        0.729,
+        0.728
+      ]
+    },
+    {
+      "case": "create",
+      "contender": "anndata",
+      "wall_s": 8.79,
+      "maxrss_bytes": 230457344,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 49249074,
+      "output_files": 1,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        8.883,
+        8.79,
+        8.811
+      ]
+    },
+    {
+      "case": "export-array",
+      "contender": "adata-cli",
+      "wall_s": 0.688,
+      "maxrss_bytes": 89042944,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 10000128,
+      "output_files": 1,
+      "stderr_tail": "\u001b[?25l\u001b[32m\u280b\u001b[0m \u001b[35mExporting obsm/X_pca: 48000-50000 of 50000...\u001b[0m\n\u001b[?25h\n\u001b[1A\u001b[2K\u001b[32mWrote\u001b[0m \u001b[35m/home/runner/work/_temp/bench/out/\u001b[0m\u001b[95mexport-array.npy\u001b[0m",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        0.698,
+        0.688,
+        0.689
+      ]
+    },
+    {
+      "case": "export-array",
+      "contender": "anndata (read_elem)",
+      "wall_s": 1.709,
+      "maxrss_bytes": 157290496,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 10000128,
+      "output_files": 1,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        1.718,
+        1.709,
+        1.73
+      ]
+    },
+    {
+      "case": "export-array",
+      "contender": "anndata (full load)",
+      "wall_s": 3.267,
+      "maxrss_bytes": 586600448,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 10000128,
+      "output_files": 1,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        3.306,
+        3.27,
+        3.267
+      ]
+    },
+    {
+      "case": "export-sparse",
+      "contender": "adata-cli",
+      "wall_s": 11.24,
+      "maxrss_bytes": 253616128,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 661315639,
+      "output_files": 1,
+      "stderr_tail": "\u001b[2K\u001b[32m\u2807\u001b[0m \u001b[35mExporting X to /home/runner/work/_temp/bench/out/export-sparse.mtx...\u001b[0m\n\u001b[2K\u001b[32m\u280f\u001b[0m \u001b[35mExporting X to /home/runner/work/_temp/bench/out/export-sparse.mtx...\u001b[0m\n\u001b[2K\u001b[32m\u280b\u001b[0m \u001b[35mExporting X to /home/runner/work/_temp/bench/out/export-sparse.mtx...\u001b[0m\n\u001b[2K\u001b[32m\u280b\u001b[0m \u001b[35mExporting X to /home/runner/work/_temp/bench/out/export-sparse.mtx...\u001b[0m\n\u001b[?25h\n\u001b[1A\u001b[2K\u001b[32mWrote\u001b[0m \u001b[35m/home/runner/work/_temp/bench/out/\u001b[0m\u001b[95mexport-sparse.mtx\u001b[0m",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        11.24,
+        11.377,
+        11.339
+      ]
+    },
+    {
+      "case": "export-sparse",
+      "contender": "anndata (sparse_dataset)",
+      "wall_s": 7.114,
+      "maxrss_bytes": 970883072,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 661616487,
+      "output_files": 1,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        7.257,
+        7.14,
+        7.114
+      ]
+    },
+    {
+      "case": "export-sparse",
+      "contender": "anndata (full load)",
+      "wall_s": 7.26,
+      "maxrss_bytes": 779014144,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 661616487,
+      "output_files": 1,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        7.26,
+        7.307,
+        7.3
+      ]
+    },
+    {
+      "case": "import-dataframe",
+      "contender": "adata-cli",
+      "wall_s": 1.317,
+      "maxrss_bytes": 119803904,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 295979462,
+      "output_files": 1,
+      "stderr_tail": "\u001b[2mCopied \u001b[0m\u001b[2;35m/home/runner/work/_temp/bench/fixtures/\u001b[0m\u001b[2;95mci-0.h5ad\u001b[0m\u001b[2m \u2192 \u001b[0m\n\u001b[2;35m/home/runner/work/_temp/bench/out/\u001b[0m\u001b[2;95mimport-dataframe.h5ad\u001b[0m\n\u001b[32mImported\u001b[0m \u001b[1;36m50000\u001b[0m rows x \u001b[1;36m5\u001b[0m columns into \u001b[32m'obs'\u001b[0m \u001b[1m(\u001b[0m\u001b[1;36m1\u001b[0m categorical\u001b[1m)\u001b[0m",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        1.317,
+        1.366,
+        1.336
+      ]
+    },
+    {
+      "case": "import-dataframe",
+      "contender": "anndata",
+      "wall_s": 7.001,
+      "maxrss_bytes": 596279296,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 291188133,
+      "output_files": 1,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        7.16,
+        7.055,
+        7.001
+      ]
+    },
+    {
+      "case": "import-10x-mtx",
+      "contender": "adata-cli",
+      "wall_s": 16.634,
+      "maxrss_bytes": 342355968,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 279168353,
+      "output_files": 1,
+      "stderr_tail": "\u001b[2K\u001b[32m\u2838\u001b[0m \u001b[36mReading matrix.mtx.gz...\u001b[0m\n\u001b[2K\u001b[32m\u283c\u001b[0m \u001b[36mReading matrix.mtx.gz...\u001b[0m\n\u001b[2K\u001b[32m\u2834\u001b[0m \u001b[36mReading matrix.mtx.gz...\u001b[0m\n\u001b[2K\u001b[32m\u2826\u001b[0m \u001b[36mReading matrix.mtx.gz...\u001b[0m\n\u001b[?25h\n\u001b[1A\u001b[2K\u001b[32mWrote\u001b[0m \u001b[35m/home/runner/work/_temp/bench/out/\u001b[0m\u001b[95mimport-10x-mtx.h5ad\u001b[0m",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        16.634,
+        16.972,
+        16.841
+      ]
+    },
+    {
+      "case": "import-10x-mtx",
+      "contender": "scanpy",
+      "wall_s": 14.184,
+      "maxrss_bytes": 3318620160,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 284633918,
+      "output_files": 1,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        14.634,
+        14.934,
+        14.184
+      ]
+    },
+    {
+      "case": "import-xenium",
+      "contender": "adata-cli",
+      "wall_s": 12.021,
+      "maxrss_bytes": 182820864,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 131882416,
+      "output_files": 1,
+      "stderr_tail": "\u001b[2K\u001b[32m\u280b\u001b[0m \u001b[36mCopying X...\u001b[0m\n\u001b[2K\u001b[32m\u2819\u001b[0m \u001b[36mCopying X...\u001b[0m\n\u001b[2K\u001b[32m\u2839\u001b[0m \u001b[36mCopying X...\u001b[0m\n\u001b[2K\u001b[32m\u2838\u001b[0m \u001b[36mCopying X...\u001b[0m\n\u001b[?25h\n\u001b[1A\u001b[2K\u001b[32mWrote\u001b[0m \u001b[35m/home/runner/work/_temp/bench/out/\u001b[0m\u001b[95mimport-xenium.h5ad\u001b[0m",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        12.021,
+        12.279,
+        12.256
+      ]
+    },
+    {
+      "case": "import-xenium",
+      "contender": "scanpy",
+      "wall_s": 8.477,
+      "maxrss_bytes": 711479296,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 280329907,
+      "output_files": 1,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        8.477,
+        8.482,
+        8.501
+      ]
+    },
+    {
+      "case": "import-visium-cells",
+      "contender": "adata-cli",
+      "wall_s": 14.053,
+      "maxrss_bytes": 160296960,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 131830184,
+      "output_files": 1,
+      "stderr_tail": "\u001b[2K\u001b[32m\u280f\u001b[0m \u001b[36mCopying X...\u001b[0m\n\u001b[2K\u001b[32m\u280b\u001b[0m \u001b[36mCopying X...\u001b[0m\n\u001b[2K\u001b[32m\u2819\u001b[0m \u001b[36mCopying X...\u001b[0m\n\u001b[2K\u001b[32m\u2839\u001b[0m \u001b[36mCopying X...\u001b[0m\n\u001b[?25h\n\u001b[1A\u001b[2K\u001b[32mWrote\u001b[0m \u001b[35m/home/runner/work/_temp/bench/out/\u001b[0m\u001b[95mimport-visium-cells.h5ad\u001b[0m",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        14.053,
+        14.313,
+        14.323
+      ]
+    },
+    {
+      "case": "import-visium-cells",
+      "contender": "scanpy",
+      "wall_s": 10.249,
+      "maxrss_bytes": 773906432,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 281167941,
+      "output_files": 1,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        14.62,
+        10.249,
+        10.356
+      ]
+    },
+    {
+      "case": "import-csv",
+      "contender": "adata-cli",
+      "wall_s": 9.045,
+      "maxrss_bytes": 167755776,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 56481401,
+      "output_files": 1,
+      "stderr_tail": "\u001b[2K\u001b[32m\u280f\u001b[0m \u001b[36mReading import-csv-ci-0-sidecar.csv...\u001b[0m\n\u001b[2K\u001b[32m\u280b\u001b[0m \u001b[36mReading import-csv-ci-0-sidecar.csv...\u001b[0m\n\u001b[2K\u001b[32m\u2819\u001b[0m \u001b[36mReading import-csv-ci-0-sidecar.csv...\u001b[0m\n\u001b[2K\u001b[32m\u2819\u001b[0m \u001b[36mReading import-csv-ci-0-sidecar.csv...\u001b[0m\n\u001b[?25h\n\u001b[1A\u001b[2K\u001b[32mWrote\u001b[0m \u001b[35m/home/runner/work/_temp/bench/out/\u001b[0m\u001b[95mimport-csv.h5ad\u001b[0m",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        9.045,
+        9.083,
+        9.109
+      ]
+    },
+    {
+      "case": "import-csv",
+      "contender": "anndata",
+      "wall_s": 43.11,
+      "maxrss_bytes": 1771298816,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 44694860,
+      "output_files": 1,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        43.11,
+        43.233,
+        43.148
+      ]
+    },
+    {
+      "case": "concat-outer",
+      "contender": "adata-cli",
+      "wall_s": 12.362,
+      "maxrss_bytes": 175050752,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 583279667,
+      "output_files": 1,
+      "stderr_tail": "\u001b[36mConcatenating \u001b[0m\u001b[1;36m2\u001b[0m\u001b[36m stores: \u001b[0m\u001b[1;36m100000\u001b[0m\u001b[36m obs x \u001b[0m\u001b[1;36m20000\u001b[0m\u001b[36m var \u001b[0m\u001b[1;36m(\u001b[0m\u001b[36mouter join\u001b[0m\u001b[1;36m)\u001b[0m\n  \u001b[2mci-\u001b[0m\u001b[1;2;36m0\u001b[0m: \u001b[1;36m50000\u001b[0m obs from ci-\u001b[1;36m0.\u001b[0mh5ad\n  \u001b[2mci-\u001b[0m\u001b[1;2;36m1\u001b[0m: \u001b[1;36m50000\u001b[0m obs from ci-\u001b[1;36m1.\u001b[0mh5ad\n\u001b[32mWrote\u001b[0m \u001b[35m/home/runner/work/_temp/bench/out/\u001b[0m\u001b[95mconcat-outer.h5ad\u001b[0m \u001b[1m(\u001b[0m\u001b[1;36m100000\u001b[0m obs x \u001b[1;36m20000\u001b[0m \nvar\u001b[1m)\u001b[0m",
+      "input_bytes": 582301961,
+      "runs": 3,
+      "wall_s_all": [
+        12.428,
+        12.362,
+        12.534
+      ]
+    },
+    {
+      "case": "concat-outer",
+      "contender": "anndata (concat_on_disk)",
+      "wall_s": 6.332,
+      "maxrss_bytes": 451321856,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 831906064,
+      "output_files": 1,
+      "stderr_tail": "",
+      "input_bytes": 582301961,
+      "runs": 3,
+      "wall_s_all": [
+        6.332,
+        6.416,
+        6.344
+      ]
+    },
+    {
+      "case": "concat-outer",
+      "contender": "anndata (in memory)",
+      "wall_s": 12.25,
+      "maxrss_bytes": 1839460352,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 580294285,
+      "output_files": 1,
+      "stderr_tail": "",
+      "input_bytes": 582301961,
+      "runs": 3,
+      "wall_s_all": [
+        12.38,
+        12.424,
+        12.25
+      ]
+    },
+    {
+      "case": "recast-narrow",
+      "contender": "adata-cli",
+      "wall_s": 2.439,
+      "maxrss_bytes": 125091840,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 415394541,
+      "output_files": 1,
+      "stderr_tail": "\u001b[2mX: float64 -> float32: every value round-trips\u001b[0m\n\u001b[36mConverting \u001b[0m\u001b[1;36m1\u001b[0m\u001b[36m matrix/matrices:\u001b[0m X\n\u001b[32mWrote\u001b[0m \u001b[35m/home/runner/work/_temp/bench/out/\u001b[0m\u001b[95mrecast-narrow.h5ad\u001b[0m",
+      "input_bytes": 815612312,
+      "runs": 3,
+      "wall_s_all": [
+        2.448,
+        2.449,
+        2.439
+      ]
+    },
+    {
+      "case": "recast-narrow",
+      "contender": "anndata (in memory)",
+      "wall_s": 4.003,
+      "maxrss_bytes": 1786511360,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 417296752,
+      "output_files": 1,
+      "stderr_tail": "",
+      "input_bytes": 815612312,
+      "runs": 3,
+      "wall_s_all": [
+        4.011,
+        4.003,
+        4.074
+      ]
+    },
+    {
+      "case": "recast-narrow",
+      "contender": "scanpy",
+      "status": "n/a",
+      "note": "no dtype rewrite; scanpy defers to anndata"
+    },
+    {
+      "case": "recast-narrow-lzf",
+      "contender": "adata-cli",
+      "wall_s": 8.04,
+      "maxrss_bytes": 132886528,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 291143660,
+      "output_files": 1,
+      "stderr_tail": "\u001b[2mX: float64 -> float32: every value round-trips\u001b[0m\n\u001b[36mConverting \u001b[0m\u001b[1;36m1\u001b[0m\u001b[36m matrix/matrices:\u001b[0m X\n\u001b[32mWrote\u001b[0m \u001b[35m/home/runner/work/_temp/bench/out/\u001b[0m\u001b[95mrecast-narrow-lzf.h5ad\u001b[0m",
+      "input_bytes": 302534504,
+      "runs": 3,
+      "wall_s_all": [
+        8.04,
+        8.084,
+        8.129
+      ]
+    },
+    {
+      "case": "recast-narrow-lzf",
+      "contender": "anndata (in memory)",
+      "wall_s": 8.181,
+      "maxrss_bytes": 1786998784,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 291157795,
+      "output_files": 1,
+      "stderr_tail": "",
+      "input_bytes": 302534504,
+      "runs": 3,
+      "wall_s_all": [
+        8.254,
+        8.181,
+        8.214
+      ]
+    },
+    {
+      "case": "convert-layout",
+      "contender": "adata-cli (streaming)",
+      "wall_s": 15.114,
+      "maxrss_bytes": 394231808,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 296958781,
+      "output_files": 1,
+      "stderr_tail": "\u001b[36mConverting \u001b[0m\u001b[1;36m1\u001b[0m\u001b[36m matrix/matrices:\u001b[0m X\n\u001b[2mTransposing \u001b[0m\u001b[1;2;36m50\u001b[0m\u001b[2m,\u001b[0m\u001b[1;2;36m000\u001b[0m\u001b[2m,\u001b[0m\u001b[1;2;36m000\u001b[0m\u001b[2m nonzeros through \u001b[0m\u001b[1;2;36m48\u001b[0m\u001b[2m buckets\u001b[0m\n\u001b[32mWrote\u001b[0m \u001b[35m/home/runner/work/_temp/bench/out/\u001b[0m\u001b[95mconvert-layout.h5ad\u001b[0m",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        15.114,
+        15.138,
+        15.273
+      ]
+    },
+    {
+      "case": "convert-layout",
+      "contender": "adata-cli (--in-memory)",
+      "wall_s": 9.71,
+      "maxrss_bytes": 2296795136,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 296959140,
+      "output_files": 1,
+      "stderr_tail": "\u001b[36mConverting \u001b[0m\u001b[1;36m1\u001b[0m\u001b[36m matrix/matrices:\u001b[0m X\n\u001b[32mWrote\u001b[0m \u001b[35m/home/runner/work/_temp/bench/out/\u001b[0m\u001b[95mconvert-layout.h5ad\u001b[0m",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        9.768,
+        9.71,
+        9.841
+      ]
+    },
+    {
+      "case": "convert-layout",
+      "contender": "anndata (in memory)",
+      "wall_s": 7.278,
+      "maxrss_bytes": 987607040,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 296971995,
+      "output_files": 1,
+      "stderr_tail": "",
+      "input_bytes": 291155190,
+      "runs": 3,
+      "wall_s_all": [
+        7.278,
+        7.324,
+        7.342
+      ]
+    },
+    {
+      "case": "rss-vs-size",
+      "contender": "adata-cli",
+      "wall_s": 12.359,
+      "maxrss_bytes": 176553984,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 583279667,
+      "output_files": 1,
+      "stderr_tail": "\u001b[36mConcatenating \u001b[0m\u001b[1;36m2\u001b[0m\u001b[36m stores: \u001b[0m\u001b[1;36m100000\u001b[0m\u001b[36m obs x \u001b[0m\u001b[1;36m20000\u001b[0m\u001b[36m var \u001b[0m\u001b[1;36m(\u001b[0m\u001b[36minner join\u001b[0m\u001b[1;36m)\u001b[0m\n  \u001b[2mci-\u001b[0m\u001b[1;2;36m0\u001b[0m: \u001b[1;36m50000\u001b[0m obs from ci-\u001b[1;36m0.\u001b[0mh5ad\n  \u001b[2mci-\u001b[0m\u001b[1;2;36m1\u001b[0m: \u001b[1;36m50000\u001b[0m obs from ci-\u001b[1;36m1.\u001b[0mh5ad\n\u001b[32mWrote\u001b[0m \u001b[35m/home/runner/work/_temp/bench/out/\u001b[0m\u001b[95mrss-vs-size.h5ad\u001b[0m \u001b[1m(\u001b[0m\u001b[1;36m100000\u001b[0m obs x \u001b[1;36m20000\u001b[0m \nvar\u001b[1m)\u001b[0m",
+      "input_bytes": 582301961,
+      "runs": 3,
+      "wall_s_all": [
+        12.44,
+        12.359,
+        12.553
+      ]
+    },
+    {
+      "case": "rss-vs-size",
+      "contender": "anndata (in memory)",
+      "wall_s": 12.346,
+      "maxrss_bytes": 1840332800,
+      "exit_code": 0,
+      "status": "ok",
+      "output_bytes": 580294281,
+      "output_files": 1,
+      "stderr_tail": "",
+      "input_bytes": 582301961,
+      "runs": 3,
+      "wall_s_all": [
+        12.355,
+        12.346,
+        12.456
+      ]
+    }
+  ]
+}
