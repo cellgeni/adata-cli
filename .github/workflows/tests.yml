@@ -168,3 +168,47 @@ jobs:
           if ran < 8:
               sys.exit(f"expected at least 8 cases to run, got {ran}")
           PY
+
+  # The unit suite once more, on the lowest version of each direct dependency
+  # that pyproject.toml allows. The jobs above install the lock, which holds
+  # the newest; without this one a floor is a number nobody has installed.
+  floors:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    name: tests at the dependency floors
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      # Resolved apart from uv.lock. Python 3.12 is the floor of
+      # requires-python, and the oldest releases have wheels for it.
+      - name: Install the lowest versions pyproject.toml allows
+        run: |
+          uv venv --python 3.12
+          uv pip compile pyproject.toml --all-extras \
+            --resolution lowest-direct --python-version 3.12 -o floors.txt
+          uv pip sync floors.txt
+          uv pip install --no-deps -e .
+          .venv/bin/python .github/scripts/check_floors.py
+
+      - name: Run the unit suite
+        run: .venv/bin/python -m pytest -v -W default tests/ -m "not integration"
+
+      # The dev extra needs pandas 3 for the test fixtures, so the suite above
+      # ran on pandas 3. The pickle extra allows an older pandas; its tests
+      # run on that one here.
+      - name: Run the pickle extra's tests at its own floors
+        run: |
+          uv pip compile pyproject.toml --extra pickle \
+            --resolution lowest-direct --python-version 3.12 -o pickle-floors.txt
+          uv pip install -r pickle-floors.txt
+          .venv/bin/python .github/scripts/check_floors.py pickle
+          .venv/bin/python -m pytest -v -W default -m "not integration" \
+            tests/test_cistopic.py tests/test_pandas_frame.py

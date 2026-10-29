@@ -12,7 +12,10 @@ behind an explicit `--in-memory`. pandas and scipy are not dependencies either:
 they come only with the `pickle` extra, for pycisTopic pickles
 (`conversion/cistopic.py`), and are imported there alone. pyarrow likewise
 comes only with the `spatial` extra, for Visium HD's Parquet positions, and
-is imported only in `formats/parquet.py`.
+is imported only in `formats/parquet.py`. Every module `src/adata` imports is
+declared in `pyproject.toml` with a floor, rather than left to arrive with
+another package. CI's floors job installs each floor, checks it with
+`.github/scripts/check_floors.py`, and runs the unit suite on them.
 
 Naming:
 - The PyPI distribution is `pyadata-cli`.

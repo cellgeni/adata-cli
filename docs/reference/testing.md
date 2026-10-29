@@ -18,7 +18,9 @@ uv run pytest -m integration       # anndata releases, scanpy and PyTables
 
 CI runs the unit suite on Python 3.12 and 3.13 with a **90% coverage floor**,
 and the anndata compatibility suite and the 10x external-reader suite as
-separate jobs.
+separate jobs. A floors job runs the unit suite once more on the lowest
+version of each dependency that `pyproject.toml` allows, after checking that
+each one really is at its floor.
 
 ## How the suite is organised
 
