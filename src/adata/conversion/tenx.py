@@ -13,15 +13,19 @@ genes in CSR -- AnnData's layout for X. So the arrays are streamed straight
 across in both directions and nothing is transposed, unless the AnnData side
 holds CSC or dense.
 
-The AnnData produced matches `scanpy.read_10x_h5(gex_only=False)` column for
-column, so code written against scanpy's output works on ours. Two
-differences: X keeps Cell Ranger's integer counts, where scanpy converts
-them to float32; and the run's metadata, which scanpy drops, is kept in
+With `--var-names gene_symbols`, the AnnData produced has the names and
+columns `scanpy.read_10x_h5(gex_only=False)` gives, so code written against
+scanpy's output works on ours; by default features are named by gene id
+instead. Other differences: X keeps Cell Ranger's integer counts, where
+scanpy converts them to float32; text outside ASCII, which Cell Ranger
+writes as XML character references, is read as the characters they stand
+for; and the run's metadata, which scanpy drops, is kept in
 `uns["cellranger"]` so an export can write it back.
 """
 
 from __future__ import annotations
 
+import re
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -128,8 +132,27 @@ def sniff(path: Path) -> bool:
         return _is_v3(handle) or bool(_v2_genomes(handle))
 
 
+#: An XML character reference, as Cell Ranger writes text outside ASCII.
+_REFERENCE = re.compile(r"&#(?:([0-9]+)|x([0-9a-fA-F]+));")
+
+
+def _character(match: "re.Match[str]") -> str:
+    decimal, hexadecimal = match.groups()
+    code = int(decimal) if decimal is not None else int(hexadecimal, 16)
+    return chr(code) if code <= 0x10FFFF else match.group(0)
+
+
+def decode_text(values: np.ndarray) -> np.ndarray:
+    """Strings as Cell Ranger means them: decoded, and the XML character
+    references it writes for text outside ASCII turned back into text."""
+    text = decode_str_array(values)
+    if text.size and (np.char.find(text, "&#") >= 0).any():
+        text = np.array([_REFERENCE.sub(_character, v) for v in text.tolist()], dtype=str)
+    return text
+
+
 def _strings(dataset: Any) -> np.ndarray:
-    return decode_str_array(np.asarray(dataset[...]))
+    return decode_text(np.asarray(dataset[...]))
 
 
 @dataclass
@@ -146,6 +169,8 @@ class _Matrix:
     columns: Dict[str, np.ndarray]
     feature_types: Optional[np.ndarray]
     tag_keys: List[str]
+    #: The feature datasets read into var besides ids and types, tags or not.
+    feature_keys: List[str]
     attrs: Dict[str, Any]
 
 
@@ -177,21 +202,41 @@ def _read_matrix(handle: h5py.File, genome: Optional[str]) -> _Matrix:
     problems = []
     if group["barcodes"].shape[0] != n_barcodes:
         problems.append(f"{group['barcodes'].shape[0]} barcodes")
+    if "filtered_barcodes" in group and len(group["filtered_barcodes"]) != n_barcodes:
+        problems.append(f"{len(group['filtered_barcodes'])} filtered_barcodes")
     if group["indptr"].shape[0] != n_barcodes + 1:
         problems.append(f"an indptr of {group['indptr'].shape[0]}")
+    elif (problem := _indptr_problem(group["indptr"], group["data"].shape[0])) is not None:
+        problems.append(problem)
     if group["indices"].shape[0] != group["data"].shape[0]:
         problems.append("indices and data of different lengths")
+
+    columns: Dict[str, np.ndarray] = {}
+    feature_types = None
+    tag_keys: List[str] = []
+    feature_keys: List[str] = []
+    if version == 3:
+        features = group["features"]
+        if "_all_tag_keys" in features:
+            tag_keys = list(_strings(features["_all_tag_keys"]))
+        problems += [f"no feature {key}" for key in ("id", "name", "feature_type") if key not in features]
+        for key, item in features.items():
+            # scanpy reads every one of these into var, so each must have
+            # one entry per feature.
+            if isinstance(item, h5py.Dataset) and key != "_all_tag_keys" and item.shape[:1] != (n_features,):
+                problems.append(f"{item.shape[0] if item.ndim else 'a scalar'} feature {key}")
+        problems += [f"no feature {key}, which _all_tag_keys lists" for key in tag_keys if key not in features]
+    else:
+        for key in ("genes", "gene_names"):
+            if group[key].shape[:1] != (n_features,):
+                problems.append(f"{group[key].shape[0]} feature {key}")
     if problems:
         raise ValueError(
             f"Inconsistent 10x matrix: shape says {n_features} features x "
             f"{n_barcodes} barcodes, but it has {' and '.join(problems)}."
         )
 
-    columns: Dict[str, np.ndarray] = {}
-    feature_types = None
-    tag_keys: List[str] = []
     if version == 3:
-        features = group["features"]
         ids, names = _strings(features["id"]), _strings(features["name"])
         if "gene_id" in features:
             # A probe-barcode matrix (Flex): `id` names probes, not genes.
@@ -202,27 +247,14 @@ def _read_matrix(handle: h5py.File, genome: Optional[str]) -> _Matrix:
         feature_types = _strings(features["feature_type"])
         columns["feature_types"] = feature_types
         for key, item in features.items():
-            if (
-                key in _FEATURE_CORE
-                or not isinstance(item, h5py.Dataset)
-                or item.ndim != 1
-                or item.shape[0] != n_features
-            ):
+            if key in _FEATURE_CORE or not isinstance(item, h5py.Dataset) or item.ndim != 1:
                 continue
             values = np.asarray(item[...])
-            columns[key] = values.astype(bool) if values.dtype.kind == "b" else decode_str_array(values)
-        if "_all_tag_keys" in features:
-            tag_keys = list(_strings(features["_all_tag_keys"]))
+            columns[key] = values.astype(bool) if values.dtype.kind == "b" else decode_text(values)
+            feature_keys.append(key)
     else:
         ids, names = _strings(group["genes"]), _strings(group["gene_names"])
         columns["gene_ids"] = ids
-
-    for label, values in (("ids", ids), ("names", names)):
-        if values.shape[0] != n_features:
-            raise ValueError(
-                f"Inconsistent 10x matrix: {values.shape[0]} feature {label} "
-                f"for {n_features} features."
-            )
 
     attrs = {
         key: handle.attrs[key] for key in _RUN_ATTRS if key in handle.attrs
@@ -237,8 +269,46 @@ def _read_matrix(handle: h5py.File, genome: Optional[str]) -> _Matrix:
         columns=columns,
         feature_types=feature_types,
         tag_keys=tag_keys,
+        feature_keys=feature_keys,
         attrs=attrs,
     )
+
+
+def _indptr_problem(indptr: h5py.Dataset, nnz: int, step: int = 1 << 20) -> Optional[str]:
+    """What is wrong with `indptr`, if anything: it must run from 0 to the
+    number of entries without going back. Read a block at a time."""
+    if indptr.shape[0] == 0 or int(indptr[0]) != 0:
+        return "an indptr that does not start at 0"
+    if int(indptr[-1]) != nnz:
+        return f"an indptr that ends at {int(indptr[-1])} for {nnz} entries"
+    previous = 0
+    for lo in range(0, indptr.shape[0], step):
+        block = np.asarray(indptr[lo : lo + step], dtype=np.int64)
+        if block[0] < previous or (np.diff(block) < 0).any():
+            return "an indptr that goes back"
+        previous = int(block[-1])
+    return None
+
+
+class _CheckedIndices(h5py.Dataset):
+    """A 10x matrix's `indices`, refusing any outside its features as they
+    are read: a stray index would otherwise be copied into X unnoticed, or
+    taken from the end of a feature filter's lookup."""
+
+    def __init__(self, dataset: h5py.Dataset, n_features: int) -> None:
+        super().__init__(dataset.id)
+        self._n_features = n_features
+
+    def __getitem__(self, args: Any, new_dtype: Any = None) -> Any:
+        values = super().__getitem__(args, new_dtype)
+        array = np.asarray(values)
+        if array.size and (array.min() < 0 or array.max() >= self._n_features):
+            bad = int(array.max()) if array.max() >= self._n_features else int(array.min())
+            raise ValueError(
+                f"Inconsistent 10x matrix: an entry has feature index {bad}, "
+                f"outside its {self._n_features} features."
+            )
+        return values
 
 
 class _AsCsr:
@@ -250,6 +320,7 @@ class _AsCsr:
 
     def __init__(self, group: h5py.Group, shape: Tuple[int, int]) -> None:
         self._group = group
+        self._n_features = int(shape[1])
         self.attrs = {
             "encoding-type": spec.CSR_MATRIX,
             "encoding-version": spec.CURRENT_VERSION[spec.CSR_MATRIX],
@@ -257,6 +328,8 @@ class _AsCsr:
         }
 
     def __getitem__(self, key: str) -> Any:
+        if key == "indices":
+            return _CheckedIndices(self._group[key], self._n_features)
         return self._group[key]
 
 
@@ -392,7 +465,7 @@ def _write_obs(group: h5py.Group, root: Any, filtered_barcodes: bool) -> None:
 
 
 def _strings_slice(dataset: Any, lo: int, hi: int) -> List[str]:
-    return [str(v) for v in decode_str_array(np.asarray(dataset[lo:hi]))]
+    return [str(v) for v in decode_text(np.asarray(dataset[lo:hi]))]
 
 
 def _write_uns(root: Any, matrix: _Matrix) -> None:
@@ -403,6 +476,10 @@ def _write_uns(root: Any, matrix: _Matrix) -> None:
         write_scalar(meta, "genome", matrix.group)
     if matrix.tag_keys:
         write_string_array(meta, "feature_tag_keys", matrix.tag_keys)
+    if matrix.feature_keys:
+        # So an export writes them back, tags or not (Flex's `filtered_probes`
+        # is not a tag).
+        write_string_array(meta, "feature_keys", matrix.feature_keys)
     if matrix.attrs:
         attrs = write_mapping(meta, "attrs")
         for key, value in matrix.attrs.items():
@@ -493,17 +570,24 @@ class TenxExport(Converter):
             obs = root["obs"]
             obs_index, _ = resolve_index(obs, "obs")
             _write_fixed_strings_streamed(group, "barcodes", obs_index, obs)
+            flags = obs.get("filtered_barcodes")
+            if is_dataset(flags) and "categories" not in flags.attrs and flags.dtype.kind == "b":
+                # Space Ranger's and Flex's barcodes in the filtered matrix,
+                # which the import read into obs.
+                _copy_cast(flags, group, "filtered_barcodes", np.dtype(bool), STRING_STEP)
 
             feats = group.create_group("features")
             for key, values in (
                 ("id", features.ids),
                 ("name", features.names),
                 ("feature_type", features.types),
-                ("genome", features.genomes),
-                *features.tags.items(),
+                *features.fields.items(),
             ):
-                _write_fixed_strings(feats, key, values)
-            _write_fixed_strings(feats, "_all_tag_keys", ["genome", *features.tags])
+                if isinstance(values, np.ndarray) and values.dtype.kind == "b":
+                    _create(feats, key, len(values), np.dtype(bool))[...] = values
+                else:
+                    _write_fixed_strings(feats, key, values)
+            _write_fixed_strings(feats, "_all_tag_keys", features.tag_keys)
 
             for key, value in detail["attrs"].items():
                 out.attrs[key] = value
@@ -524,6 +608,13 @@ def _run_attrs(root: Any) -> Dict[str, Any]:
     return attrs
 
 
+def _data_dtype(dtype: np.dtype) -> np.dtype:
+    """The dtype `data` is written as: float16 widened to float32, since
+    scipy has no float16 sparse matrix, so neither scanpy nor anndata could
+    read it back."""
+    return np.dtype(np.float32) if np.dtype(dtype) == np.float16 else np.dtype(dtype)
+
+
 def _write_matrix(matrix: Any, out: h5py.File) -> h5py.Group:
     """`/matrix/{data,indices,indptr}`, gzip-compressed whatever the source used.
 
@@ -531,9 +622,13 @@ def _write_matrix(matrix: Any, out: h5py.File) -> h5py.Group:
     CellBender and Seurat read these files.
     """
     index_dtype = np.dtype("int64")
+    data_dtype = _data_dtype(matrix.dtype)
     if matrix.kind == spec.CSR_MATRIX:
         group = out.create_group("matrix")
         for key in ("data", "indices", "indptr"):
+            if key == "data" and data_dtype != matrix.dtype:
+                _copy_cast(matrix.obj[key], group, key, data_dtype)
+                continue
             copy_dataset(matrix.obj[key], group, key, compression="gzip")
             for attr in list(group[key].attrs):
                 del group[key].attrs[attr]
@@ -541,12 +636,12 @@ def _write_matrix(matrix: Any, out: h5py.File) -> h5py.Group:
 
     if matrix.kind == spec.CSC_MATRIX:
         transpose_sparse_streaming(
-            matrix, out, "matrix", data_dtype=matrix.dtype,
+            matrix, out, "matrix", data_dtype=data_dtype,
             index_dtype=index_dtype, compression="gzip",
         )
     else:
         sparsify(
-            matrix, out, "matrix", enc=spec.CSR_MATRIX, data_dtype=matrix.dtype,
+            matrix, out, "matrix", enc=spec.CSR_MATRIX, data_dtype=data_dtype,
             index_dtype=index_dtype, compression="gzip",
         )
     group = out["matrix"]
@@ -555,25 +650,37 @@ def _write_matrix(matrix: Any, out: h5py.File) -> h5py.Group:
     return group
 
 
-def _fixed_width(values: Sequence[str]) -> int:
-    return max([1, *(len(v.encode("utf-8")) for v in values)])
+def _copy_cast(src: Any, parent: h5py.Group, name: str, dtype: np.dtype, step: int = 1 << 20) -> None:
+    """`src` as `dtype`, a block at a time."""
+    n = src.shape[0]
+    dataset = _create(parent, name, n, dtype)
+    for lo in range(0, n, step):
+        dataset[lo : lo + step] = np.asarray(src[lo : lo + step]).astype(dtype)
 
 
-def _create_fixed(parent: h5py.Group, name: str, n: int, width: int) -> h5py.Dataset:
+def _ascii(values: Sequence[str]) -> List[bytes]:
+    """Text as Cell Ranger writes it: 7-bit ASCII, with XML character
+    references for anything else. scanpy decodes these files as ASCII, and
+    fails on any other byte."""
+    return [v.encode("ascii", "xmlcharrefreplace") for v in values]
+
+
+def _create(parent: h5py.Group, name: str, n: int, dtype: Any) -> h5py.Dataset:
     kw: Dict[str, Any] = {}
     if n:
         kw = {"chunks": (min(n, 1 << 16),), "compression": "gzip", "compression_opts": GZIP_LEVEL}
-    return parent.create_dataset(name, shape=(n,), dtype=f"S{width}", **kw)
+    return parent.create_dataset(name, shape=(n,), dtype=dtype, **kw)
 
 
 def _write_fixed_strings(parent: h5py.Group, name: str, values: Sequence[str]) -> None:
-    """Fixed-width bytes, as Cell Ranger writes them.
+    """Fixed-width ASCII bytes, as Cell Ranger writes them.
 
     Not variable-length strings: PyTables, which CellBender reads these
     files with, does not support them.
     """
-    data = np.array([v.encode("utf-8") for v in values], dtype=f"S{_fixed_width(values)}")
-    _create_fixed(parent, name, len(values), data.dtype.itemsize)[...] = data
+    encoded = _ascii(values)
+    data = np.array(encoded, dtype=f"S{max([1, *map(len, encoded)])}")
+    _create(parent, name, len(values), data.dtype)[...] = data
 
 
 def _write_fixed_strings_streamed(
@@ -586,9 +693,9 @@ def _write_fixed_strings_streamed(
     width = 1
     for lo in range(0, n, STRING_STEP):
         block = read_str_chunk(column, lo, min(lo + STRING_STEP, n), cache, frame)
-        width = max(width, _fixed_width(block))
-    dataset = _create_fixed(parent, name, n, width)
+        width = max(width, *map(len, _ascii(block)))
+    dataset = _create(parent, name, n, f"S{width}")
     for lo in range(0, n, STRING_STEP):
         hi = min(lo + STRING_STEP, n)
         block = read_str_chunk(column, lo, hi, cache, frame)
-        dataset[lo:hi] = np.array([v.encode("utf-8") for v in block], dtype=f"S{width}")
+        dataset[lo:hi] = np.array(_ascii(block), dtype=f"S{width}")

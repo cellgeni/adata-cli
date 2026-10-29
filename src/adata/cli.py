@@ -669,7 +669,7 @@ def convert(
     gene_names_column: Optional[str] = typer.Option(
         None,
         "--gene-names-column",
-        help="10x output: var column holding gene names (default: var_names)",
+        help="10x output: var column holding gene names (default: gene_symbols, else var_names)",
     ),
     feature_types_column: Optional[str] = typer.Option(
         None,
