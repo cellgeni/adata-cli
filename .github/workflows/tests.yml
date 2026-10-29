@@ -13,6 +13,11 @@ concurrency:
   group: tests-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only unless a job says otherwise: the repository's default token can
+# write.
+permissions:
+  contents: read
+
 jobs:
   tests:
     runs-on: ubuntu-latest
@@ -30,21 +35,39 @@ jobs:
 
     name: tests (py${{ matrix.python-version }})
 
-    steps:
-      - uses: actions/checkout@v4
+    env:
+      # uv takes its interpreter from .python-version (3.12, for local work)
+      # before the one setup-python puts on PATH, so up to 0.17.4 the py3.13
+      # leg ran the suite on 3.12. UV_PYTHON outranks the file.
+      UV_PYTHON: ${{ matrix.python-version }}
 
-      - uses: actions/setup-python@v5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: ${{ matrix.python-version }}
 
       # Prefer an action over curl|sh
       - name: Set up uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3.2.4
         with:
           enable-cache: false
 
       - name: Install dependencies (frozen)
         run: uv sync --extra dev --frozen
+
+      # The leg's name is a claim; this checks it before anything runs.
+      - name: The suite runs on the Python this leg names
+        run: |
+          uv run --frozen python --version
+          actual=$(uv run --frozen python -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+          if [ "$actual" != "$UV_PYTHON" ]; then
+            echo "::error::the py$UV_PYTHON leg would run the suite on Python $actual"
+            exit 1
+          fi
 
       - name: Run tests with coverage
         run: |
@@ -54,17 +77,17 @@ jobs:
             --cov-report=xml \
             --cov-report=html \
             --cov-fail-under=90 \
-            --junitxml=pytest-results-py${{ matrix.python-version }}.xml
+            --junitxml="pytest-results-py$UV_PYTHON.xml"
 
       - name: Publish test results summary
-        uses: EnricoMi/publish-unit-test-result-action@v2
+        uses: EnricoMi/publish-unit-test-result-action@7622c5bf3d112a72ab4fa3951c2aa5723d8ab92d # v2.25.0
         if: always()
         with:
           files: pytest-results-py${{ matrix.python-version }}.xml
           check_name: Test Results (py${{ matrix.python-version }})
 
       - name: Upload coverage artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: coverage-py${{ matrix.python-version }}
@@ -75,7 +98,7 @@ jobs:
           retention-days: 30
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4.6.0
         if: always()
         with:
           files: coverage.xml
@@ -96,9 +119,11 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: astral-sh/setup-uv@v3
+      - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3.2.4
         with:
           enable-cache: false
 
@@ -147,6 +172,38 @@ jobs:
           fi
           fresh/bin/python -m pytest -q -p no:cacheprovider tests/test_docs_are_accurate.py
 
+  # publish.yml, quay-on-tag.yml and benchmark.yml run only on a tag, so no
+  # pull request runs them. actionlint parses every workflow as GitHub will
+  # and shellchecks its scripts; zizmor audits them for injection, unpinned
+  # actions and excess permissions. Both pinned, so that a new release of
+  # either cannot fail a pull request that changed nothing.
+  workflows:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    name: workflow lint
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3.2.4
+        with:
+          enable-cache: false
+
+      - name: actionlint
+        run: uvx --from actionlint-py==1.7.12.25 actionlint
+
+      - name: zizmor
+        env:
+          # Read-only. The online audits ask GitHub whether each pinned commit
+          # belongs to its action and whether that version has an advisory.
+          GH_TOKEN: ${{ github.token }}
+        run: uvx zizmor==1.31.1 --format github .github/workflows
+
   # Builds a store with each pinned anndata release and checks the CLI against
   # it. Split out because it assembles six environments with uv, which needs
   # the network and is far slower than the unit suite.
@@ -159,9 +216,11 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: astral-sh/setup-uv@v3
+      - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3.2.4
         with:
           enable-cache: true
 
@@ -205,9 +264,11 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: astral-sh/setup-uv@v3
+      - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3.2.4
         with:
           enable-cache: true
 
