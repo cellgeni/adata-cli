@@ -296,3 +296,46 @@ jobs:
           if ran < 8:
               sys.exit(f"expected at least 8 cases to run, got {ran}")
           PY
+
+  # The unit suite once more, on the lowest version of each direct dependency
+  # that pyproject.toml allows. The jobs above install the lock, which holds
+  # the newest; without this one a floor is a number nobody has installed.
+  floors:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    permissions:
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every Python the classifiers name: an old release may have wheels
+        # for one and not the next.
+        python-version: ["3.12", "3.13"]
+
+    name: tests at the dependency floors (py${{ matrix.python-version }})
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      # Resolved apart from uv.lock, so that each direct dependency is at its
+      # floor and the rest at their newest, as a pip install would give.
+      - name: Install the lowest versions pyproject.toml allows
+        run: |
+          uv venv --python ${{ matrix.python-version }}
+          uv pip compile pyproject.toml --all-extras --resolution lowest-direct \
+            --python-version ${{ matrix.python-version }} -o floors.txt
+          uv pip sync floors.txt
+          uv pip install --no-deps -e .
+          .venv/bin/python .github/scripts/check_floors.py
+
+      # The pickle extra allows pandas 2.2.3, below the dev extra's 3.0, so
+      # this runs pandas 3.0; tests/test_external_readers.py converts under
+      # 2.2.3 in the external-readers job.
+      - name: Run the unit suite
+        run: .venv/bin/python -m pytest -v -rs -W default tests/ -m "not integration"

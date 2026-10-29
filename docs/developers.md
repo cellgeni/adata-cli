@@ -19,8 +19,11 @@ uv run adata --help
 uv run pytest -m "not integration"     # the unit suite CI gates on, a few minutes
 ```
 
-The tool itself depends on h5py, zarr, numpy, Pillow, Typer and Rich; the
-`pickle` extra adds pandas and scipy, and the `spatial` extra pyarrow.
+The tool itself depends on h5py, zarr, numcodecs, numpy, Pillow, Typer and
+Rich; the `pickle` extra adds pandas and scipy, and the `spatial` extra
+pyarrow. A module `src/adata` imports gets a line in `pyproject.toml`, with a
+floor: CI's floors job installs each direct dependency at its floor and runs
+the unit suite on them.
 anndata, pandas, scipy and pyarrow come with the `dev` extra, as the
 reference the tests check against; scanpy, loompy, mudata and older anndata releases are
 installed by the `integration` tests in environments of their own.

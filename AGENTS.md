@@ -9,10 +9,15 @@ anndata: anndata appears only in tests and benchmarks, as the reference. The
 point of the tool is that memory is set by `--chunk`, not by the size of the
 input, so code that loads a whole matrix or column is a regression unless it is
 behind an explicit `--in-memory`. pandas and scipy are not dependencies either:
-they come only with the `pickle` extra, for pycisTopic pickles
-(`conversion/cistopic.py`), and are imported there alone. pyarrow likewise
+they come only with the `pickle` extra, for pycisTopic pickles, and are
+imported only on that path (`conversion/cistopic.py`, `formats/pickled.py`,
+`formats/pandas_frame.py`). pyarrow likewise
 comes only with the `spatial` extra, for Visium HD's Parquet positions, and
-is imported only in `formats/parquet.py`.
+is imported only in `formats/parquet.py`. Every module `src/adata` imports is
+declared in `pyproject.toml` with a floor, rather than left to arrive with
+another package. CI's floors job installs each direct dependency at its
+floor, checks it with `.github/scripts/check_floors.py`, and runs the unit
+suite on them.
 
 Naming:
 - The PyPI distribution is `pyadata-cli`.
