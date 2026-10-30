@@ -400,7 +400,9 @@ adata import image     data.h5ad uns/spatial/hires tissue.png --inplace
 ```
 
 Dimensions are validated against the existing obs/var where the path implies
-an axis.
+an axis. For `array` and `sparse` that is done from the file's header,
+before the store is copied, so a matrix of the wrong shape is refused at
+once rather than after a copy of a large store.
 
 An element of a kind the AnnData layout does not allow where it would go is
 refused before anything is written, since anndata could not then read the
@@ -411,11 +413,12 @@ array that is not 1-D as a column of a dataframe. Name the entry to write,
 such as `obsm/X_pca` or `uns/params`: an entry is replaced whatever it held.
 
 For `array`: the `.npy` is read a block of rows at a time, so its size is not
-a limit. Text (`<U` or `S`) becomes a string array.
+a limit; `--chunk`, `-C` sets how many elements a block holds (1,048,576 by
+default, at least 1). Text (`<U` or `S`) becomes a string array.
 
 For `sparse`: the file is read in two streaming passes, so its size is not a
 limit, and it may be gzipped (`counts.mtx.gz`). The first pass checks the
-whole file before the store is touched. `integer` values stay integers
+whole file before the element is written. `integer` values stay integers
 (int32, or int64 when a value needs it), `real` ones become float64, and
 `pattern` entries become ones. Duplicate entries are summed, as scipy does.
 Only `coordinate general` files are read: `symmetric`, `skew-symmetric`,

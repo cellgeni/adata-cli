@@ -9,6 +9,7 @@ from rich.markup import escape
 
 from adata.conversion import FORMATS, Options
 from adata.core.recast import LAYOUTS
+from adata.formats.array import IMPORT_CHUNK_ELEMENTS
 from adata.commands import (
     MERGE_CHOICES,
     concat_stores,
@@ -1295,8 +1296,8 @@ def export_array(
     """
     Export a dense array or matrix to NumPy .npy format.
 
-    Writes to stdout when no --output is given. Writing to a file streams in
-    chunks; stdout is not seekable, so that path holds the array in memory.
+    Writes to stdout when no --output is given. Either way the array is read
+    and written a chunk at a time.
 
     Examples:
         adata export array data.h5ad obsm/X_pca -o pca.npy
@@ -1582,6 +1583,9 @@ def import_array(
         "--inplace",
         help="Modify source file directly.",
     ),
+    chunk_elements: int = _chunk_option(
+        IMPORT_CHUNK_ELEMENTS, "Number of elements to copy per chunk"
+    ),
     no_space_check: bool = _space_check_option(),
 ) -> None:
     """
@@ -1600,9 +1604,13 @@ def import_array(
             file,
             output,
             inplace,
-            lambda target: _import_npy(target, entry, input_file, console),
+            lambda target: _import_npy(
+                target, entry, input_file, console, chunk_elements=chunk_elements
+            ),
             console,
             input_file=input_file,
+            obj=entry,
+            kind="array",
             space_check=not no_space_check,
         )
     except Exception as e:
@@ -1660,6 +1668,8 @@ def import_sparse(
             lambda target: _import_mtx(target, obj, input_file, console),
             console,
             input_file=input_file,
+            obj=obj,
+            kind="sparse",
             space_check=not no_space_check,
         )
     except Exception as e:

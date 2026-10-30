@@ -40,6 +40,12 @@ def _out(result) -> str:
     return " ".join(_ANSI.sub("", text).split())
 
 
+def _flat(result) -> str:
+    """The output with every space removed: Rich wraps a long path inside
+    itself at the terminal's width (80 columns in CI)."""
+    return "".join(_out(result).split())
+
+
 def _store(path: Path) -> Path:
     obj = ad.AnnData(
         X=np.arange(16, dtype="float32").reshape(4, 4),
@@ -476,7 +482,7 @@ def test_every_chunk_option_refuses_zero_and_below():
     commands = {path for path, _ in options}
     assert {
         "subset", "split", "concat", "recast", "convert",
-        "export dataframe", "export array", "export sparse",
+        "export dataframe", "export array", "export sparse", "import array",
     } <= commands
     for path, param in options:
         assert getattr(param.type, "min", None) == 1, path
@@ -821,7 +827,7 @@ def test_export_writes_through_a_staged_file(tmp_path):
     result = runner.invoke(app, _args(["export", "dataframe", src, "obs", "-o", out]))
     assert result.exit_code == 0, _out(result)
     assert list(pd.read_csv(out, index_col=0).index) == ["c0", "c1", "c2", "c3"]
-    assert "Wrote" in _out(result) and "adata-tmp" not in _out(result)
+    assert "Wrote" in _out(result) and "adata-tmp" not in _flat(result)
     assert _debris(tmp_path) == []
 
 
@@ -1314,7 +1320,7 @@ def test_every_leftover_is_named_at_once(tmp_path):
 
     result = runner.invoke(app, _args(["split", src, "--by", "grp", "-o", parts]))
     assert result.exit_code == 1
-    text = _out(result)
+    text = _flat(result)
     assert "a.adata-tmp.h5ad" in text and "b.adata-tmp.h5ad" in text
     assert sorted(p.name for p in parts.iterdir()) == ["a.adata-tmp.h5ad",
                                                        "b.adata-tmp.h5ad"]
@@ -1520,3 +1526,44 @@ def test_an_old_copy_that_cannot_be_deleted_does_not_fail_the_run(tmp_path, monk
         with staging.staged_outputs([out]) as (temp,):
             temp.write_text("new")
     assert out.read_text() == "new"
+
+
+@pytest.mark.parametrize("kind", ["array", "sparse"])
+def test_an_input_of_the_wrong_shape_is_refused_before_the_store_is_copied(
+    tmp_path, backend, monkeypatch, kind
+):
+    """F024 review: `import sparse big.h5ad X bad.mtx --inplace` copied the
+    whole store before reading the MTX header, then refused: as long, and
+    as much room, as the store is large, to say the file did not fit."""
+    from adata.commands import import_data
+
+    src = _source(tmp_path, backend)
+    before = _snapshot(src)
+    if kind == "array":
+        data = tmp_path / "bad.npy"
+        np.save(data, np.ones((9, 2), dtype="float32"))
+    else:
+        data = tmp_path / "bad.mtx"
+        data.write_text("%%MatrixMarket matrix coordinate real general\n9 4 1\n1 1 1.0\n")
+    monkeypatch.setattr(import_data, "copy_path", _fail)
+    monkeypatch.setattr(import_data, "copy_store_contents", _fail)
+
+    result = runner.invoke(app, _args(["import", kind, src, "X", data, "--inplace"]))
+    assert result.exit_code == 1
+    assert "mismatch" in _out(result).lower()
+    assert "interrupted" not in _out(result)
+    assert _snapshot(src) == before
+    assert _debris(tmp_path) == []
+
+
+def test_import_array_copies_in_blocks_of_chunk_elements(tmp_path, backend):
+    """F015: `import array` now takes the shared --chunk."""
+    src = _source(tmp_path, backend)
+    data = tmp_path / "pca.npy"
+    values = np.arange(8, dtype="float32").reshape(4, 2)
+    np.save(data, values)
+
+    result = runner.invoke(app, _args(["import", "array", src, "obsm/X_new", data,
+                                       "--inplace", "--chunk", "3"]))
+    assert result.exit_code == 0, _out(result)
+    assert np.array_equal(_read(src).obsm["X_new"], values)

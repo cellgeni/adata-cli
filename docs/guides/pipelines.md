@@ -105,6 +105,7 @@ most data:
 | `subset`, `split`, `concat`, `recast` | 1,024 | rows of a dense matrix |
 | `export dataframe` | 10,000 | rows |
 | `export array` | 100,000 | elements |
+| `import array` | 1,048,576 | elements |
 
 A dense block holds `--chunk` × n_var values, so lower it for very wide dense
 matrices. It must be at least 1; zero or a negative value is a usage error. Sparse matrices stream in blocks too. obs and var columns are read

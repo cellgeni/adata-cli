@@ -10,15 +10,18 @@ any existing output as they were.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
+import numpy as np
 from rich.console import Console
 
-from adata.formats.array import import_npy
+from adata.formats.array import IMPORT_CHUNK_ELEMENTS, import_npy
 from adata.formats.dataframe import import_dataframe
 from adata.formats.image import import_image
 from adata.formats.json_data import import_json
+from adata.formats.mtx import read_header
 from adata.formats.sparse import import_mtx
+from adata.formats.validate import check_target, validate_dimensions
 from adata.storage import copy_path, copy_store_contents, detect_backend, open_store
 from adata.util.path import output_target
 from adata.util.staging import check_free_space, disk_size, staged_outputs
@@ -51,6 +54,44 @@ def _copy_source(
     )
 
 
+def _npy_shape(path: Path) -> Optional[Tuple[int, ...]]:
+    """A .npy's shape from its header, or None to leave it to the import."""
+    try:
+        with open(path, "rb") as fh:
+            version = np.lib.format.read_magic(fh)
+            read = {
+                (1, 0): np.lib.format.read_array_header_1_0,
+                (2, 0): np.lib.format.read_array_header_2_0,
+            }.get(version)
+            if read is None:
+                return None
+            shape, _, dtype = read(fh)
+    except (OSError, ValueError):
+        return None
+    # A file the import refuses for itself (Python objects) says so there.
+    return None if dtype.hasobject else tuple(shape)
+
+
+def _precheck(file: Path, obj: str, input_file: Path, kind: str) -> None:
+    """The refusals an import makes from its input's header, made first.
+
+    Against the source, before it is copied: a matrix of the wrong shape
+    used to be found only after a copy of the whole store, which can take
+    as long, and as much room, as the store is large. The same checks, in
+    the same order, as the import itself, so the message is the same.
+    """
+    obj = check_target(obj, kind)
+    if kind == "sparse":
+        header = read_header(input_file)
+        shape: Optional[Tuple[int, ...]] = (header.n_rows, header.n_cols)
+    else:
+        shape = _npy_shape(input_file)
+    if shape is None:
+        return
+    with open_store(file, "r") as store:
+        validate_dimensions(store.root, obj, shape, Console(quiet=True))
+
+
 def import_into(
     file: Path,
     output: Optional[Path],
@@ -59,15 +100,21 @@ def import_into(
     console: Console,
     *,
     input_file: Optional[Path] = None,
+    obj: Optional[str] = None,
+    kind: Optional[str] = None,
     space_check: bool = True,
 ) -> Path:
     """Copy `file`, call `write` on the copy's path, and move it into place.
 
     The destination is `output`, or with `inplace` the source itself.
-    Returns the path written.
+    `kind` ("array" for a .npy, "sparse" for an MTX) has `obj`'s shape
+    checked against the source from `input_file`'s header before anything
+    is copied. Returns the path written.
     """
     others = [input_file] if input_file is not None else []
     target = output_target(file, output, inplace, others=others)
+    if kind is not None and obj is not None and input_file is not None:
+        _precheck(file, obj, input_file, kind)
     with staged_outputs([target]) as (temp,):
         check_free_space(
             target,
@@ -113,7 +160,11 @@ def import_object(
         elif fmt == "json":
             _import_json(target, obj, input_file, console)
 
-    import_into(file, output_file, inplace, write, console, input_file=input_file)
+    import_into(
+        file, output_file, inplace, write, console,
+        input_file=input_file, obj=obj,
+        kind={"npy": "array", "mtx": "sparse"}.get(fmt),
+    )
 
 
 def _import_csv(
@@ -142,9 +193,13 @@ def _import_npy(
     obj: str,
     input_file: Path,
     console: Console,
+    chunk_elements: int = IMPORT_CHUNK_ELEMENTS,
 ) -> None:
     with open_store(file, "a") as store:
-        import_npy(store.root, obj=obj, input_file=input_file, console=console)
+        import_npy(
+            store.root, obj=obj, input_file=input_file, console=console,
+            chunk_elements=chunk_elements,
+        )
 
 
 def _import_mtx(
