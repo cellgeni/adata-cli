@@ -15,13 +15,13 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 from rich.console import Console
 
 from adata.core.select import group_indices
-from adata.core.subset import split_h5ad
+from adata.core.subset import check_subsettable, split_h5ad
 from adata.elements.read import element_len, resolve_index
 from adata.storage import detect_backend, open_store
 from adata.util.names import unique_names
@@ -42,12 +42,14 @@ def split_store(
     chunk_rows: int = 1024,
     zarr_format: Optional[int] = None,
     space_check: bool = True,
-) -> List[Tuple[str, Path, int]]:
+) -> List[Tuple[Optional[str], Path, int]]:
     """Split `file` into one store per distinct value of `column`.
 
-    Returns ``(label, path, n_rows)`` for each group written. Groups smaller
-    than `min_size` are skipped with a warning rather than producing tiny
-    stores nobody asked for.
+    Returns ``(label, path, n_rows)`` for each group written, with None for
+    the rows whose value is missing: they get a store of their own, `NA`,
+    apart from any rows labelled "". Groups smaller than `min_size` are
+    skipped with a warning rather than producing tiny stores nobody asked
+    for.
 
     `zarr_format` overrides the Zarr version of the outputs; without it they
     follow the source store's.
@@ -61,6 +63,7 @@ def split_store(
         suffix = ".zarr" if detect_backend(file) == "zarr" else ".h5ad"
 
     with open_store(file, "r") as store:
+        check_subsettable(store.root)
         groups, order = group_indices(store.root, axis, column)
         if zarr_format is None:
             zarr_format = store.zarr_format
@@ -69,26 +72,28 @@ def split_store(
     if not groups:
         raise ValueError(f"Column {column!r} produced no groups.")
 
-    names = _distinct(unique_names(order), order)
+    # The missing values (None) claim NA before any label that sanitises to
+    # it ("" or "NA"), so NA always holds the rows with no value.
+    names = unique_names(order)
     console.print(
         f"[cyan]Splitting on {axis}[{column}]: "
         f"{len(order)} group{'s' if len(order) != 1 else ''}[/]"
     )
 
-    planned: List[Tuple[str, Path, int]] = []
+    planned: List[Tuple[Optional[str], Path, int]] = []
     for label in order:
         indices = groups[label]
         out_path = output_dir / f"{names[label]}{suffix}"
         if len(indices) < min_size:
             console.print(
-                f"[yellow]Skipping {label!r}: {len(indices)} "
+                f"[yellow]Skipping {_shown(label)}: {len(indices)} "
                 f"{axis} < --min-size {min_size}[/]"
             )
             continue
         planned.append((label, out_path, len(indices)))
 
     for label, out_path, count in planned:
-        console.print(f"  {label!r} -> {out_path} ({count} {axis})")
+        console.print(f"  {_shown(label)} -> {out_path} ({count} {axis})")
 
     for _, out_path, _ in planned:
         try:
@@ -137,24 +142,8 @@ def split_store(
     return planned
 
 
-def _distinct(names: Dict[str, str], order: List[str]) -> Dict[str, str]:
-    """Stems no two of which name one file, whatever the filesystem.
-
-    `B` and `b` are one file on macOS and Windows, and `unique_names` can
-    give `a_1` to a label `a ` beside one that is `a_1` already: either way
-    two groups were written to one path.
-    """
-    taken: set = set()
-    distinct: Dict[str, str] = {}
-    for label in order:
-        stem = candidate = names[label]
-        count = 0
-        while candidate.casefold() in taken:
-            count += 1
-            candidate = f"{stem}_{count}"
-        taken.add(candidate.casefold())
-        distinct[label] = candidate
-    return distinct
+def _shown(label: Optional[str]) -> str:
+    return "(missing)" if label is None else repr(label)
 
 
 def _manifest_path(file: Path, output_dir: Path) -> Path:
@@ -165,10 +154,15 @@ def _write_manifest(
     file: Path,
     output_dir: Path,
     column: str,
-    planned: List[Tuple[str, Path, int]],
+    planned: List[Tuple[Optional[str], Path, int]],
     console: Console,
 ) -> Path:
-    """Record what was written, for downstream pipelines to consume."""
+    """Record what was written, for downstream pipelines to consume.
+
+    A missing value is written as an empty `value`, as is a label that is
+    the empty string; their stores (`NA` for the missing values) tell
+    them apart.
+    """
     source_id = file.stem if file.suffix else file.name
     path = _manifest_path(file, output_dir)
     with staged_outputs([path]) as (temp,):
@@ -176,6 +170,7 @@ def _write_manifest(
             writer = csv.writer(fh)
             writer.writerow(["id", "column", "value", "anndatas", "n"])
             for label, out_path, count in planned:
-                writer.writerow([source_id, column, label, str(out_path), count])
+                value = "" if label is None else label
+                writer.writerow([source_id, column, value, str(out_path), count])
     console.print(f"[dim]Manifest written to {path}[/]")
     return path
