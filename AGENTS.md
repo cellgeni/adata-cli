@@ -252,8 +252,10 @@ an item to Released when its tag is out.
   - entries that start with a bold one-line lead and an issue link.
 - Merge the release branch, then push a tag with no `v` prefix. The tag
   triggers:
-  - `publish.yml`, which checks that the tag matches pyproject, tests, builds
-    and publishes to PyPI;
+  - `publish.yml`, which checks that the tag matches pyproject and has a
+    changelog section, tests, builds, publishes to PyPI, then creates the
+    GitHub release with that section as its notes. Don't create the release
+    by hand; that step was missed from 0.12.0 to 0.17.3;
   - `quay-on-tag.yml`, which pushes the Docker image to
     `quay.io/cellgeni/adata-cli`;
   - `benchmark.yml`, which reruns `benchmarks/` and commits the results to

@@ -218,8 +218,10 @@ It reports and never gates; the complexity guards gate.
    paragraph, then whichever of `### Added`, `### Changed` and `### Fixed`
    apply, each entry led by a bold line and an issue link.
 4. Merge, then push a tag with no `v` prefix. The tag runs `publish.yml` (checks
-   the tag against `pyproject.toml`, tests, publishes to PyPI),
-   `quay-on-tag.yml` (the image) and `benchmark.yml` (the benchmark page).
+   the tag against `pyproject.toml` and `docs/changelog.md`, tests, publishes
+   to PyPI, then creates the GitHub release from the changelog section),
+   `quay-on-tag.yml` (the image) and `benchmark.yml` (the benchmark page,
+   which it also appends to the release notes).
 
 `h5ad` as a command name, `info` and `convert` with `recast`'s flags are
 deprecated and stay until 1.0.0.

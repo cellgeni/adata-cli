@@ -101,8 +101,9 @@ jobs:
           done
           echo "could not push benchmark results"; exit 1
 
-      # Best effort, and last: releases here are cut by hand, so this job may
-      # well run before one exists. The docs page is authoritative either way.
+      # Best effort, and last: publish.yml creates the release once PyPI has
+      # the version, which is normally long before this job gets here, but a
+      # failed publish leaves none. The docs page is authoritative either way.
       - name: Append to the release notes
         if: github.ref_type == 'tag'
         continue-on-error: true
