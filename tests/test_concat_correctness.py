@@ -172,7 +172,9 @@ def test_repeated_var_names_are_refused_before_the_output_exists(tmp_path, join,
 
     a = _store(tmp_path / "a.h5ad", ["a0", "a1"], genes_a, X=X(len(genes_a)))
     b = _store(tmp_path / "b.h5ad", ["b0", "b1"], genes_b, X=X(len(genes_b)))
-    with pytest.raises(Exception, match="uniquely valued"):
+    # anndata refuses them in its own words, or, at the dependency floors,
+    # in pandas' as it reindexes.
+    with pytest.raises(Exception, match="uniquely valued|duplicate labels"):
         _reference([a, b], join=join)
 
     out = tmp_path / "out.h5ad"
