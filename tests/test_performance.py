@@ -57,6 +57,7 @@ from tests.perf_counters import (
     GROWTH_LIMIT,
     SIZES,
     assert_grows_linearly,
+    assert_memory_is_a_fraction_of_the_input,
     assert_grows_slower_than_input,
     assert_independent_of,
     count_allocations,
@@ -193,6 +194,114 @@ def test_the_zarr_store_hooks_fire(tmp_path):
 
     assert io.store_set > 0, "LocalStore.set hook is not firing"
     assert io.store_get > 0, "LocalStore.get hook is not firing"
+
+
+def test_the_byte_counters_see_whole_chunks_decoded_and_rewritten(tmp_path):
+    """F146: the counters summed the elements a read returned, never the
+    chunks decoded to serve it, nor the shards a write rewrote, so a 70x read
+    amplification and a shard rewritten once a block both passed. Known
+    reads and writes here, with the numbers worked out by hand."""
+    import h5py
+    import zarr
+
+    row, chunk = 40 * 8, 10 * 40 * 8
+    with h5py.File(tmp_path / "c.h5", "w") as handle:
+        for name, extra in (("gz", {"compression": "gzip"}), ("raw", {})):
+            handle.create_dataset(name, data=np.zeros((100, 40)), chunks=(10, 40), **extra)
+
+    with h5py.File(tmp_path / "c.h5", "r") as handle, count_io() as io:
+        handle["gz"][5:6]  # one row: the whole compressed chunk is decoded
+        handle["gz"][6:7]  # the same chunk again, from HDF5's chunk cache
+        handle["raw"][5:6]  # no filter: HDF5 reads just the row
+    assert (io.read_bytes, io.largest_read) == (3 * row, row)
+    assert io.decoded_bytes == chunk + row
+
+    with h5py.File(tmp_path / "c.h5", "r", rdcc_nbytes=0) as handle, count_io() as io:
+        handle["gz"][5:6]
+        handle["gz"][6:7]
+    assert io.decoded_bytes == 2 * chunk, "with no cache, each read decodes the chunk"
+
+    array = zarr.create_array(
+        str(tmp_path / "s.zarr"), shape=(64, 64), chunks=(8, 8), shards=(32, 64),
+        dtype="float32", zarr_format=3,
+    )
+    with count_io() as io:
+        array[0:4, :] = np.ones((4, 64), dtype="float32")
+        array.oindex[np.array([1, 9, 40]), :]
+    assert io.written_bytes == 4 * 64 * 4
+    assert io.encoded_bytes == 32 * 64 * 4, "a write to part of a shard rewrites all of it"
+    assert io.read_bytes == 3 * 64 * 4
+    assert io.decoded_bytes == 3 * 8 * (8 * 8 * 4), "three rows of eight inner chunks"
+    assert io.zarr_calls == 1, "oindex reads are counted"
+
+
+def test_h5py_calls_keep_no_memory_once_they_return(tmp_path):
+    """h5py 3.15 kept 100 to 160 bytes of every dataset read, write and
+    `.shape` for good: 48 MB of resident memory after 300,000 writes. Every
+    streaming loop makes calls in proportion to its blocks, so memory grew
+    with the input, and in the transpose, whose bucket writes grow with the
+    square of the bucket count, faster still. 3.16.0, the floor now, keeps
+    nothing; this keeps the floor honest."""
+    import gc
+    import tracemalloc
+
+    import h5py
+
+    calls = 20_000
+    with h5py.File(tmp_path / "calls.h5", "w") as handle:
+        dataset = handle.create_dataset("x", shape=(100,), dtype="int64")
+        values = np.arange(3)
+
+        def work() -> None:
+            dataset[10:13] = values
+            dataset[10:13]
+            dataset.shape
+
+        work()
+        tracemalloc.start()
+        try:
+            gc.collect()
+            before = tracemalloc.get_traced_memory()[0]
+            for _ in range(calls):
+                work()
+            gc.collect()
+            kept = tracemalloc.get_traced_memory()[0] - before
+        finally:
+            tracemalloc.stop()
+
+    assert kept <= calls, (
+        f"h5py {h5py.__version__} kept {kept / calls:.0f} bytes a call "
+        f"({kept / 1e6:.1f} MB over {calls:,} calls of a read, a write and .shape)"
+    )
+
+
+@pytest.mark.slow
+def test_peak_rss_sees_a_command_that_holds_the_matrix(tmp_path):
+    """F146: memory was measured only with tracemalloc, which cannot see what
+    HDF5, blosc or zarr's codecs allocate in C. `peak_rss` runs a command in
+    a fresh interpreter and reads the high-water mark. It must see the
+    in-memory transpose hold the matrix (that is what `--in-memory` is),
+    and the streaming one hold far less."""
+    from tests.perf_counters import peak_rss
+    from tests.perf_fixtures import counts_matrix, matrix_store
+
+    matrix = counts_matrix(40_000, 1000, "csr", density=0.1)
+    source = matrix_store(tmp_path, n_obs=40_000, n_var=1000, matrix=matrix)
+    size = matrix.data.nbytes + matrix.indices.nbytes + matrix.indptr.nbytes
+
+    def added(*extra: str) -> int:
+        out = tmp_path / f"t{len(extra)}.h5ad"
+        return peak_rss(["recast", source, "X", "-o", out, "--layout", "csc", *extra]).added
+
+    loaded, streamed = added("--in-memory"), added()
+    assert loaded >= 2 * size, (
+        f"the in-memory transpose of a {size / 1e6:.0f} MB matrix added only "
+        f"{loaded / 1e6:.0f} MB of resident memory: peak_rss is not seeing it"
+    )
+    assert streamed < loaded, (
+        f"streaming added {streamed / 1e6:.0f} MB and the in-memory transpose "
+        f"{loaded / 1e6:.0f} MB, for a {size / 1e6:.0f} MB matrix"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1949,3 +2058,247 @@ def test_the_transpose_streams_unless_asked_not_to(tmp_path, monkeypatch):
     called.clear()
     _recast(source, tmp_path / "asked.h5ad", layout="csc", in_memory=True)
     assert called == ["transpose_sparse_in_memory"], called
+
+
+# ---------------------------------------------------------------------------
+# memory set by --chunk, in every layout and along either axis
+#
+# The peak guards above grow n_obs of an eight-column CSR store, the one
+# shape every path handles well (F091). A CSC densify holding n_obs x --chunk
+# values, a dense cast check reading the whole matrix and a transpose
+# stepping by the average major all passed them. These build every layout,
+# grow either axis, and state the claim as directly as it can be stated: peak
+# memory added per byte of input added. A path holding a block of --chunk
+# rows adds a few hundredths of it; one holding the matrix adds all of it.
+
+#: Rows in a dense block, and entries in a sparse read, while the grid runs.
+GRID_ROWS, GRID_ENTRIES = 32, 16_384
+
+#: Sizes along the grown axis, and the other axis's fixed size. Small enough
+#: that a transpose needs no more than a few dozen buckets (see
+#: `test_a_transpose_buckets_hold_about_a_chunk_on_a_skewed_matrix`).
+GRID_SIZES = {"n_obs": (1024, 8192), "n_var": (128, 1024)}
+GRID_FIXED = {"n_obs": 1024, "n_var": 4096}
+GRID_DENSITY = 0.05
+
+
+def _grid_shape(axis: str, n: int) -> tuple:
+    return (n, GRID_FIXED["n_obs"]) if axis == "n_obs" else (GRID_FIXED["n_var"], n)
+
+
+def _in_memory_bytes(matrix) -> int:
+    if sparse.issparse(matrix):
+        return matrix.data.nbytes + matrix.indices.nbytes + matrix.indptr.nbytes
+    return int(matrix.nbytes)
+
+
+#: What each command does to a store, at the grid's chunk sizes.
+GRID_COMMANDS = {
+    "recast --dtype": lambda s, o: _recast(
+        s, o, dtype="float64", chunk_rows=GRID_ROWS, chunk=GRID_ENTRIES
+    ),
+    "recast --layout csr": lambda s, o: _recast(
+        s, o, layout="csr", force=True, chunk_rows=GRID_ROWS, chunk=GRID_ENTRIES
+    ),
+    "recast --layout csc": lambda s, o: _recast(
+        s, o, layout="csc", force=True, chunk_rows=GRID_ROWS, chunk=GRID_ENTRIES
+    ),
+    "recast --layout dense": lambda s, o: _recast(
+        s, o, layout="dense", force=True, chunk_rows=GRID_ROWS, chunk=GRID_ENTRIES
+    ),
+    "subset": lambda s, o: subset_h5ad(
+        s, o, None, None, console=QUIET, obs_query="col >= 0", chunk_rows=GRID_ROWS
+    ),
+    "concat": lambda s, o: concat_on_disk(
+        [s, s.with_name(f"b{s.name}")], o, QUIET, chunk_rows=GRID_ROWS, index_unique="-"
+    ),
+}
+
+#: Known gaps, each owned by another batch, and whether the fix must flip it.
+_F032 = "F032: sparse subset blocks are 4,096 majors, whatever --chunk (B6b, #97)"
+_CONCAT = (
+    "concat keeps every obs name by design, and its row pointers in Python "
+    "lists until B3b (#116, F132); together a third of this fixture's input"
+)
+GRID_GAPS = {
+    ("subset", "csr", "n_obs"): (_F032, True),
+    ("subset", "csr", "n_var"): (_F032, True),
+    ("subset", "csc", "n_obs"): (_F032, True),
+    ("subset", "csc", "n_var"): (_F032, True),
+    ("concat", "csr", "n_obs"): (_CONCAT, False),
+    ("concat", "csc", "n_obs"): (_CONCAT, False),
+}
+
+
+def _grid_cases():
+    for command in GRID_COMMANDS:
+        for layout in ("csr", "csc", "dense"):
+            if command == f"recast --layout {layout}":
+                continue  # a no-op, refused
+            for axis in GRID_SIZES:
+                gap = GRID_GAPS.get((command, layout, axis))
+                marks = [pytest.mark.xfail(reason=gap[0], strict=gap[1])] if gap else []
+                yield pytest.param(command, layout, axis, marks=marks,
+                                   id=f"{command.replace(' ', '')}-{layout}-{axis}")
+
+
+@pytest.mark.parametrize("command,layout,axis", list(_grid_cases()))
+def test_peak_memory_is_a_small_share_of_the_input(tmp_path, command, layout, axis):
+    """F091: every layout, both axes, against what the input itself costs."""
+    import shutil
+
+    from tests.perf_fixtures import counts_matrix, matrix_store
+
+    run = GRID_COMMANDS[command]
+    matrices = {}
+
+    def matrix(n: int):
+        if n not in matrices:
+            matrices[n] = counts_matrix(*_grid_shape(axis, n), layout, density=GRID_DENSITY)
+        return matrices[n]
+
+    def measure(n: int) -> int:
+        n_obs, n_var = _grid_shape(axis, n)
+        source = matrix_store(tmp_path / f"g{n}", n_obs=n_obs, n_var=n_var,
+                              layout=layout, matrix=matrix(n))
+        if command == "concat":
+            shutil.copy(source, source.with_name(f"b{source.name}"))
+        with count_allocations() as peak:
+            run(source, tmp_path / f"g{n}" / "out.h5ad")
+        return peak[0]
+
+    copies = 2 if command == "concat" else 1
+    assert_memory_is_a_fraction_of_the_input(
+        measure,
+        lambda n: copies * _in_memory_bytes(matrix(n)),
+        what=f"{command} of a {layout} X",
+        axis=axis,
+        sizes=GRID_SIZES[axis],
+    )
+
+
+# ---------------------------------------------------------------------------
+# recast's blocks, one finding at a time
+#
+# The grid above shows memory; these pin down the block each path reads, in
+# bytes, which needs no allocator at all: the largest single read must be
+# set by --chunk, not by the input. Every format, since anndata 0.13's
+# sharded Zarr v3 lays a matrix out unlike anything else.
+
+STORE_FORMATS = ("h5ad", "zarr2", "zarr3")
+
+
+def _largest_matrix_read(io, *, elements: bool = False) -> int:
+    """The largest read of X's values or coordinates, or of its scratch, in
+    bytes or elements.
+
+    Not its indptr, which every path reads whole by design (8 bytes a row),
+    nor obs and var, which are copied.
+    """
+    def of_x(name: str) -> bool:
+        name = name.strip("/")
+        return name.split("/")[0] in ("X", "csr") or name.startswith("__X_")
+
+    sizes = io.largest_elements_by_name if elements else io.largest_by_name
+    return max(
+        (size for name, size in sizes.items()
+         if of_x(name) and not name.endswith("indptr")),
+        default=0,
+    )
+
+
+@pytest.mark.parametrize("fmt", STORE_FORMATS)
+def test_a_dense_cast_check_reads_a_block_of_rows_not_the_matrix(tmp_path, fmt):
+    """F029: `recast --dtype` on a dense matrix read `dataset[0:1048576]` --
+    every row and column -- to check the cast, then made two more copies,
+    whatever --chunk said: 1,500,000 elements in one read of a 3000 x 500
+    matrix at --chunk 100. The largest read is --chunk rows now."""
+    from tests.perf_fixtures import matrix_store
+
+    def measure(n: int) -> int:
+        # Narrow, and 256-row blocks: on sharded Zarr each block still
+        # rewrites the whole shard (F036, B6b), which is slow, not wrong.
+        source = matrix_store(tmp_path, n_obs=n, n_var=16, layout="dense", fmt=fmt)
+        out = tmp_path / f"o{n}{source.suffix}"
+        with count_io() as io:
+            _recast(source, out, dtype="float64", chunk_rows=256)
+        assert io.read_bytes >= n * 16 * 4, "the matrix was read"
+        return _largest_matrix_read(io)
+
+    assert_independent_of(
+        measure, what=f"the largest read of recast --dtype ({fmt})", axis="n_obs",
+        sizes=(1024, 16384),
+    )
+
+
+@pytest.mark.parametrize("fmt", STORE_FORMATS)
+@pytest.mark.parametrize("layout,source", [("dense", "csc"), ("csc", "dense")])
+def test_csc_densify_and_sparsify_read_blocks_set_by_the_chunk(tmp_path, fmt, layout, source):
+    """F030: densifying a CSC matrix allocated n_rows x --chunk per block,
+    and sparsifying to CSC read --chunk columns of every row, so memory
+    followed n_obs: 8 GB a block at 2M cells and the default --chunk. Both go
+    through a CSR in scratch now, in --chunk rows and chunk-sized reads."""
+    from tests.perf_fixtures import matrix_store
+
+    def measure(n: int) -> int:
+        store = matrix_store(tmp_path, n_obs=n, n_var=64, layout=source, fmt=fmt)
+        with count_allocations() as peak, count_io() as io:
+            _recast(store, tmp_path / f"o{n}{store.suffix}", layout=layout, force=True,
+                    chunk_rows=GRID_ROWS, chunk=4096)
+        assert _largest_matrix_read(io) <= 4096 * 8 + GRID_ROWS * 64 * 8, io
+        return peak[0]
+
+    assert_grows_slower_than_input(
+        measure, what=f"recast {source} -> {layout} ({fmt})", axis="n_obs",
+        sizes=(512, 8192), at_least=4.0,
+    )
+
+
+@pytest.mark.parametrize("fmt", STORE_FORMATS)
+@pytest.mark.parametrize("source", ["csc", "csr"])
+def test_a_transpose_reads_about_a_chunk_on_a_skewed_matrix(tmp_path, fmt, source):
+    """F077: pass 2 of the streaming transpose stepped by the average nnz per
+    major. Eight adjacent genes in every cell made one step many times the
+    chunk -- 7.7x at 200k cells, growing with them. It steps by entries
+    now, and a gene in every cell gets a bucket of its own, streamed."""
+    from adata.core.csr_build import MIN_BUCKET_ENTRIES
+    from tests.perf_fixtures import matrix_store, skewed_matrix
+
+    chunk = 4096
+    # A read of the source holds a chunk of entries; a bucket of several
+    # majors, read whole, up to one bucket plus one major that fits in one.
+    bound = 2 * max(chunk, MIN_BUCKET_ENTRIES)
+
+    for n in (1024, 16384):
+        store = matrix_store(tmp_path, n_obs=n, n_var=64, layout=source, fmt=fmt,
+                             matrix=skewed_matrix(n, 64, layout=source), tag="skew")
+        target = "csr" if source == "csc" else "csc"
+        with count_io() as io:
+            _recast(store, tmp_path / f"o{n}{store.suffix}", layout=target, chunk=chunk)
+        assert io.read_bytes >= n * 8 * 4, "the dense genes were read"
+        largest = _largest_matrix_read(io, elements=True)
+        assert largest <= bound, (
+            f"a skewed {source} transpose of {n:,} cells ({fmt}) read "
+            f"{largest:,} entries at once, against {bound:,} for a chunk of "
+            f"{chunk:,}: a run of genes in every cell is being read whole"
+        )
+
+
+@pytest.mark.slow
+def test_a_dense_cast_adds_a_block_of_resident_memory_not_the_matrix(tmp_path):
+    """F029 as the operating system sees it, through `peak_rss`: at 64 MB of
+    float32 the cast check added several times the matrix in resident
+    memory (the block, its cast, the cast back and a mask), at --chunk 64."""
+    from tests.perf_counters import peak_rss
+    from tests.perf_fixtures import matrix_store
+
+    def measure(n: int) -> int:
+        store = matrix_store(tmp_path, n_obs=n, n_var=256, layout="dense", density=0.5)
+        out = tmp_path / f"o{n}.h5ad"
+        return peak_rss(["recast", store, "X", "-o", out, "--dtype", "float64",
+                         "--chunk", "64"]).added
+
+    assert_memory_is_a_fraction_of_the_input(
+        measure, lambda n: n * 256 * 4, what="recast --dtype of a dense X (RSS)",
+        axis="n_obs", sizes=(8192, 65536),
+    )

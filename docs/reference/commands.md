@@ -220,13 +220,26 @@ Two things are refused before anything is written. A cast that would not
 round-trip -- checked by casting every value and casting it back, not by
 comparing dtypes -- and a densification that would inflate the store beyond
 four times its size. `--force` overrides either, and the message says how
-many values would change or how large the result would be.
+many values would change or how large the result would be. A cast that loses
+values drops the entries it turns to zero, as scipy would, rather than storing
+them as explicit zeros.
+
+A sparse matrix of **float16 is refused**, whatever `--force` says: scipy has
+no float16 sparse matrix, so neither anndata nor scanpy could read the result.
+Use `--dtype float32`, or `--layout dense`.
 
 The index dtype is **preserved** unless `--indices-dtype` asks otherwise, so
 narrowing the values does not silently widen the indices and leave the file
 bigger than it started. `indices` and `indptr` keep their own widths, which
 can differ: a narrow matrix with more than 2^31 nonzeros needs int64 offsets
-over int32 coordinates, and both are range-checked before writing.
+over int32 coordinates, and both are range-checked before writing. The check
+always runs: `--force` does not waive it, since an offset that overflows is a
+corrupt matrix, not a lossy value. A dense matrix made sparse has its
+coordinates checked before writing and its nonzero count as it is counted.
+
+`--chunk` counts rows of a dense matrix, in every layout: densifying a CSC
+matrix or writing a dense one as CSC goes through a CSR in scratch, so no block
+spans every row. Sparse matrices are read about a million entries at a time.
 
 The output path may not name the input; use `--inplace`. Either way the new
 store is written beside its destination and moved into place only once the

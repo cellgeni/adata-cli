@@ -22,6 +22,7 @@ from adata.core.recast import (
     _stored_bytes,
     convert_matrix,
     parse_dtype,
+    parse_index_dtype,
     plan_conversion,
 )
 from adata.elements import spec
@@ -86,11 +87,7 @@ def recast_store(
         raise ValueError("--chunk must be at least 1.")
 
     data_dtype = parse_dtype(dtype) if dtype else None
-    index_dtype = (
-        parse_dtype(indices_dtype, allowed=("int32", "int64"))
-        if indices_dtype
-        else None
-    )
+    index_dtype = parse_index_dtype(indices_dtype) if indices_dtype else None
 
     # Refuses -o naming the input: opening the destination "w" clears it
     # while the source is still being read from it. HDF5 refuses; Zarr does
@@ -122,6 +119,7 @@ def recast_store(
                     index_dtype=index_dtype,
                     layout=layout,
                     chunk=chunk,
+                    chunk_rows=chunk_rows,
                     force=force,
                     console=console,
                 )
@@ -130,7 +128,9 @@ def recast_store(
 
             check_free_space(
                 dst_path,
-                lambda: disk_size(file) + sum(_extra(p) for p in plans.values()),
+                lambda: disk_size(file) + sum(
+                    _extra(p) + _scratch(p, in_memory) for p in plans.values()
+                ),
                 check=space_check,
             )
 
@@ -182,6 +182,27 @@ def _extra(plan: Plan) -> float:
     return max(0.0, projected - current) * _on_disk(src.obj) / current
 
 
+def _scratch(plan: Plan, in_memory: bool) -> float:
+    """Bytes of scratch a streaming transpose writes beside the output.
+
+    Every entry passes through a bucket as an int64 major, an int64 minor
+    and its value; a CSC matrix being densified is also sorted into a CSR
+    first. A dense matrix sparsified to CSC goes through the same, but its
+    nnz is not known until it is read, so it is not counted.
+    """
+    src = plan.source
+    if in_memory or not src.sparse:
+        return 0.0
+    transposed = plan.layout in spec.SPARSE_TYPES and plan.layout != src.kind
+    densified_csc = plan.layout == "dense" and src.kind == spec.CSC_MATRIX
+    if not (transposed or densified_csc):
+        return 0.0
+    entry = 16 + src.dtype.itemsize
+    if densified_csc:
+        entry += 8 + src.dtype.itemsize
+    return float(src.nnz * entry)
+
+
 def _on_disk(obj: Any) -> int:
     """Bytes a matrix's datasets take on disk, compressed."""
     targets = [obj] if is_dataset(obj) else [
@@ -201,27 +222,32 @@ def _on_disk(obj: Any) -> int:
 
 def _write(src: Any, dst: Any, plans: dict, **options: Any) -> None:
     """Copy the store across, converting the targeted entries as they pass."""
-    by_parent: dict = {}
-    for path in plans:
-        parent, _, leaf = path.rpartition("/")
-        by_parent.setdefault(parent, {})[leaf] = plans[path]
+    _write_members(src, dst, "", plans, **options)
 
-    for key in src.keys():
-        if key in by_parent.get("", {}):
-            convert_matrix(
-                src[key], dst, key, plan=by_parent[""][key], **options
-            )
-        elif key in by_parent:
-            # Any parent, not just layers and raw. Restricting it to those
-            # two meant an explicitly named `obsm/X_pca` was copied
-            # unconverted and the command still reported success.
-            _write_group(src[key], dst, key, by_parent, **options)
+
+def _write_members(
+    group: Any, out: Any, prefix: str, plans: dict, **options: Any
+) -> None:
+    """Copy `group`'s members into `out`, descending towards planned paths.
+
+    At any depth, not just one level down. Only matrices directly below the
+    root, or one group down, were converted; one at
+    `uns/neighbors/connectivities` was copied unconverted while the command
+    reported converting it (F043). Restricting it further, to `layers` and
+    `raw`, had already done the same to an explicitly named `obsm/X_pca`.
+    """
+    for key in group.keys():
+        path = f"{prefix}{key}"
+        if path in plans:
+            convert_matrix(group[key], out, key, plan=plans[path], **options)
+        elif any(planned.startswith(f"{path}/") for planned in plans):
+            _write_group(group[key], out, key, path, plans, **options)
         else:
-            copy_tree(src[key], dst, key)
+            copy_tree(group[key], out, key)
 
 
 def _write_group(
-    group: Any, dst: Any, name: str, by_parent: dict, **options: Any
+    group: Any, dst: Any, name: str, path: str, plans: dict, **options: Any
 ) -> None:
     """Recreate one container, converting the members that were named."""
     from adata.storage import copy_attrs, is_zarr_group
@@ -233,12 +259,5 @@ def _write_group(
         target_backend="zarr" if is_zarr_group(dst) else "hdf5",
     )
     if not spec.encoding_type(out):
-        spec.set_encoding(out, spec.RAW if name == "raw" else spec.DICT)
-
-
-    wanted = by_parent.get(name, {})
-    for key in group.keys():
-        if key in wanted:
-            convert_matrix(group[key], out, key, plan=wanted[key], **options)
-        else:
-            copy_tree(group[key], out, key)
+        spec.set_encoding(out, spec.RAW if path == "raw" else spec.DICT)
+    _write_members(group, out, f"{path}/", plans, **options)
