@@ -604,3 +604,48 @@ def test_a_modality_key_named_like_the_scratch_group_is_left_alone(tmp_path):
     root = zarr.open_group(str(tmp_path / "out.zarr"), mode="r")
     assert root["__csr_scratch__"].attrs["mine"] == 1
     assert [k for k in root.keys() if k.startswith("__csr_scratch__")] == ["__csr_scratch__"]
+
+
+def test_a_wide_dense_x_is_read_a_block_of_bounded_bytes_at_a_time(tmp_path, monkeypatch):
+    """F027: dense X and layers were read 16,384 rows at a time whatever
+    their width, so a wide matrix was held whole, or near it."""
+    from anndata.io import read_elem
+
+    from adata.conversion import mudata
+
+    n, width = 50, 300
+    rng = np.random.default_rng(0)
+    types = ["Gene Expression"] * 200 + ["Peaks"] * 100
+    obj = ad.AnnData(
+        rng.poisson(1, (n, width)).astype(np.float32),
+        obs=pd.DataFrame(index=[f"c{i}" for i in range(n)]),
+        var=pd.DataFrame({"feature_types": pd.Categorical(types)}, index=[f"f{j}" for j in range(width)]),
+        layers={"counts": rng.poisson(2, (n, width)).astype(np.int64)},
+    )
+    source = tmp_path / "wide.h5ad"
+    obj.write_h5ad(source)
+    ref = ad.read_h5ad(source)
+
+    row_bytes = width * 8  # the widest row: counts, int64
+    monkeypatch.setattr(mudata, "SLAB_BYTES", 4 * row_bytes)
+    largest = {}
+    real = h5py.Dataset.__getitem__
+
+    def counted(self, key):
+        value = real(self, key)
+        if self.name in ("/X", "/layers/counts"):
+            largest[self.name] = max(largest.get(self.name, 0), np.asarray(value).nbytes)
+        return value
+
+    monkeypatch.setattr(h5py.Dataset, "__getitem__", counted)
+    out = tmp_path / "wide.h5mu"
+    _ok(source, "-o", out)
+    monkeypatch.undo()
+
+    assert largest and max(largest.values()) <= 4 * row_bytes, largest
+    for mod, kind in (("rna", "Gene Expression"), ("atac", "Peaks")):
+        with h5py.File(out) as f:
+            got = read_elem(f["mod"][mod])
+        sub = ref[:, ref.var["feature_types"] == kind]
+        assert np.array_equal(_dense(got.X), _dense(sub.X))
+        assert np.array_equal(_dense(got.layers["counts"]), _dense(sub.layers["counts"]))

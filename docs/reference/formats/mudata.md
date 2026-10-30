@@ -43,8 +43,9 @@ modality's own is kept and the global one is left out, with a warning.
 Without `obsmap`/`varmap` (an older writer), rows are matched by name. A map
 that does not place each of the modality's rows once is refused before
 anything is written. Global rows are read a block at a time, sorted for the
-read when the modality's order differs; a graph's entries are remapped as
-they stream and rebuilt through on-disk buckets, keeping CSR or CSC.
+read when the modality's order differs, a dense block holding at most 64 MiB
+(or one row, if a row is wider) however wide its rows; a graph's entries are remapped as they stream and
+rebuilt through on-disk buckets, keeping CSR or CSC.
 
 Writing splits var by its feature types, as muon reads a 10x Multiome
 matrix: `Gene Expression` becomes `rna`, `Peaks` `atac`, `Antibody Capture`
@@ -54,7 +55,7 @@ AnnData is one modality, `rna`.
 
 | AnnData | MuData |
 |---|---|
-| X, layers, var, varm, varp, raw | each modality's, for its features; every matrix read once for all of them |
+| X, layers, var, varm, varp, raw | each modality's, for its features; every matrix read once for all of them, a dense one a block of rows at a time, at most 64 MiB of the widest (or one row, if a row is wider) |
 | obs | global obs; each modality's obs holds the cell names only |
 | obsm, obsp, uns | global obsm, obsp, uns |
 | | `obsmap`, `varmap` and the `obsm`/`varm` masks, root `encoding-type: mudata`, `axis: 0`, and the 512-byte `MuData` header mudata reads first |

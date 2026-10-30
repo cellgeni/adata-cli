@@ -16,7 +16,8 @@ A SCope loom is a loom with more in it:
 * a global `MetaData` attribute: JSON, or base64 of it compressed (zlib
   from pySCENIC, gzip from SCopeLoomR's spec 2 looms), naming the
   embeddings, the clusterings and their clusters, and holding the regulon
-  thresholds. It is decoded into `uns["scope"]`.
+  thresholds. It is decoded into `uns["scope"]`, inflated only up to
+  `MAX_METADATA_BYTES`.
 
 Embeddings and clusterings are read a block of cells at a time, each
 attribute once for all of them.
@@ -55,6 +56,11 @@ CLUSTERINGS = "Clusterings"
 #: mapping per regulon, stays in the metadata text.
 THRESHOLD_COLUMNS = ("defaultThresholdValue", "defaultThresholdName", "motifData")
 
+#: The most bytes compressed `MetaData` may inflate to. pySCENIC's run to
+#: a few thousand regulons stays under a megabyte; past this the attribute
+#: is malformed, and kept as the text it came as.
+MAX_METADATA_BYTES = 64 << 20
+
 
 def is_scope(global_attrs: Iterable[str], col_attrs: Iterable[str]) -> bool:
     """A `MetaData` global attribute, or a column attribute only SCope writes."""
@@ -68,20 +74,33 @@ def read_metadata(text: str) -> Tuple[Optional[Dict[str, Any]], str]:
     """`MetaData` as (its JSON, the JSON's text).
 
     The attribute is JSON, or base64 of compressed JSON: zlib from pySCENIC,
-    gzip from SCopeLoomR. When it is neither, the JSON is None and the text
-    is returned as it came.
+    gzip from SCopeLoomR. When it is neither, or inflates to more than
+    `MAX_METADATA_BYTES`, the JSON is None and the text is returned as it
+    came.
     """
     try:
         parsed = json.loads(text)
     except ValueError:
         try:
-            # 47: a zlib or a gzip header, whichever is there.
-            decoded = zlib.decompress(base64.b64decode(text), 47).decode("utf-8")
+            decoded = _inflate(base64.b64decode(text)).decode("utf-8")
             parsed = json.loads(decoded)
         except (ValueError, zlib.error):
             return None, text
         text = decoded
     return (parsed if isinstance(parsed, dict) else None), text
+
+
+def _inflate(data: bytes) -> bytes:
+    """`data` decompressed, as `zlib.decompress(data, 47)` would, but never
+    more than `MAX_METADATA_BYTES` of it (47: a zlib or a gzip header,
+    whichever is there)."""
+    inflater = zlib.decompressobj(47)
+    out = inflater.decompress(data, MAX_METADATA_BYTES + 1)
+    if len(out) > MAX_METADATA_BYTES:
+        raise ValueError(f"MetaData inflates to more than {MAX_METADATA_BYTES:,} bytes.")
+    if not inflater.eof:
+        raise zlib.error("MetaData's compressed stream is cut short.")
+    return out
 
 
 @dataclass
@@ -141,7 +160,8 @@ def plan(
         decoded, metadata = read_metadata(metadata)
         if decoded is None:
             warnings.append(
-                "MetaData is neither JSON nor compressed JSON: it is kept as text in "
+                "MetaData is neither JSON nor compressed JSON (of at most "
+                f"{MAX_METADATA_BYTES:,} bytes): it is kept as text in "
                 'uns["scope"]["metadata"], and embeddings and clusterings are named by id.'
             )
         parsed = decoded or {}
@@ -563,8 +583,9 @@ def plan_export(
             numeric, other = [], []
             for column in dataframe_columns(obj, resolve_index(obj)[1]):
                 member = obj[column]
+                # Not anndata 0.7's categorical, whose codes are numbers too.
                 ok = (spec.encoding_type(member) in (None, spec.ARRAY) and getattr(member, "ndim", 0) == 1
-                      and member.dtype.kind in "biuf")
+                      and member.dtype.kind in "biuf" and not is_categorical(member))
                 (numeric if ok else other).append(column)
             if other:
                 warnings.append(f"Not written in {where}/{key}: {', '.join(other)} -- a SCope "
@@ -764,7 +785,8 @@ def plan_export(
         member = obs[column]
         enc = spec.encoding_type(member)
         if is_categorical(member):
-            if len(categories_dataset(member, obs)) > MAX_ANNOTATION_VALUES:
+            # .shape, not len(): a zarr-python 3 Array has no len().
+            if categories_dataset(member, obs).shape[0] > MAX_ANNOTATION_VALUES:
                 continue  # too many to list, and not read to find that out
             values = [str(c) for c in read_categories(member, parent_group=obs)]
         elif enc in (None, spec.ARRAY, spec.STRING_ARRAY) and getattr(member, "ndim", 0) == 1 \
