@@ -107,8 +107,11 @@ def rich_anndata(layout: str = "csr", seed: int = 0) -> Any:
     obj.varm["cube"] = rng.normal(size=(n_var, 2, 2))
     obj.obsp["conn"] = random_sparse((n_obs, n_obs), sparse.csr_matrix)
     obj.obsp["dist"] = rng.random((n_obs, n_obs))
+    # anndata allows trailing axes on a pairwise entry, as on obsm.
+    obj.obsp["cube"] = rng.random((n_obs, n_obs, 2)).astype(np.float32)
     obj.varp["corr"] = rng.random((n_var, n_var)).astype(np.float32)
     obj.varp["sparse"] = random_sparse((n_var, n_var), sparse.csc_matrix)
+    obj.varp["cube"] = rng.integers(0, 9, (n_var, n_var, 3))
 
     # raw holds more genes than X, in another order, so matching it by
     # position rather than by name would pick the wrong columns.

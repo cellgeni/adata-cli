@@ -84,7 +84,9 @@ def tokenize(expr: str) -> List[Token]:
             if text is None:
                 continue
             if kind == "word" and text.lower() in _KEYWORDS:
-                tokens.append(Token(text.lower(), text.lower()))
+                # The text as typed: where a value belongs, a keyword is
+                # one (`state in (OR, WA)`).
+                tokens.append(Token(text.lower(), text))
             else:
                 tokens.append(Token(kind, text))
             break
@@ -221,9 +223,15 @@ class _Parser:
 
     def _take_value(self) -> str:
         token = self.take()
-        if token.kind != "word":
-            raise QueryError(f"Expected a value, got {token.text!r}.")
-        return _unquote(token.text)
+        return self._value(token, "Expected a value")
+
+    @staticmethod
+    def _value(token: Token, expected: str) -> str:
+        if token.kind == "word":
+            return _unquote(token.text)
+        if token.kind in _KEYWORDS:
+            return token.text
+        raise QueryError(f"{expected}, got {token.text!r}.")
 
     def _take_list(self) -> List[str]:
         """The values after `in`: in parentheses, separated by commas or
@@ -239,9 +247,7 @@ class _Parser:
                     return items
                 if nxt.kind == "comma":
                     continue
-                if nxt.kind != "word":
-                    raise QueryError(f"Expected a value in the list, got {nxt.text!r}.")
-                items.append(_unquote(nxt.text))
+                items.append(self._value(nxt, "Expected a value in the list"))
         items = [self._take_value()]
         while self.peek() is not None and self.peek().kind == "comma":
             self.take()

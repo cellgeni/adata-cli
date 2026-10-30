@@ -270,3 +270,14 @@ def test_a_value_that_is_not_of_the_columns_type_is_refused(expr, message):
     """`!=` with a typo used to keep every row; it is refused instead."""
     with pytest.raises(QueryError, match=message):
         compile_query(expr)(COLUMN_CHUNK)
+
+
+def test_a_keyword_is_a_value_where_a_value_belongs():
+    """Review of #94: with commas made separate tokens, `OR` in
+    `state in (OR, WA)` read as the keyword, where main had read `OR,` as a
+    word: US state codes OR and IN were refused."""
+    states = {"state": ["OR", "WA", "CA", "IN"]}
+    wanted = pd.Series(states["state"]).isin(["OR", "WA", "IN"])
+    for expr in ("state in (OR, WA, IN)", "state in OR,WA,IN", "state in (OR WA IN)"):
+        assert compile_query(expr)(states).tolist() == wanted.tolist()
+    assert compile_query("state == OR or state == IN")(states).tolist() == [True, False, False, True]

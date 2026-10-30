@@ -1040,7 +1040,7 @@ def _write_targets(
                             prune=prune_whole_axes or indices is not None,
                         )
                 else:
-                        fan_out_matrix_entry(
+                    fan_out_matrix_entry(
                         entry,
                         key,
                         [
@@ -1065,26 +1065,28 @@ def _write_targets(
         _ensure_optional_anndata_groups(target.root)
 
 
-#: Elements aligned to both axes, which must be matrices.
-_TWO_AXES = ("layers", "obsp", "varp")
+#: Mapping groups whose entries pair one axis with itself: their first two
+#: axes are rows, and anndata allows trailing ones, as obsm does.
+_PAIRWISE = ("obsp", "varp")
 
 
 def check_subsettable(src: Any) -> None:
     """Refuse a store holding an element subset cannot narrow.
 
     Called before the output exists, so a refusal writes nothing: an awkward
-    array in obsm used to fail part way through the write. Every matrix
-    (X, layers, obsp, varp, raw/X) must be a 2-D array or a CSR/CSC group;
-    an obsm or varm entry an array of any rank, CSR/CSC, or a dataframe.
+    array in obsm used to fail part way through the write. X, the layers
+    and raw/X must be 2-D arrays or CSR/CSC groups; an obsp or varp entry an
+    array of at least 2-D, or CSR/CSC; an obsm or varm entry an array of any
+    rank, CSR/CSC, or a dataframe.
     """
-    def check(path: str, obj: Any, *, one_axis: bool) -> None:
+    def check(path: str, obj: Any, ranks: Any, *, frames: bool = False) -> None:
         if is_dataset(obj):
-            if one_axis or obj.ndim == 2:
+            if ranks(obj.ndim):
                 return
             why = f"a {obj.ndim}-D array where a matrix belongs"
         elif is_group(obj):
             enc = spec.encoding_type(obj)
-            if enc in spec.SPARSE_TYPES or (one_axis and enc == spec.DATAFRAME):
+            if enc in spec.SPARSE_TYPES or (frames and enc == spec.DATAFRAME):
                 return
             why = f"a group encoded as {enc or 'nothing'}"
         else:
@@ -1094,21 +1096,25 @@ def check_subsettable(src: Any) -> None:
             "Nothing was written."
         )
 
-    def entries(parent: Any, prefix: str, mapping: str, one_axis: bool) -> None:
+    def matrix(ndim: int) -> bool:
+        return ndim == 2
+
+    def entries(parent: Any, prefix: str, mapping: str, ranks: Any, frames: bool = False) -> None:
         if mapping in parent and is_group(parent[mapping]):
             for key in parent[mapping].keys():
-                check(f"{prefix}{mapping}/{key}", parent[mapping][key], one_axis=one_axis)
+                check(f"{prefix}{mapping}/{key}", parent[mapping][key], ranks, frames=frames)
 
     if "X" in src:
-        check("X", src["X"], one_axis=False)
-    for mapping in _TWO_AXES:
-        entries(src, "", mapping, one_axis=False)
+        check("X", src["X"], matrix)
+    entries(src, "", "layers", matrix)
+    for mapping in _PAIRWISE:
+        entries(src, "", mapping, lambda ndim: ndim >= 2)
     for mapping in ("obsm", "varm"):
-        entries(src, "", mapping, one_axis=True)
+        entries(src, "", mapping, lambda ndim: True, frames=True)
     if "raw" in src and is_group(src["raw"]):
         if "X" in src["raw"]:
-            check("raw/X", src["raw"]["X"], one_axis=False)
-        entries(src["raw"], "raw/", "varm", one_axis=True)
+            check("raw/X", src["raw"]["X"], matrix)
+        entries(src["raw"], "raw/", "varm", lambda ndim: True, frames=True)
 
 
 def _select_axis(

@@ -247,6 +247,8 @@ def test_obsm_and_varm_dataframes_drop_unused_categories_as_anndata_does(
 
 
 def test_split_outputs_drop_unused_obsm_categories_as_anndata_does(tmp_path, backend):
+    """F124: split, through the same writer, kept every category of obsm and
+    varm dataframes in every output."""
     source = _frames()
     source.obs["group"] = pd.Categorical(["one", "two", "one", "two"])
     src = write_anndata(source, tmp_path, backend)

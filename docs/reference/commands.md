@@ -273,15 +273,16 @@ adata split data.h5ad --by cluster -o out/ --min-size 50
 | `--zarr-format` | Zarr version to write; defaults to the source's |
 | `--no-space-check` | Write even if the disk looks too small; see [Writing outputs](#writing-outputs) |
 
-Labels are sanitised for use as filenames; collisions get a numeric suffix,
-and so do labels that differ only in case (`B`, `b_1`), which would be one
-file on macOS and Windows. A suffixed name is never another label's own:
-`CD4+`, `CD4` and `CD4_1` give `CD4`, `CD4_1` and `CD4_1_1`.
+Labels are sanitised for use as filenames, and a label that is a safe
+filename already keeps it. Collisions get a numeric suffix, and so do labels
+that differ only in case (`B`, `b_1`), which would be one file on macOS and
+Windows: `CD4`, `CD4_1` and `CD4+` give `CD4`, `CD4_1` and `CD4_2`.
 `convert --split-feature-types` and `--all-samples` name their outputs the
 same way.
-Rows whose value is missing go to a store of their own, `NA`, apart from
-rows labelled with an empty string; the manifest lists the missing value as
-empty.
+Rows whose value is missing (NaN too) go to a store of their own, `NA`, apart
+from rows labelled `NA` or with an empty string (`NA_1`, ...). The manifest
+lists a missing value as empty, as it lists an empty label; their stores
+tell them apart.
 Every store is written beside its destination and moved into place only once
 all of them are complete, and the manifest is written last, so a split that
 fails leaves no partial stores. An output that would land on the input is

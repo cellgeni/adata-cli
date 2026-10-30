@@ -23,24 +23,42 @@ def sanitize_label(label: Optional[str]) -> str:
 
 
 def unique_names(labels: Sequence[Optional[str]]) -> Dict[Optional[str], str]:
-    """Map each label to a distinct filename stem, in the order given.
+    """Map each label to a distinct filename stem.
 
     Sanitising can map two different labels onto the same stem ("a/b" and
     "a b"), and a suffixed stem can be a later label's own ("CD4+", "CD4",
-    "CD4_1"), so each stem is claimed against every stem given out before
-    it. They are compared without case: `T` and `t` are one file on macOS
-    and Windows. Either collision put two outputs on one path.
+    "CD4_1"); stems differing only in case (`T`, `t`) are one file on macOS
+    and Windows. Any of these put two outputs on one path. So stems are
+    claimed in turn, compared without case, each against every stem given
+    out: first a missing value (None), as `NA`; then the labels that are
+    filenames already, as themselves; then the rest, as their sanitised
+    form where that is free. Whatever is left gets the first free numeric
+    suffix, in the order given: "CD4+", "CD4", "CD4_1" become "CD4_2",
+    "CD4", "CD4_1".
     """
     taken: Set[str] = set()
     mapping: Dict[Optional[str], str] = {}
+    stems = {label: sanitize_label(label) for label in labels}
+
+    def claim_own(wanted) -> None:
+        for label in labels:
+            if label in mapping or not wanted(label):
+                continue
+            if stems[label].casefold() not in taken:
+                taken.add(stems[label].casefold())
+                mapping[label] = stems[label]
+
+    claim_own(lambda label: label is None)
+    claim_own(lambda label: stems[label] == label)
+    claim_own(lambda label: True)
     for label in labels:
-        stem = candidate = sanitize_label(label)
-        count = 0
-        while candidate.casefold() in taken:
+        if label in mapping:
+            continue
+        stem, count = stems[label], 1
+        while f"{stem}_{count}".casefold() in taken:
             count += 1
-            candidate = f"{stem}_{count}"
-        taken.add(candidate.casefold())
-        mapping[label] = candidate
+        taken.add(f"{stem}_{count}".casefold())
+        mapping[label] = f"{stem}_{count}"
     return mapping
 
 

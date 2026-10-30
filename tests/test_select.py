@@ -90,6 +90,8 @@ def test_a_query_on_a_store_keeps_the_rows_pandas_keeps(stored, expr, rule):
 
 
 def test_a_value_of_the_wrong_type_is_refused_on_a_store(stored):
+    """F120: a value that is not a number, compared with a number column,
+    matched nothing, so `!=` with a typo kept every row with exit 0."""
     path, _ = stored
     with open_store(path, "r") as store, pytest.raises(QueryError, match="holds numbers"):
         select_indices(store.root, "obs", "total_counts != zero")

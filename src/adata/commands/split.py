@@ -72,9 +72,9 @@ def split_store(
     if not groups:
         raise ValueError(f"Column {column!r} produced no groups.")
 
-    # The missing values' store claims NA before any label that sanitises
-    # to it ("" or "NA"), so NA always holds the rows with no value.
-    names = unique_names(sorted(order, key=lambda label: label is not None))
+    # The missing values (None) claim NA before any label that sanitises to
+    # it ("" or "NA"), so NA always holds the rows with no value.
+    names = unique_names(order)
     console.print(
         f"[cyan]Splitting on {axis}[{column}]: "
         f"{len(order)} group{'s' if len(order) != 1 else ''}[/]"
@@ -159,8 +159,9 @@ def _write_manifest(
 ) -> Path:
     """Record what was written, for downstream pipelines to consume.
 
-    A missing value is written as an empty `value`, which CSV readers such
-    as pandas read back as missing.
+    A missing value is written as an empty `value`, as is a label that is
+    the empty string; their stores (`NA` for the missing values) tell
+    them apart.
     """
     source_id = file.stem if file.suffix else file.name
     path = _manifest_path(file, output_dir)

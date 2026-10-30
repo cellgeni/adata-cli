@@ -45,6 +45,19 @@ def test_a_label_keeps_its_own_name_when_nothing_else_claims_it():
     assert unique_names(["B cell", "T/NK", "x"]) == {"B cell": "B_cell", "T/NK": "T_NK", "x": "x"}
 
 
+def test_a_label_that_is_a_filename_already_keeps_it():
+    """Review of #94: `CD4+`, `CD4`, `CD4_1` were named `CD4`, `CD4_1`,
+    `CD4_1_1` -- distinct, but `CD4_1.h5ad` held the label `CD4`. A label
+    that needs no sanitising now keeps its name, and the label that was
+    sanitised onto it takes the suffix."""
+    assert unique_names(["CD4+", "CD4", "CD4_1"]) == {"CD4": "CD4", "CD4_1": "CD4_1", "CD4+": "CD4_2"}
+    assert unique_names(["a ", "a_1", "a"]) == {"a": "a", "a_1": "a_1", "a ": "a_2"}
+
+
+def test_missing_values_claim_na_before_any_label():
+    assert unique_names(["NA", "", None]) == {None: "NA", "NA": "NA_1", "": "NA_2"}
+
+
 def test_feature_types_that_name_one_file_get_their_own_outputs(tmp_path):
     """F044 through convert: feature types `A+`, `A` and `A_1` were given
     `m.A`, `m.A_1` and `m.A_1`, and the conversion failed with a false
@@ -58,12 +71,17 @@ def test_feature_types_that_name_one_file_get_their_own_outputs(tmp_path):
     names = {
         p.name: list(read_anndata(p).var_names) for p in tmp_path.glob("m.*.h5ad")
     }
-    assert names == {"m.A.h5ad": ["f0"], "m.A_1.h5ad": ["f1"], "m.A_1_1.h5ad": ["f2"]}
+    assert names == {"m.A.h5ad": ["f1"], "m.A_1.h5ad": ["f2"], "m.A_2.h5ad": ["f0"]}
 
 
 def test_split_labels_that_sanitise_alike_or_differ_in_case_get_their_own_stores(
     tmp_path, backend
 ):
+    """F044: `CD4+`, `CD4` and `CD4_1` were given `CD4`, `CD4_1` and
+    `CD4_1`, and `T` and `t` are one file on macOS and Windows; split then
+    opened one temporary twice and failed with an opaque HDF5 or Zarr
+    error, and --dry-run listed two groups on one path. (B1's #111 had
+    already fixed split's paths; this keeps them distinct from the root.)"""
     labels = ["CD4+", "CD4", "CD4_1", "T", "t", "CD4+"]
     obs = pd.DataFrame({"grp": pd.Categorical(labels)}, index=[f"c{i}" for i in range(6)])
     source = ad.AnnData(np.arange(12, dtype=np.float32).reshape(6, 2), obs=obs)
@@ -74,7 +92,7 @@ def test_split_labels_that_sanitise_alike_or_differ_in_case_get_their_own_stores
     assert dry.exit_code == 0, _out(dry)
     ok("split", src, "--by", "grp", "-o", parts)
 
-    stems = {"CD4+": "CD4", "CD4": "CD4_1", "CD4_1": "CD4_1_1", "T": "T", "t": "t_1"}
+    stems = {"CD4+": "CD4_2", "CD4": "CD4", "CD4_1": "CD4_1", "T": "T", "t": "t_1"}
     listed = "".join(_out(dry).split())  # Rich wraps the long paths
     for label, stem in stems.items():
         path = parts / f"{stem}{src.suffix}"

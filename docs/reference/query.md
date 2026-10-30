@@ -32,7 +32,8 @@ adata subset data.h5ad -o t.h5ad -q "cluster in A,B,C"
 adata subset data.h5ad -o t.h5ad -q 'cell_type in ("CD4-positive, alpha-beta T cell", "B cell")'
 ```
 
-`and`, `or`, `not` and `in` may be written in any case. Column names are
+`and`, `or`, `not` and `in` may be written in any case; where a value
+belongs they are values, as in `state in (OR, WA)`. Column names are
 case-sensitive.
 
 ## How values compare
