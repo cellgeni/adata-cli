@@ -1156,7 +1156,7 @@ def test_a_lock_held_by_a_live_run_on_this_host_is_refused(tmp_path):
 
     src = _rich_store(tmp_path / "in.h5ad")
     lock = tmp_path / "out.h5ad.adata-lock"
-    lock.write_text(f"{socket.gethostname()} {os.getppid()}\n")
+    lock.write_text(f"{socket.gethostname()} {os.getppid()} -\n")
 
     result = runner.invoke(app, _args(["subset", src, "-o", tmp_path / "out.h5ad",
                                        "-q", "grp == a"]))
@@ -1174,10 +1174,12 @@ def test_a_lock_left_by_a_killed_run_on_this_host_is_taken_over(tmp_path):
 
     src = _rich_store(tmp_path / "in.h5ad")
     out = tmp_path / "out.h5ad"
+    from adata.util.staging import _pid_namespace
+
     gone = subprocess.Popen([sys.executable, "-c", "pass"])
     gone.wait()
     lock = tmp_path / "out.h5ad.adata-lock"
-    lock.write_text(f"{socket.gethostname()} {gone.pid}\n")
+    lock.write_text(f"{socket.gethostname()} {gone.pid} {_pid_namespace()}\n")
 
     result = runner.invoke(app, _args(["subset", src, "-o", out, "-q", "grp == a"]))
     assert result.exit_code == 0, _out(result)
@@ -1265,7 +1267,8 @@ def test_a_replaced_output_is_synced_before_the_old_one_goes(tmp_path, monkeypat
         return real_rename(self, target)
 
     monkeypatch.setattr(staging.os, "fsync", fsync)
-    monkeypatch.setattr(staging.os, "sync", lambda: (events.append("sync"), real_sync())[1])
+    monkeypatch.setattr(staging, "_sync_filesystem",
+                        lambda path: (events.append("sync"), real_sync())[1] or True)
     monkeypatch.setattr(Path, "rename", rename)
     result = runner.invoke(app, _args(["subset", src, "--inplace", "-q", "grp == a"]))
     assert result.exit_code == 0, _out(result)
@@ -1556,14 +1559,130 @@ def test_an_input_of_the_wrong_shape_is_refused_before_the_store_is_copied(
     assert _debris(tmp_path) == []
 
 
-def test_import_array_copies_in_blocks_of_chunk_elements(tmp_path, backend):
-    """F015: `import array` now takes the shared --chunk."""
+def test_import_array_copies_in_blocks_of_chunk_elements(tmp_path, backend, monkeypatch):
+    """F015: `import array` now takes the shared --chunk, and hands it on."""
+    from adata.commands import import_data
+
     src = _source(tmp_path, backend)
     data = tmp_path / "pca.npy"
     values = np.arange(8, dtype="float32").reshape(4, 2)
     np.save(data, values)
+    seen = []
+    real = import_data.import_npy
 
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("chunk_elements"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(import_data, "import_npy", spy)
     result = runner.invoke(app, _args(["import", "array", src, "obsm/X_new", data,
                                        "--inplace", "--chunk", "3"]))
     assert result.exit_code == 0, _out(result)
+    assert seen == [3]
     assert np.array_equal(_read(src).obsm["X_new"], values)
+
+
+def test_a_small_import_chunk_does_not_make_a_file_per_row(tmp_path):
+    """Review of #111: a block is also a chunk of the new Zarr array, so
+    `--chunk 50` on a 50-column array wrote one file per row."""
+    src = _rich_store(tmp_path / "in.zarr")
+    data = tmp_path / "wide.npy"
+    np.save(data, np.ones((4, 50), dtype="float32"))
+
+    result = runner.invoke(app, _args(["import", "array", src, "obsm/X_wide", data,
+                                       "--inplace", "--chunk", "50"]))
+    assert result.exit_code == 0, _out(result)
+    assert zarr.open_group(str(src), mode="r")["obsm/X_wide"].chunks[0] == 4
+
+
+def test_an_output_linked_into_a_zarr_input_is_refused(tmp_path):
+    """Review of #111: with symlinked outputs followed, `ln -s in.zarr/layers
+    out.zarr; subset in.zarr -o out.zarr` swapped a whole store in for the
+    input's layers and exited 0: the check looked at the link, not at what
+    staging then replaced."""
+    src = _rich_store(tmp_path / "in.zarr")
+    before = _snapshot(src)
+    link = tmp_path / "out.zarr"
+    link.symlink_to(src / "layers")
+
+    result = runner.invoke(app, _args(["subset", src, "-o", link, "-q", "grp == a"]))
+    assert result.exit_code == 1
+    assert "Output path is the input" in _out(result)
+    assert _snapshot(src) == before
+
+
+def test_the_precheck_reads_the_store_as_the_import_does(tmp_path):
+    """Review of #111: the pre-check read a v2 store's consolidated index,
+    which a failed consolidation can leave stale, and refused a matrix the
+    import itself (which reads the store as it is) accepted."""
+    src = _rich_store(tmp_path / "in.zarr", zarr_format=2)
+    stale = _rich_store(tmp_path / "stale.zarr", zarr_format=2)
+    six = ad.AnnData(X=np.ones((6, 4), dtype="float32"),
+                     obs=pd.DataFrame(index=[f"c{i}" for i in range(6)]),
+                     var=pd.DataFrame(index=[f"g{i}" for i in range(4)]))
+    with ad.settings.override(zarr_write_format=2):
+        six.write_zarr(tmp_path / "six.zarr")
+    (tmp_path / "six.zarr" / ".zmetadata").write_bytes((stale / ".zmetadata").read_bytes())
+    data = tmp_path / "emb6.npy"
+    np.save(data, np.ones((6, 2), dtype="float32"))
+
+    result = runner.invoke(app, _args(["import", "array", tmp_path / "six.zarr",
+                                       "obsm/X_new", data, "-o", tmp_path / "out.zarr"]))
+    assert result.exit_code == 0, _out(result)
+    assert _read(tmp_path / "out.zarr").obsm["X_new"].shape == (6, 2)
+    assert src.exists()
+
+
+def test_the_precheck_adds_no_warning_of_its_own(tmp_path):
+    """Review of #111: a store without AnnData root attributes got a warning
+    from the pre-check that the import itself never gave."""
+    import warnings as warnings_mod
+
+    src = _rich_store(tmp_path / "in.h5ad")
+    with h5py.File(src, "a") as handle:
+        for key in ("encoding-type", "encoding-version"):
+            del handle.attrs[key]
+    with warnings_mod.catch_warnings(record=True) as caught:
+        warnings_mod.simplefilter("always")
+        result = runner.invoke(app, _args(["import", "array", src, "obsm/X_new",
+                                           _npy(tmp_path), "-o", tmp_path / "o.h5ad"]))
+    assert result.exit_code == 0, _out(result)
+    assert not [w for w in caught if "root has missing" in str(w.message)]
+
+
+def test_the_precheck_reads_any_npy_version(tmp_path, monkeypatch):
+    """Review of #111: a version 3.0 header (field names latin-1 cannot
+    spell, as `export array` writes them) skipped the pre-check, so a file
+    of the wrong shape was refused only after the store was copied."""
+    from adata.commands import import_data
+
+    src = _rich_store(tmp_path / "in.h5ad")
+    data = tmp_path / "v3.npy"
+    np.save(data, np.zeros(9, dtype=[("Zellen€", "f4")]))
+    assert data.read_bytes()[6] == 3
+    monkeypatch.setattr(import_data, "copy_path", _fail)
+
+    result = runner.invoke(app, _args(["import", "array", src, "obsm/X_bad", data,
+                                       "--inplace"]))
+    assert result.exit_code == 1
+    assert "mismatch" in _out(result).lower()
+
+
+def test_the_split_manifest_is_checked_with_the_stores_and_staged(tmp_path):
+    """Review of #111: the manifest was written directly, after the stores,
+    so a folder in its way was found only once they were in place."""
+    src = _rich_store(tmp_path / "in.h5ad")
+    parts = tmp_path / "parts"
+    (parts / "in_manifest.csv" / "x").mkdir(parents=True)
+
+    result = runner.invoke(app, _args(["split", src, "--by", "grp", "-o", parts]))
+    assert result.exit_code == 1
+    assert "is a directory" in _out(result)
+    assert sorted(p.name for p in parts.iterdir()) == ["in_manifest.csv"]
+
+    (parts / "in_manifest.csv" / "x").rmdir()
+    (parts / "in_manifest.csv").rmdir()
+    result = runner.invoke(app, _args(["split", src, "--by", "grp", "-o", parts]))
+    assert result.exit_code == 0, _out(result)
+    assert list(pd.read_csv(parts / "in_manifest.csv")["value"]) == ["a", "b"]
+    assert _debris(parts) == []

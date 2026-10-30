@@ -88,9 +88,12 @@ def check_output(
       a store.
 
     An existing store is still replaced by a store; that is what `-o` asks
-    for.
+    for. An output that is a symlink is judged by what it points at, which
+    is what staging replaces.
     """
     output = Path(output)
+    if output.is_symlink():
+        output = Path(os.path.realpath(output))
     for source in inputs:
         if same_path(source, output) or _inside(output, source):
             raise ValueError(

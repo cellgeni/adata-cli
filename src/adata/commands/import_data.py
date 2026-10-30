@@ -9,9 +9,11 @@ any existing output as they were.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, Optional, Tuple
+from typing import Any, Callable, Iterator, Optional, Tuple
 
+import h5py
 import numpy as np
 from rich.console import Console
 
@@ -55,21 +57,26 @@ def _copy_source(
 
 
 def _npy_shape(path: Path) -> Optional[Tuple[int, ...]]:
-    """A .npy's shape from its header, or None to leave it to the import."""
+    """A .npy's shape, read as the import maps it, or None to leave a file
+    the import refuses (Python objects, a truncated file) to say so there."""
     try:
-        with open(path, "rb") as fh:
-            version = np.lib.format.read_magic(fh)
-            read = {
-                (1, 0): np.lib.format.read_array_header_1_0,
-                (2, 0): np.lib.format.read_array_header_2_0,
-            }.get(version)
-            if read is None:
-                return None
-            shape, _, dtype = read(fh)
+        return tuple(np.load(path, mmap_mode="r").shape)
     except (OSError, ValueError):
         return None
-    # A file the import refuses for itself (Python objects) says so there.
-    return None if dtype.hasobject else tuple(shape)
+
+
+@contextmanager
+def _source_root(file: Path) -> Iterator[Any]:
+    """The source as the import will see it in its copy: a Zarr store's
+    members as they are on disk, not as a consolidated index (possibly
+    stale) lists them, and no warning about the root's attributes."""
+    if detect_backend(file) == "zarr":
+        import zarr
+
+        yield zarr.open_group(str(file), mode="r", use_consolidated=False)
+        return
+    with h5py.File(file, "r") as handle:
+        yield handle
 
 
 def _precheck(file: Path, obj: str, input_file: Path, kind: str) -> None:
@@ -88,8 +95,8 @@ def _precheck(file: Path, obj: str, input_file: Path, kind: str) -> None:
         shape = _npy_shape(input_file)
     if shape is None:
         return
-    with open_store(file, "r") as store:
-        validate_dimensions(store.root, obj, shape, Console(quiet=True))
+    with _source_root(file) as root:
+        validate_dimensions(root, obj, shape, Console(quiet=True))
 
 
 def import_into(

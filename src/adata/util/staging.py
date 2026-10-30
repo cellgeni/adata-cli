@@ -160,21 +160,41 @@ class _Signals:
                 raise Terminated(128 + signum)
 
 
-def _holder(lock: Path) -> Optional[Tuple[str, int]]:
-    """The host and process id a lock file names, if it can be read."""
+def _pid_namespace() -> str:
+    """This process's PID namespace, where Linux names one; "-" elsewhere.
+
+    Two containers can share a hostname but not their process ids, and a
+    pid looked up in the wrong namespace looks dead.
+    """
     try:
-        host, pid = lock.read_text().split()
-        return host, int(pid)
-    except (OSError, ValueError):
+        return os.readlink("/proc/self/ns/pid")
+    except OSError:
+        return "-"
+
+
+def _stamp() -> str:
+    return f"{socket.gethostname()} {os.getpid()} {_pid_namespace()}\n"
+
+
+def _holder(lock: Path) -> Optional[Tuple[str, int, str]]:
+    """The host, process id and PID namespace a lock names, if readable."""
+    try:
+        fields = lock.read_text().split()
+        host, pid = fields[0], int(fields[1])
+        return host, pid, fields[2] if len(fields) > 2 else "?"
+    except (OSError, ValueError, IndexError):
         return None
 
 
-def _dead(holder: Optional[Tuple[str, int]]) -> bool:
-    """Is the run that made a lock gone? Knowable only on its own host."""
+def _dead(holder: Optional[Tuple[str, int, str]]) -> bool:
+    """Is the run that made a lock gone? Knowable only where it ran: on this
+    host, in this PID namespace."""
     if holder is None or os.name == "nt":
         return False
-    host, pid = holder
-    if host != socket.gethostname() or pid == os.getpid():
+    host, pid, namespace = holder
+    if host != socket.gethostname() or namespace != _pid_namespace():
+        return False
+    if pid == os.getpid():
         return False
     try:
         os.kill(pid, 0)
@@ -185,7 +205,7 @@ def _dead(holder: Optional[Tuple[str, int]]) -> bool:
     return False
 
 
-def _take_over(lock: Path, holder: Tuple[str, int]) -> bool:
+def _take_over(lock: Path, holder: Tuple[str, int, str]) -> bool:
     """Remove a dead run's lock, unless another run got to it first.
 
     Renamed aside first, so two runs taking over the same stale lock cannot
@@ -208,7 +228,7 @@ def _take_over(lock: Path, holder: Tuple[str, int]) -> bool:
     return False
 
 
-def _refusal(lock: Path, holder: Optional[Tuple[str, int]]) -> FileExistsError:
+def _refusal(lock: Path, holder: Optional[Tuple[str, int, str]]) -> FileExistsError:
     output = lock.name[: -len(".adata-lock")]
     who = (
         f"another adata run (process {holder[1]} on {holder[0]})"
@@ -225,7 +245,7 @@ def _refusal(lock: Path, holder: Optional[Tuple[str, int]]) -> FileExistsError:
 def _claim(locks: Sequence[Path]) -> List[Path]:
     """Create every lock file, or none: another run holds one of them."""
     held: List[Path] = []
-    stamp = f"{socket.gethostname()} {os.getpid()}\n".encode()
+    stamp = _stamp().encode()
     try:
         for lock in locks:
             for attempt in range(2):
@@ -264,8 +284,7 @@ def _fsync_tree(path: Path) -> None:
     with one `sync()` where there is one.
     """
     if path.is_dir() and not path.is_symlink():
-        if hasattr(os, "sync"):
-            os.sync()
+        if _sync_filesystem(path):
             return
         for root, dirs, files in os.walk(path):  # pragma: no cover - Windows
             for name in files:
@@ -273,6 +292,35 @@ def _fsync_tree(path: Path) -> None:
             _fsync_dir(Path(root))
     elif path.exists():
         _fsync_file(path)
+
+
+def _sync_filesystem(path: Path) -> bool:
+    """Flush the filesystem `path` is on; False where there is no way to.
+
+    Linux's syncfs() waits for that filesystem alone. sync() waits for every
+    mount on the node -- other jobs' writes, a hung network mount -- so it
+    is the fallback only where syncfs() does not exist (macOS, where sync()
+    does not wait anyway).
+    """
+    try:
+        import ctypes
+
+        syncfs = getattr(ctypes.CDLL(None, use_errno=True), "syncfs", None)
+    except (OSError, AttributeError):  # pragma: no cover - no libc to ask
+        syncfs = None
+    if syncfs is not None:  # pragma: no cover - Linux
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            if syncfs(fd) != 0:
+                error = ctypes.get_errno()
+                raise OSError(error, os.strerror(error), str(path))
+        finally:
+            os.close(fd)
+        return True
+    if hasattr(os, "sync"):
+        os.sync()
+        return True
+    return False  # pragma: no cover - Windows
 
 
 def _fsync_file(path: Path) -> None:
@@ -368,6 +416,9 @@ def staged_outputs(outputs: Sequence[Path]) -> Iterator[List[Path]]:
 
             try:
                 yield temps
+                # Before signals are held: a sync can take a while, and a
+                # SIGTERM during it should still clean up.
+                _settle(outputs, temps)
             except BaseException:
                 with signals.hold():
                     for temp in temps:
@@ -391,20 +442,18 @@ def _follow(path: Path) -> Path:
     return Path(os.path.realpath(path)) if path.is_symlink() else path
 
 
+def _settle(outputs: List[Path], temps: List[Path]) -> None:
+    """Make each new output ready to replace an existing one."""
+    for output, temp in zip(outputs, temps):
+        if _exists(output):
+            _keep_permissions(output, temp)
+            # The old copy is deleted once this is in place; until the new
+            # one is on disk, a power cut would leave neither.
+            _fsync_tree(temp)
+
+
 def _swap(outputs: List[Path], temps: List[Path], backups: List[Path]) -> None:
     replacing = [_exists(output) for output in outputs]
-    try:
-        for output, temp, had_output in zip(outputs, temps, replacing):
-            if had_output:
-                _keep_permissions(output, temp)
-                # The old copy is deleted below; until the new one is on
-                # disk, a power cut would leave neither.
-                _fsync_tree(temp)
-    except BaseException:
-        for temp in temps:
-            _remove(temp)
-        raise
-
     swapped: List[Tuple[Path, Path, bool]] = []
     try:
         for output, temp, backup, had_output in zip(

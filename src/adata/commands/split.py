@@ -95,6 +95,9 @@ def split_store(
             check_output(out_path, [file])
         except ValueError as error:
             raise ValueError(f"{error} Choose another --output-dir.") from None
+    if manifest:
+        # Checked with the stores, so it cannot be refused once they exist.
+        check_output(_manifest_path(file, output_dir), [file], store=False)
 
     if dry_run:
         console.print("[yellow]Dry run: nothing written.[/]")
@@ -154,6 +157,10 @@ def _distinct(names: Dict[str, str], order: List[str]) -> Dict[str, str]:
     return distinct
 
 
+def _manifest_path(file: Path, output_dir: Path) -> Path:
+    return output_dir / f"{file.stem if file.suffix else file.name}_manifest.csv"
+
+
 def _write_manifest(
     file: Path,
     output_dir: Path,
@@ -163,11 +170,12 @@ def _write_manifest(
 ) -> Path:
     """Record what was written, for downstream pipelines to consume."""
     source_id = file.stem if file.suffix else file.name
-    path = output_dir / f"{source_id}_manifest.csv"
-    with open(path, "w", newline="", encoding="utf-8") as fh:
-        writer = csv.writer(fh)
-        writer.writerow(["id", "column", "value", "anndatas", "n"])
-        for label, out_path, count in planned:
-            writer.writerow([source_id, column, label, str(out_path), count])
+    path = _manifest_path(file, output_dir)
+    with staged_outputs([path]) as (temp,):
+        with open(temp, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["id", "column", "value", "anndatas", "n"])
+            for label, out_path, count in planned:
+                writer.writerow([source_id, column, label, str(out_path), count])
     console.print(f"[dim]Manifest written to {path}[/]")
     return path

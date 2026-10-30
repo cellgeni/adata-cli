@@ -414,7 +414,9 @@ such as `obsm/X_pca` or `uns/params`: an entry is replaced whatever it held.
 
 For `array`: the `.npy` is read a block of rows at a time, so its size is not
 a limit; `--chunk`, `-C` sets how many elements a block holds (1,048,576 by
-default, at least 1). Text (`<U` or `S`) becomes a string array.
+default, at least 1). Into a Zarr store a block is also a chunk of the new
+array, so it is never less than 128 KiB: a smaller one would mean a file per
+row. Text (`<U` or `S`) becomes a string array.
 
 For `sparse`: the file is read in two streaming passes, so its size is not a
 limit, and it may be gzipped (`counts.mtx.gz`). The first pass checks the
