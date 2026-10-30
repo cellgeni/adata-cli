@@ -131,18 +131,54 @@ def test_a_key_that_is_no_matrix_is_refused(tmp_path, key, message):
     assert not out.exists()
 
 
-def test_slabs_follow_the_chunks(tmp_path, monkeypatch):
-    """The dataset is read a slab of whole chunks at a time; with tiny slabs
-    every boundary falls inside it, along rows and, transposed, columns."""
+@pytest.mark.parametrize(
+    "slab_bytes", [7 * 5 * 4, 3 * 5 * 4, 1], ids=["whole-chunks", "split-chunks", "tiles"]
+)
+def test_slabs_follow_the_chunks(tmp_path, monkeypatch, slab_bytes):
+    """The dataset is read a slab of whole chunks at a time, a slab narrower
+    than a chunk, or a tile of chunks, by the budget; with tiny slabs every
+    boundary falls inside it, along rows and, transposed, columns."""
     from adata.conversion import hdf5
 
-    monkeypatch.setattr(hdf5, "SLAB_BYTES", 1)
+    monkeypatch.setattr(hdf5, "SLAB_BYTES", slab_bytes)
     truth = write_hdf5_matrix(tmp_path / "m.hdf5", n_cells=50, chunks=(7, 3))
     _ok(truth.path, "-o", tmp_path / "a.h5ad", "--key", truth.key)
     assert np.array_equal(_read(tmp_path / "a.h5ad").X.toarray(), truth.counts)
     truth = write_hdf5_matrix(tmp_path / "t.hdf5", n_cells=50, chunks=(3, 7), transpose=True)
     _ok(truth.path, "-o", tmp_path / "t.h5ad", "--key", truth.key, "--transpose", "--dense")
     assert np.array_equal(_read(tmp_path / "t.h5ad").X, truth.counts)
+
+
+@pytest.mark.parametrize("dense", [False, True], ids=["csr", "dense"])
+@pytest.mark.parametrize("transpose", [True, False], ids=["genes-as-rows", "cells-as-rows"])
+def test_chunks_spanning_the_cells_are_not_read_whole(tmp_path, monkeypatch, transpose, dense):
+    """F026: a slab was a whole number of chunks along the cells, so a matrix
+    chunked one gene to a chunk (cells as rows: every cell to a chunk) was
+    read in one slab, the whole dataset, whatever the budget."""
+    from adata.conversion import hdf5
+
+    n_cells, n_genes = 400, 8
+    chunks = (1, n_cells) if transpose else (n_cells, 1)
+    truth = write_hdf5_matrix(
+        tmp_path / "m.hdf5", n_cells=n_cells, n_genes=n_genes, transpose=transpose, chunks=chunks
+    )
+    budget = 2 * n_cells * 4  # two genes of int32
+    monkeypatch.setattr(hdf5, "SLAB_BYTES", budget)
+    largest = [0]
+    read = h5py.Dataset.__getitem__
+
+    def counted(self, key):
+        out = read(self, key)
+        if self.name == "/" + truth.key:
+            largest[0] = max(largest[0], np.asarray(out).nbytes)
+        return out
+
+    monkeypatch.setattr(h5py.Dataset, "__getitem__", counted)
+    out = tmp_path / "out.h5ad"
+    _ok(truth.path, "-o", out, "--key", truth.key, *(["--transpose"] if transpose else []),
+        *(["--dense"] if dense else []))
+    assert 0 < largest[0] <= budget
+    assert np.array_equal(_dense(_read(out).X), truth.counts)
 
 
 def test_a_plain_h5_needs_from_and_a_10x_one_is_still_10x(tmp_path):

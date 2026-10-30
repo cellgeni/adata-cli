@@ -209,3 +209,136 @@ def test_without_distinct_values_booleans_with_gaps_are_not_categories(tmp_path)
     assert scan_table(path, index="id").dtype_of(scan_table(path, index="id").columns[0]) == "category"
     untracked = scan_table(path, index="id", distinct=False)
     assert untracked.dtype_of(untracked.columns[0]) == "str"
+
+
+#: Values pandas' C parser reads as a number, or does not. Python's `int()`
+#: and `float()` accept some it does not: `1_1` is 11 to `int()`.
+LITERALS = [
+    "1_1", "1_0.5", "11_0", "٣", "١", "0x10", "1d5", "1e", "e5", "-", "+", ".",
+    "1.5.", "NAN", "+nan", "1 2", "inF", "True ", " NA",
+    " 1", "1 ", "\t1", "+1", "-0", "01", "1.", ".5", "1e5", "1E+5", "1.e5",
+    "-.5e-3", "inf", "-Infinity", "iNfInItY", "1e500", " inf", "-inf ", "+inf",
+    "1" * 5000,
+]
+
+
+@pytest.mark.parametrize("literal", LITERALS, ids=lambda v: repr(v)[:24])
+def test_a_value_is_a_number_only_when_pandas_reads_one(tmp_path, literal):
+    """F020: typing by `int()` and `float()` read the label `1_1` as the
+    integer 11 (so `1_10` and `11_0` were both 110), and digits of other
+    scripts as numbers. pandas reads both as text."""
+    path = tmp_path / "t.csv"
+    path.write_text(f'id,a\nx,"{literal}"\ny,2\n', encoding="utf-8")
+    scan = scan_table(path, index="id")
+    expected = pd.read_csv(path)["a"].dtype
+    got = scan.dtype_of(scan.columns[0])
+    assert got == (str(expected) if expected.kind in "iuf" else "str"), (literal, expected)
+
+
+def test_python_only_number_literals_stay_the_labels_they_are(tmp_path):
+    """F020: `1_1`, `1_10` and `11_0` were stored as 11, 110 and 110."""
+    path = _write(
+        tmp_path,
+        "id,lab,frac,arabic,padded,floats\n"
+        "c1,1_1,1_0.5,٣,  1,1.\n"
+        "c2,1_10,1.5,1,2 ,.5\n"
+        "c3,11_0,2,2,+3,-Infinity\n"
+        "c4,2,3,3,-0,1e5\n",
+    )
+    scan = scan_table(path, index="id")
+    got = _read_back(tmp_path, scan)
+    assert got["lab"].tolist() == ["1_1", "1_10", "11_0", "2"]
+    assert {c.name: scan.dtype_of(c) for c in scan.columns} == {
+        "lab": "str", "frac": "str", "arabic": "str", "padded": "int64", "floats": "float64",
+    }
+    _same(got, _expected(path))
+
+
+@pytest.mark.parametrize(
+    "first,then",
+    [("True", "1111"), ("1111", "True"), ("False", "2.555")],
+    ids=["bools-then-ints", "ints-then-bools", "bools-then-floats"],
+)
+def test_a_column_is_typed_from_every_block_not_the_last(tmp_path, first, then):
+    """F068: blocks of True/False and then blocks of integers were typed
+    int64, because each block narrowed from the kind before it rather than
+    from everything seen; writing the True values then crashed.
+
+    Every line is as long, and five fill a block, so the change of kind
+    falls between two blocks rather than inside one."""
+    width = len(first) + 6
+    rows = ["id".ljust(width - 3) + ",a"] + [
+        f"c{i:03d},{first if i < 39 else then}" for i in range(79)
+    ]
+    assert {len(row) for row in rows} == {width - 1}
+    path = _write(tmp_path, "\n".join(rows) + "\n")
+    index = rows[0].split(",")[0]
+    scan = scan_table(path, index=index, block_bytes=5 * width)
+    assert scan.dtype_of(scan.columns[0]) == "category"
+    _same(_read_back(tmp_path, scan, block_bytes=5 * width), _expected(path, index=index))
+
+
+def test_whole_numbers_past_int64_are_typed_as_pandas_types_them(tmp_path):
+    """F069: they were typed float64, which cannot hold them: 2**63 + 1 was
+    stored as 2**63. pandas reads them as uint64, or as text beside a
+    negative number."""
+    big = 2**63 + 1
+    path = _write(
+        tmp_path,
+        "id,wide,top,signed,gappy,mixed\n"
+        f"c1,{big},18446744073709551615,{big},{big},{big}\n"
+        f"c2,1,0,-1,,1.5\n"
+        f"c3,2,1,-1,{big},2\n",
+    )
+    scan = scan_table(path, index="id", block_bytes=40)
+    assert {c.name: scan.dtype_of(c) for c in scan.columns} == {
+        "wide": "uint64", "top": "uint64", "signed": "category",
+        "gappy": "category", "mixed": "float64",
+    }
+    got = _read_back(tmp_path, scan)
+    assert got["wide"].tolist() == [big, 1, 2]
+    # pandas, falling back to text here, keeps the gap as the string "";
+    # everywhere else a gap is missing, and so it is here.
+    assert got["gappy"].isna().tolist() == [False, True, False]
+    # pandas' default float parser rounds 2**63 + 1 up by 2,048; its exact
+    # one agrees with Python's.
+    exact = pd.read_csv(path, float_precision="round_trip")["mixed"]
+    np.testing.assert_array_equal(got["mixed"].to_numpy(), exact.to_numpy())
+    same = ["wide", "top", "signed"]
+    _same(got[same], _expected(path)[same])
+
+
+def test_whole_numbers_past_uint64_are_kept_as_text(tmp_path):
+    """F069: they were typed float64 and rounded. pandas holds them as
+    Python integers, a column anndata cannot write, so the digits are kept
+    as text rather than rounded."""
+    huge, low = str(2**64), str(-(2**63) - 1)
+    path = _write(tmp_path, f"id,a,b\nc1,{huge},{low}\nc2,1,1\n")
+    scan = scan_table(path, index="id")
+    assert [scan.dtype_of(c) for c in scan.columns] == ["str", "str"]
+    assert pd.read_csv(path)["a"].tolist() == [2**64, 1]
+    got = _read_back(tmp_path, scan)
+    assert got["a"].tolist() == [huge, "1"] and got["b"].tolist() == [low, "1"]
+
+
+@pytest.mark.timeout(60)
+def test_a_long_block_of_numbers_ending_in_a_word_is_typed_at_once(tmp_path):
+    """The number pattern could split "12" two ways, and before giving up on
+    a block of whole numbers that ended in a word it tried every split of
+    every line: the time doubled with each line, and 40 lines took days."""
+    rows = ["id,donor"] + [f"c{i},{10 + i}" for i in range(2_000)] + ["c_last,unknown"]
+    path = _write(tmp_path, "\n".join(rows) + "\n")
+    scan = scan_table(path, index="id")
+    assert scan.dtype_of(scan.columns[0]) == "str"
+    _same(_read_back(tmp_path, scan), _expected(path))
+
+
+def test_a_quoted_newline_does_not_pass_for_two_numbers(tmp_path):
+    """A block's values were joined with newlines to be matched at once, so
+    "1\n2" read as two whole numbers; the column was typed int64 and
+    writing it then failed, half way through replacing obs."""
+    path = _write(tmp_path, 'id,a,b\nc0,"1\n2",x\nc1,3,y\nc2,4,x\n')
+    scan = scan_table(path, index="id")
+    assert scan.dtype_of(scan.columns[0]) == "str"
+    assert pd.read_csv(path)["a"].tolist() == ["1\n2", "3", "4"]
+    assert _read_back(tmp_path, scan)["a"].tolist() == ["1\n2", "3", "4"]

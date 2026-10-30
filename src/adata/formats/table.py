@@ -5,9 +5,12 @@ per cell, so a mega run's table has a million rows. `pd.read_csv` would hold
 it whole; here the file is read a block of lines at a time, twice.
 
 The first pass finds each column's type as `pd.read_csv` would: `int64`,
-`float64` when a number is missing or fractional, `bool` for a column of
-True/False, and text otherwise, with pandas' own list of strings that mean
-"missing". The second writes the columns as anndata would write that pandas
+`uint64` for whole numbers past int64's range, `float64` when a number is
+missing or fractional, `bool` for a column of True/False, and text otherwise,
+with pandas' own list of strings that mean "missing". Numbers are what
+pandas' parser reads as numbers: ASCII digits, a sign, a point and an
+exponent, with blanks around them. Python's `int()` and `float()` take more
+(`1_1` reads as 11), so they are not the test. The second writes the columns as anndata would write that pandas
 frame: a text column becomes a categorical when it repeats a value
 (anndata's `strings_to_categoricals`), and a string array when every value
 is distinct.
@@ -25,6 +28,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
@@ -55,13 +59,31 @@ NA_VALUES = frozenset({
 _TRUE = frozenset({"True", "TRUE", "true"})
 _FALSE = frozenset({"False", "FALSE", "false"})
 
-# A column's kind narrows as values are seen: bool -> int -> float -> text.
-_ORDER = ("bool", "int", "float", "text")
+# A block's values, one per line, matched whole: whole numbers, and numbers
+# of any kind (which include the whole ones), as pandas' C parser reads
+# them. Blanks may surround a number, not infinity. ASCII only: `re.ASCII`
+# keeps `[0-9]` from meaning other scripts' digits, which pandas reads as
+# text. Every quantifier is possessive, so nothing is retried: a pattern
+# that could split "12" two ways retried every split of every line before
+# a block's one word, which doubled the time with each line, and even an
+# unambiguous one kept a backtracking record per line.
+_INTS = re.compile(r"(?:[ \t]*+[+-]?+[0-9]++[ \t]*+\n)*+", re.ASCII)
+_NUMBERS = re.compile(
+    r"(?:[ \t]*+[+-]?+(?:[0-9]++(?:\.[0-9]*+)?+|\.[0-9]++)(?:e[+-]?+[0-9]++)?+[ \t]*+\n"
+    r"|[+-]?+inf(?:inity)?+\n)*+",
+    re.ASCII | re.IGNORECASE,
+)
+# 19 digits in a row: the shortest whole number that may not fit in int64.
+_LONG = re.compile(r"[0-9]{19}", re.ASCII)
+
+_INT64 = np.iinfo(np.int64)
+_UINT64 = np.iinfo(np.uint64)
 
 
 @dataclass
 class Column:
     name: str
+    #: bool, int, uint, float or text. "bool" until a value says otherwise.
     kind: str = "bool"
     has_missing: bool = False
     #: Whether any value is not missing.
@@ -69,6 +91,18 @@ class Column:
     #: Distinct values of a text column, None once past the cap (or when
     #: not tracked at all, for columns that must be numbers).
     seen: Optional[Set[str]] = field(default_factory=set)
+    # What the values seen so far hold, over every block: the kind follows
+    # from all of them, never from the last block alone.
+    bools: bool = False
+    numbers: bool = False
+    #: A number that is not whole (a point, an exponent or infinity).
+    fraction: bool = False
+    #: A whole number with a minus sign.
+    negative: bool = False
+    #: A whole number past int64 but within uint64.
+    wide: bool = False
+    #: A whole number past uint64, or below int64.
+    huge: bool = False
 
     @property
     def categories(self) -> Optional[List[str]]:
@@ -88,11 +122,18 @@ class TableScan:
     selected: Optional[np.ndarray] = None
     #: False for a file with no header line, its names given by the caller.
     has_header: bool = True
+    #: What a caller chose for a column instead of its inferred type, by name.
+    overrides: Dict[str, str] = field(default_factory=dict)
 
     def dtype_of(self, column: Column) -> str:
-        """What the column is written as: int64, float64, bool, category or str."""
+        """What the column is written as: int64, uint64, float64, bool,
+        category or str."""
+        if column.name in self.overrides:
+            return self.overrides[column.name]
         if column.kind == "int":
             return "float64" if column.has_missing else "int64"
+        if column.kind == "uint":
+            return "uint64"
         if column.kind == "float":
             return "float64"
         if column.kind == "bool":
@@ -140,30 +181,71 @@ def _rows(
 
 
 def _narrow(column: Column, values: List[str]) -> None:
-    """Narrow `column`'s kind to cover `values`."""
+    """Narrow `column`'s kind to cover `values` as well as every block before."""
     present = [v for v in values if v not in NA_VALUES]
     if len(present) < len(values):
         column.has_missing = True
     if present:
         column.present = True
-    kind = _ORDER.index(column.kind)
-    while present and kind < 3:
-        try:
-            if kind == 0:
-                if not all(v in _TRUE or v in _FALSE for v in present):
-                    raise ValueError
-            elif kind == 1:
-                np.array(present, dtype=np.int64)
-            else:
-                np.array(present, dtype=np.float64)
-            break
-        except (ValueError, OverflowError):
-            kind += 1
-    column.kind = _ORDER[kind]
+    if present and column.kind != "text":
+        text = "\n".join(present) + "\n"
+        # A quoted value may hold a newline of its own, and so pass for two
+        # numbers; no number holds one.
+        lines = text.count("\n") == len(present)
+        if lines and _INTS.fullmatch(text):
+            column.numbers = True
+            column.negative = column.negative or "-" in text
+            if _LONG.search(text):
+                _measure(column, present)
+        elif lines and _NUMBERS.fullmatch(text):
+            column.numbers = column.fraction = True
+        elif all(v in _TRUE or v in _FALSE for v in present):
+            column.bools = True
+        else:
+            column.kind = "text"
+    if column.kind != "text":
+        column.kind = _kind(column)
     if column.seen is not None:
         column.seen.update(present)
         if len(column.seen) > CATEGORY_CAP:
             column.seen = None
+
+
+def _measure(column: Column, present: List[str]) -> None:
+    """Note whole numbers that do not fit in int64."""
+    try:
+        np.array(present, dtype=np.int64)
+        return
+    except (OverflowError, ValueError):  # ValueError: past int()'s 4,300 digits
+        pass
+    for value in present:
+        digits = value.strip(" \t").lstrip("+-").lstrip("0")
+        # Past 20 digits no 64-bit integer holds it, and int() refuses
+        # past 4,300.
+        number = int(value) if len(digits) <= 20 else None
+        if number is None or number < _INT64.min or number > _UINT64.max:
+            column.huge = True
+        elif number > _INT64.max:
+            column.wide = True
+
+
+def _kind(column: Column) -> str:
+    """The kind pandas gives a column of everything seen so far.
+
+    True/False beside numbers is text, as are whole numbers past uint64, or
+    past int64 beside negative ones or gaps: pandas holds those as Python
+    objects or strings, and anndata writes no column of Python integers.
+    A fraction anywhere makes the column float64, as it does in pandas.
+    """
+    if column.bools and column.numbers:
+        return "text"
+    if not column.numbers:
+        return "bool"
+    if column.fraction:
+        return "float"
+    if column.huge or (column.wide and (column.negative or column.has_missing)):
+        return "text"
+    return "uint" if column.wide else "int"
 
 
 def scan_table(
@@ -300,8 +382,8 @@ def column_values(scan: TableScan, column: Column, values: List[str], lookup: Di
     """A block of one column's text, as the values `create_columns` stores:
     numbers, booleans, category codes (-1 for a gap) or strings."""
     kind = scan.dtype_of(column)
-    if kind == "int64":
-        return np.array(values, dtype=np.int64)
+    if kind in ("int64", "uint64"):
+        return np.array(values, dtype=kind)
     if kind == "float64":
         return np.array([np.nan if v in NA_VALUES else v for v in values], dtype=np.float64)
     if kind == "bool":

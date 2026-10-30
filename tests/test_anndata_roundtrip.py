@@ -275,7 +275,9 @@ def test_json_roundtrip_covers_every_scalar_kind(reference, tmp_path):
     assert int(run["n"]) == 100
     assert float(run["rate"]) == pytest.approx(0.5)
     assert bool(run["flag"]) is True
-    assert run["nothing"] is None
+    # A null is left out, as anndata 0.8 to 0.11 leave out None: they cannot
+    # read the `null` encoding, and would refuse the whole store (F035).
+    assert "nothing" not in run
     assert list(run["labels"]) == ["a", "b"]
     assert list(run["weights"]) == pytest.approx([1.5, 2.5])
 
@@ -349,32 +351,28 @@ def test_json_import_keeps_nested_string_arrays_rectangular(tmp_path, fmt):
 
 
 @pytest.mark.parametrize("fmt", ["h5ad", "zarr"])
-def test_json_null_survives_a_full_round_trip(tmp_path, fmt):
+def test_a_null_element_exports_as_json_null(tmp_path, fmt):
     """Exporting a `null` element emitted its storage placeholder, not None.
 
     The placeholder differs per backend -- an h5py.Empty, or a 0-d zarr bool --
     so neither serialised back to JSON null.
     """
     store = tmp_path / f"base.{fmt}"
-    obj = ad.AnnData(
-        X=np.ones((2, 2), dtype="float32"),
-        obs=pd.DataFrame(index=["c1", "c2"]),
-        var=pd.DataFrame(index=["g1", "g2"]),
-    )
-    obj.write_zarr(store) if fmt == "zarr" else obj.write_h5ad(store)
-
     source = {
         "grid": [["a", "b"], ["c", "d"]],
         "nums": [[1, 2], [3, 4]],
         "nothing": None,
         "title": "run",
     }
-    payload = tmp_path / "payload.json"
-    payload.write_text(json.dumps(source))
-
-    assert runner.invoke(
-        app, ["import", "dict", str(store), "uns/t", str(payload), "--inplace"]
-    ).exit_code == 0
+    obj = ad.AnnData(
+        X=np.ones((2, 2), dtype="float32"),
+        obs=pd.DataFrame(index=["c1", "c2"]),
+        var=pd.DataFrame(index=["g1", "g2"]),
+        # Written by anndata, which encodes None as `null` from 0.12 on;
+        # `import dict` leaves a null out instead (F035).
+        uns={"t": {k: np.array(v) if isinstance(v, list) else v for k, v in source.items()}},
+    )
+    obj.write_zarr(store) if fmt == "zarr" else obj.write_h5ad(store)
 
     out = tmp_path / "out.json"
     result = runner.invoke(

@@ -129,6 +129,13 @@ The ordering operators compare numbers. For text, use `==`, `!=` or `in`. See
 `obsm/...` against obs, `varm/...` against var, `X` and layers against both.
 The input belongs to another store, or is transposed.
 
+### `'obs' must hold a dataframe; writing an array there would leave a store anndata cannot read.`
+
+`import` writes one element, and some paths fix what kind it must be: `obs`
+and `var` are dataframes, and `obsm`, `layers` or `uns` hold one element per
+key. Name the entry instead, such as `obsm/X_pca` or `uns/params`, or use
+`import dataframe` for a table. See [Commands](reference/commands.md#import).
+
 ### `Provide at least one of --obs, --var, --obs-query or --var-query.`
 
 `subset` with no selection would copy the store. Use `convert` to copy, or add
@@ -251,9 +258,8 @@ store it wrote; for a store another tool changed, run
 ### The command was killed for running out of memory
 
 Lower `--chunk`: a dense block holds `--chunk` × n_var values, 1,024 rows by
-default. Three things are held whole by design: obs and var columns, an
-`export array` written to stdout (give `-o` instead), and a pycisTopic pickle,
-which cannot be read in part. See
+default. Two things are held whole by design: obs and var columns, and a
+pycisTopic pickle, which cannot be read in part. See
 [Pipelines and containers](guides/pipelines.md#memory-and---chunk).
 
 ### `A loom holds its matrices dense: 54.0 GB to compress and write. It is written, but may take a while`
@@ -318,6 +324,9 @@ Warnings go to stderr and do not change the exit code.
 | Warning | Meaning |
 |---|---|
 | `N obs names not found in file` | Names in a `--obs` list the store does not have were skipped |
+| `2 null values were left out, as anndata leaves out None: uns/params/x, ...` | `import dict` wrote every key but those holding `null`, which anndata 0.8 to 0.11 cannot read |
+| `'uns/m' has 3 missing values, written as NaN, so the array is float64.` | `export array` of a nullable array: a `.npy` has no mask |
+| `5 NaN or infinite values are written as null, since JSON has no number for them.` | `export dict`: JSON has no `NaN` or `Infinity` |
 | `obs names are not unique across inputs. Pass --index-unique to disambiguate them.` | `concat` inputs share barcodes; `--index-unique -` appends each input's key |
 | `'convert' with --dtype is deprecated and will be removed in 1.0.0; use 'recast' instead.` | The command ran as `recast`; change the script before 1.0.0 |
 | `the 'h5ad' command is deprecated and will be removed in 1.0.0; use 'adata' instead.` | The command was renamed in 0.5.0 |
