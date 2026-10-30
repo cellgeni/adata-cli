@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -95,31 +96,39 @@ def indices_from_name_set(
     keep: Set[str],
     *,
     chunk_size: int = 200_000,
-) -> Tuple[np.ndarray, Set[str]]:
+) -> Tuple[np.ndarray, Set[str], int]:
     """Resolve a set of names to sorted row indices, streaming the index.
+
+    Every row whose name is in `keep` is selected, as anndata's
+    `obs_names.isin(keep)` selects them: an index can repeat a name (a
+    concat without --index-unique repeats each barcode once per sample),
+    and keeping only its first row dropped the rest without a word.
 
     `names_ds` may be a dataset or -- as anndata >= 0.11 writes indices -- a
     `nullable-string-array` group, so it is read through
     :func:`adata.elements.read.read_str_chunk` rather than sliced directly.
-    Returns the indices found and the names that were not.
+    Returns the indices found, the names that were not, and how many of
+    the names found name more than one row.
     """
     flat_len = element_len(names_ds)
 
-    remaining = set(keep)
     found_indices: List[int] = []
+    rows_per_name: Counter = Counter()
     cache: Dict[str, np.ndarray] = {}
 
     for start in range(0, flat_len, chunk_size):
         end = min(start + chunk_size, flat_len)
         for i, name in enumerate(read_str_chunk(names_ds, start, end, cache)):
-            if name in remaining:
+            if name in keep:
                 found_indices.append(start + i)
-                remaining.remove(name)
+                rows_per_name[name] += 1
 
-        if not remaining:
-            break
-
-    return np.asarray(found_indices, dtype=np.int64), remaining
+    repeated = sum(1 for n in rows_per_name.values() if n > 1)
+    return (
+        np.asarray(found_indices, dtype=np.int64),
+        set(keep) - set(rows_per_name),
+        repeated,
+    )
 
 
 #: Rows `_take_rows` reads from HDF5 in one contiguous slice.
@@ -311,7 +320,8 @@ def subset_axis_group(
         if not is_group(obj):
             continue
 
-        enc = _decode_attr(obj.attrs.get("encoding-type", b""))
+        # None when untagged, as the reader takes it: '' would never match.
+        enc = spec.encoding_type(obj)
 
         if enc == spec.CATEGORICAL or (enc is None and "codes" in obj):
             gdst = dst.create_group(key)
@@ -419,31 +429,41 @@ def fan_out_dense_matrix(
     *,
     chunk_rows: int = 1024,
 ) -> None:
-    """Write one row/column subset of a dense matrix per target, in one pass.
+    """Write one row/column subset of a dense array per target, in one pass.
+
+    Rows are the first axis and columns the second; an array of any other
+    rank (an obsm entry of shape (n_obs, 2, 3), say) keeps its trailing
+    axes whole, as anndata's subsetting keeps them. Only a 0-d value has no
+    rows, and is copied as it is.
 
     The source is read a block of `chunk_rows` rows at a time, each block
     once whatever the number of targets, and only the span between the
     first and last row any target keeps in it.
     """
-    if src.ndim != 2:
+    if src.ndim == 0:
         for dst_parent, _, _ in targets:
             copy_tree(src, dst_parent, name)
         return
 
-    n_obs, n_var = src.shape
+    n_obs = src.shape[0]
     outputs = []
     for dst_parent, obs_idx, var_idx in targets:
         _check_sorted(obs_idx, "obs")
-        out_obs = len(obs_idx) if obs_idx is not None else n_obs
-        out_var = len(var_idx) if var_idx is not None else n_var
+        if var_idx is not None and src.ndim < 2:
+            raise ValueError(f"{name!r} is 1-D, so it has no columns to select.")
+        shape = list(src.shape)
+        if obs_idx is not None:
+            shape[0] = len(obs_idx)
+        if var_idx is not None:
+            shape[1] = len(var_idx)
 
         target_backend = _target_backend(dst_parent)
         kw = dataset_create_kwargs(
             src, target_backend=target_backend, dst_parent=dst_parent
         )
-        kw = fit_chunks(kw, (out_obs, out_var), backend=target_backend)
+        kw = fit_chunks(kw, shape, backend=target_backend)
         dst = create_dataset(
-            dst_parent, name, shape=(out_obs, out_var), dtype=src.dtype, **kw
+            dst_parent, name, shape=tuple(shape), dtype=src.dtype, **kw
         )
         copy_attrs(src.attrs, dst.attrs, target_backend=target_backend)
         outputs.append([dst, _Cursor(obs_idx), var_idx, 0])
@@ -456,7 +476,7 @@ def fan_out_dense_matrix(
             continue
         first = min(int(rows[0]) for rows in nonempty)
         last = max(int(rows[-1]) for rows in nonempty)
-        block = np.asarray(src[first : last + 1, :])
+        block = np.asarray(src[first : last + 1, ...])
 
         for out, rows in zip(outputs, wanted):
             if not rows.size:
@@ -465,7 +485,7 @@ def fan_out_dense_matrix(
             part = block[rows - first]
             if var_idx is not None:
                 part = part[:, var_idx]
-            dst[written : written + len(rows), :] = part
+            dst[written : written + len(rows), ...] = part
             out[3] = written + len(rows)
 
 
@@ -761,7 +781,7 @@ def fan_out_matrix_entry(
         return
 
     if is_group(obj):
-        enc = _decode_attr(obj.attrs.get("encoding-type", b""))
+        enc = spec.encoding_type(obj)
         if enc in spec.SPARSE_TYPES:
             fan_out_sparse_matrix(obj, name, targets)
             return
@@ -837,7 +857,7 @@ def _fan_out_raw(
         raw_var_idx: Optional[np.ndarray] = None
         if target.var_keep is not None and "var" in src_raw:
             raw_var_names, _ = resolve_index(src_raw["var"], "var")
-            raw_var_idx, missing = indices_from_name_set(
+            raw_var_idx, missing, _ = indices_from_name_set(
                 raw_var_names, target.var_keep
             )
             console.print(
@@ -923,9 +943,10 @@ def _write_targets(
     `skip` names top-level elements the caller writes itself (a MuData
     export keeps obs, obsm, obsp and uns once, for all modalities).
 
-    obs and var drop unused categories as anndata's subsetting does, on an
-    axis kept whole too; `prune_whole_axes=False` leaves such an axis as
-    stored, for a conversion that subsets nothing there.
+    obs and var, and dataframes in obsm and varm, drop unused categories
+    as anndata's subsetting does, on an axis kept whole too;
+    `prune_whole_axes=False` leaves such an axis as stored, for a
+    conversion that subsets nothing there.
     """
     tasks: List[str] = []
     if "obs" in src:
@@ -1005,20 +1026,34 @@ def _write_targets(
                 label, key = task.split(":", 1)
                 mapping = labels.get(label, label)
                 rows, cols = _MATRIX_MAPPINGS[mapping]
-                fan_out_matrix_entry(
-                    src[mapping][key],
-                    key,
-                    [
-                        (
-                            _ensure_group(t.root, mapping),
-                            _axis_idx(t, rows),
-                            _axis_idx(t, cols),
+                entry = src[mapping][key]
+                if is_group(entry) and spec.encoding_type(entry) == spec.DATAFRAME:
+                    # obsm/varm may hold a dataframe, row-aligned like obs
+                    # and var, and anndata's subsetting drops its unused
+                    # categories as it drops theirs (`as_view` of a frame).
+                    for target in targets:
+                        indices = _axis_idx(target, rows)
+                        subset_axis_group(
+                            entry,
+                            _ensure_group(target.root, mapping).create_group(key),
+                            indices,
+                            prune=prune_whole_axes or indices is not None,
                         )
-                        for t in targets
-                    ],
-                    chunk_rows=chunk_rows,
-                    entry_label=task,
-                )
+                else:
+                        fan_out_matrix_entry(
+                        entry,
+                        key,
+                        [
+                            (
+                                _ensure_group(t.root, mapping),
+                                _axis_idx(t, rows),
+                                _axis_idx(t, cols),
+                            )
+                            for t in targets
+                        ],
+                        chunk_rows=chunk_rows,
+                        entry_label=task,
+                    )
             progress.update(
                 task_id,
                 description=f"[green]{verb} {task}[/]",
@@ -1028,6 +1063,52 @@ def _write_targets(
 
     for target in targets:
         _ensure_optional_anndata_groups(target.root)
+
+
+#: Elements aligned to both axes, which must be matrices.
+_TWO_AXES = ("layers", "obsp", "varp")
+
+
+def check_subsettable(src: Any) -> None:
+    """Refuse a store holding an element subset cannot narrow.
+
+    Called before the output exists, so a refusal writes nothing: an awkward
+    array in obsm used to fail part way through the write. Every matrix
+    (X, layers, obsp, varp, raw/X) must be a 2-D array or a CSR/CSC group;
+    an obsm or varm entry an array of any rank, CSR/CSC, or a dataframe.
+    """
+    def check(path: str, obj: Any, *, one_axis: bool) -> None:
+        if is_dataset(obj):
+            if one_axis or obj.ndim == 2:
+                return
+            why = f"a {obj.ndim}-D array where a matrix belongs"
+        elif is_group(obj):
+            enc = spec.encoding_type(obj)
+            if enc in spec.SPARSE_TYPES or (one_axis and enc == spec.DATAFRAME):
+                return
+            why = f"a group encoded as {enc or 'nothing'}"
+        else:
+            why = "neither an array nor a group"
+        raise ValueError(
+            f"Cannot subset {path}: it is {why}, which subset cannot narrow. "
+            "Nothing was written."
+        )
+
+    def entries(parent: Any, prefix: str, mapping: str, one_axis: bool) -> None:
+        if mapping in parent and is_group(parent[mapping]):
+            for key in parent[mapping].keys():
+                check(f"{prefix}{mapping}/{key}", parent[mapping][key], one_axis=one_axis)
+
+    if "X" in src:
+        check("X", src["X"], one_axis=False)
+    for mapping in _TWO_AXES:
+        entries(src, "", mapping, one_axis=False)
+    for mapping in ("obsm", "varm"):
+        entries(src, "", mapping, one_axis=True)
+    if "raw" in src and is_group(src["raw"]):
+        if "X" in src["raw"]:
+            check("raw/X", src["raw"]["X"], one_axis=False)
+        entries(src["raw"], "raw/", "varm", one_axis=True)
 
 
 def _select_axis(
@@ -1055,10 +1136,17 @@ def _select_axis(
     keep = _read_name_file(name_file)
     console.print(f"[cyan]Found {len(keep)} {axis} names to keep[/]")
     names_ds, _ = resolve_index(src[axis], axis)
-    indices, missing = indices_from_name_set(names_ds, keep)
+    indices, missing, repeated = indices_from_name_set(names_ds, keep)
     if missing:
         console.print(
             f"[yellow]Warning: {len(missing)} {axis} names not found in file[/]"
+        )
+    if repeated:
+        # The index repeats names, so a name can stand for several rows;
+        # all of them are kept, as anndata's `isin` keeps them.
+        console.print(
+            f"[yellow]{repeated} of the names match more than one {axis} row "
+            f"(the {axis} index repeats names); every matching row is kept[/]"
         )
     console.print(
         f"[green]Selected {len(indices)} {axis} (of {element_len(names_ds)})[/]"
@@ -1080,7 +1168,6 @@ def subset_h5ad(
     obs_indices: Optional[np.ndarray] = None,
     var_indices: Optional[np.ndarray] = None,
     zarr_format: Optional[int] = None,
-    quiet: bool = False,
     space_check: bool = True,
 ) -> None:
     """Write a copy of `file` narrowed to the selected obs and/or var.
@@ -1146,6 +1233,7 @@ def subset_h5ad(
                         f"store's {axis} index. Nothing was written."
                     )
 
+            check_subsettable(src)
             check_free_space(
                 dst_path,
                 lambda: disk_size(file)

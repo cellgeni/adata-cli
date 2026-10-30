@@ -94,6 +94,17 @@ adata subset data.h5ad --inplace --obs barcodes.txt
 `raw/` is carried over and matched against its **own** var axis, which usually
 holds more genes than the main object.
 
+A name list keeps every row with a listed name, as anndata's
+`obs_names.isin(names)` does: after a `concat` without `--index-unique` a
+barcode names one cell per sample, and all of them are kept. `subset` says
+how many of the names matched more than one row.
+
+Every element is narrowed as anndata's subsetting narrows it: layers, `obsp`
+and `varp` on both their axes, `obsm` and `varm` arrays of any rank on their
+first, and `obsm` and `varm` dataframes as `obs` and `var` are. A store
+holding something `subset` cannot narrow, such as an awkward array in
+`obsm`, is refused before anything is written.
+
 A categorical obs or var column keeps only the categories its rows use, as
 anndata's own subsetting keeps them (on an axis kept whole too), and
 `uns["<column>_colors"]` keeps the colours of those categories. `split`
@@ -264,7 +275,13 @@ adata split data.h5ad --by cluster -o out/ --min-size 50
 
 Labels are sanitised for use as filenames; collisions get a numeric suffix,
 and so do labels that differ only in case (`B`, `b_1`), which would be one
-file on macOS and Windows.
+file on macOS and Windows. A suffixed name is never another label's own:
+`CD4+`, `CD4` and `CD4_1` give `CD4`, `CD4_1` and `CD4_1_1`.
+`convert --split-feature-types` and `--all-samples` name their outputs the
+same way.
+Rows whose value is missing go to a store of their own, `NA`, apart from
+rows labelled with an empty string; the manifest lists the missing value as
+empty.
 Every store is written beside its destination and moved into place only once
 all of them are complete, and the manifest is written last, so a split that
 fails leaves no partial stores. An output that would land on the input is

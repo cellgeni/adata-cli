@@ -296,7 +296,7 @@ class _Reader:
         count = len(lines) * width
         text = b"\n".join(lines)
         if (
-            (_fields(text, self.raw, len(lines)) != width).any()
+            (_fields(text, self.raw) != width).any()
             or _misshapen(text, self.raw, count)
             # numpy reads 'nan(...)' as NaN, whatever the parentheses hold,
             # delimiters too; Python's float, and so anndata, refuses it.
@@ -371,7 +371,7 @@ class _Reader:
 
 
 
-def _fields(text: bytes, delimiter: Optional[bytes], n_lines: int) -> np.ndarray:
+def _fields(text: bytes, delimiter: Optional[bytes]) -> np.ndarray:
     """Fields on each line of `text`, every line at once: the delimiters
     between line ends, or, for whitespace, the starts of runs of others."""
     buffer = np.frombuffer(text, dtype=np.uint8)

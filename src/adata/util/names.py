@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from typing import Dict, Iterable, List, Sequence, Set
+from typing import Dict, Iterable, List, Optional, Sequence, Set
 
 
-def sanitize_label(label: str) -> str:
-    """Turn a column value into something safe to use as a filename."""
+def sanitize_label(label: Optional[str]) -> str:
+    """Turn a column value into something safe to use as a filename.
+
+    A missing value (None), and a label with nothing filename-safe in it,
+    become `NA`.
+    """
     text = (label or "").strip()
     if not text:
         return "NA"
@@ -18,20 +22,25 @@ def sanitize_label(label: str) -> str:
     return text or "NA"
 
 
-def unique_names(labels: List[str]) -> Dict[str, str]:
-    """Map each label to a distinct filename stem.
+def unique_names(labels: Sequence[Optional[str]]) -> Dict[Optional[str], str]:
+    """Map each label to a distinct filename stem, in the order given.
 
     Sanitising can map two different labels onto the same stem ("a/b" and
-    "a b"), so collisions get a numeric suffix rather than silently
-    overwriting one another.
+    "a b"), and a suffixed stem can be a later label's own ("CD4+", "CD4",
+    "CD4_1"), so each stem is claimed against every stem given out before
+    it. They are compared without case: `T` and `t` are one file on macOS
+    and Windows. Either collision put two outputs on one path.
     """
-    used: Dict[str, int] = {}
-    mapping: Dict[str, str] = {}
+    taken: Set[str] = set()
+    mapping: Dict[Optional[str], str] = {}
     for label in labels:
-        base = sanitize_label(label)
-        count = used.get(base, 0)
-        used[base] = count + 1
-        mapping[label] = base if count == 0 else f"{base}_{count}"
+        stem = candidate = sanitize_label(label)
+        count = 0
+        while candidate.casefold() in taken:
+            count += 1
+            candidate = f"{stem}_{count}"
+        taken.add(candidate.casefold())
+        mapping[label] = candidate
     return mapping
 
 
