@@ -39,7 +39,7 @@ from tests.conftest import (
     write_starsolo_velocyto,
     write_text_matrix,
 )
-from tests.reference_stores import must_build, offline, uv_available
+from tests.reference_stores import must_build, offline, oracle, uv_available
 
 pytestmark = [pytest.mark.integration, pytest.mark.timeout(1800)]
 
@@ -55,7 +55,8 @@ def _run(packages: List[str], script: str, *args: str, python: str = PYTHON):
         pytest.skip("needs uv and the network")
     cmd = ["uv", "run", "--no-project", "--python", python]
     for package in packages:
-        cmd += ["--with", package]
+        # Pinned: an oracle that moves on its own changes what is checked.
+        cmd += ["--with", oracle(package)]
     cmd += ["python", "-c", script, *args]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=1500)
     lines = [l for l in result.stdout.splitlines() if l.startswith("RESULT ")]
@@ -1267,3 +1268,62 @@ def test_visium_hd_cells_import_as_10x_s_geopandas_recipe_reads_them(tmp_path):
     out = tmp_path / "cells.h5ad"
     _convert(str(hd.outs), "-o", str(out), "--cells", "--var-names", "gene_symbols")
     assert _run(["scanpy", "geopandas"], _COMPARE_VISIUM_CELLS, str(hd.cells.folder), str(out)) == []
+
+
+# ---------------------------------------------------------------------------
+# scanpy's marker genes, written by scanpy, read back by scanpy after every
+# copy: `rank_genes_groups` is a dict of record arrays, one field per group.
+
+_WRITE_MARKERS = r"""
+import json, sys, warnings
+warnings.filterwarnings("ignore")
+import numpy as np, pandas as pd, scanpy as sc, anndata as ad
+rng = np.random.default_rng(0)
+a = ad.AnnData(rng.poisson(1.0, (40, 12)).astype("float32"))
+a.var_names = [f"gene_{i}" for i in range(12)]
+a.obs["group"] = pd.Categorical(["a", "bb"] * 20)
+sc.pp.log1p(a)
+sc.tl.rank_genes_groups(a, "group", method="wilcoxon")
+a.write_h5ad(sys.argv[1] + ".h5ad")
+a.write_zarr(sys.argv[1] + ".zarr")
+print("RESULT", json.dumps(True))
+"""
+
+_COMPARE_MARKERS = r"""
+import json, sys, warnings
+warnings.filterwarnings("ignore")
+import scanpy as sc, anndata as ad
+read = lambda p: ad.read_zarr(p) if p.endswith(".zarr") else ad.read_h5ad(p)
+want = sc.get.rank_genes_groups_df(read(sys.argv[1]), group=None)
+got = sc.get.rank_genes_groups_df(read(sys.argv[2]), group=None)
+problems = []
+if list(got.columns) != list(want.columns):
+    problems.append(f"columns {list(got.columns)} != {list(want.columns)}")
+else:
+    for column in want.columns:
+        if got[column].astype(str).tolist() != want[column].astype(str).tolist():
+            problems.append(f"{column} differs")
+print("RESULT", json.dumps(problems))
+"""
+
+
+@pytest.mark.parametrize(
+    "source,target,extra",
+    [
+        ("h5ad", "zarr", []),
+        ("h5ad", "zarr", ["--zarr-format", "2"]),
+        ("zarr", "h5ad", []),
+        ("h5ad", "h5ad", ["--compression", "gzip"]),
+    ],
+    ids=["h5ad-zarr3", "h5ad-zarr2", "zarr-h5ad", "h5ad-h5ad-gzip"],
+)
+def test_rank_genes_groups_survives_a_conversion_as_scanpy_reads_it(tmp_path, source, target, extra):
+    """F017, F021: scanpy's marker genes crossed no backend (Zarr refused the
+    HDF5 text fields, h5py the Zarr ones), and a copy with --compression
+    crashed the process."""
+    stem = tmp_path / "scanpy"
+    _run(["scanpy"], _WRITE_MARKERS, str(stem))
+    src = f"{stem}.{source}"
+    out = tmp_path / f"out.{target}"
+    _convert(src, "-o", str(out), *extra)
+    assert _run(["scanpy"], _COMPARE_MARKERS, src, str(out)) == []

@@ -149,8 +149,10 @@ before changing anything that writes:
   parametrised over `h5ad`, `zarr2` and `zarr3`.
 - **An oracle, not self-consistency.** anndata reads back what is written,
   scipy checks `recast`, scanpy, loompy and mudata check the conversions.
-  `test_anndata_versions.py` builds environments with anndata 0.8 to 0.13 and
-  checks both directions.
+  `test_anndata_versions.py` builds environments with anndata 0.7.8 to 0.13,
+  pinned exactly, and checks both directions: each release's store is read,
+  and from 0.8 the release reads back `subset`, `convert`, `split` and
+  `concat` outputs.
 - **Complexity guards that count, not time.** `tests/test_performance.py`
   counts the elements and bytes read through hooks on h5py and zarr. A change
   that adds reads per row or per group fails it on any machine.

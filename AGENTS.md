@@ -43,8 +43,9 @@ uv run python -m benchmarks.report results.json
 ```
 
 Test markers:
-- `integration` tests build uv environments with real anndata releases (0.8 to
-  0.13), scanpy and PyTables, so they need the network on the first run.
+- `integration` tests build uv environments with real anndata releases (0.7.8
+  to 0.13) and the oracles (scanpy, PyTables and others), all pinned exactly
+  in `tests/reference_stores.py`, so they need the network on the first run.
 - `perf` tests are slow, but CI runs them in the main job.
 
 CI also installs the package from a fresh resolution, without the lock,

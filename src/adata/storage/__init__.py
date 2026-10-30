@@ -15,11 +15,12 @@ except Exception:  # pragma: no cover - optional dependency
 
 import numpy as np
 
+from adata.elements import spec
 from adata.util.path import is_zarr_path  # noqa: F401 - re-exported
 
 
-ROOT_ENCODING_TYPE = "anndata"
-ROOT_ENCODING_VERSION = "0.1.0"
+ROOT_ENCODING_TYPE = spec.ANNDATA
+ROOT_ENCODING_VERSION = spec.CURRENT_VERSION[spec.ANNDATA]
 
 
 @dataclass
@@ -163,6 +164,13 @@ def open_store(
             consolidate=writable,
         )
     root = h5py.File(path, mode)
+    if mode not in ("w", "w-", "x"):
+        # Anything opened for its contents, read or appended to (--inplace).
+        try:
+            check_hdf5_contents(root, path)
+        except BaseException:
+            root.close()
+            raise
     if _is_writable_mode(mode):
         ensure_anndata_root_attrs(root)
     elif require_anndata:
@@ -170,15 +178,109 @@ def open_store(
     return Store(backend="hdf5", root=root, path=path)
 
 
+class ExternalDataError(ValueError):
+    """An HDF5 file holds a dataset or link whose data lives in another file."""
+
+
+def _outside_data(obj: Any) -> Optional[str]:
+    """Why reading `obj` would read another file, or None if it would not.
+
+    A dataset with external storage reads its bytes from files named in its
+    creation properties, and a virtual dataset maps datasets of other files.
+    h5py follows both on any read, silently, so a copy carries that file's
+    contents into the output.
+    """
+    if not is_hdf5_dataset(obj):
+        return None
+    return _dataset_id_outside(obj.id)
+
+
+def _refuse_outside_data(obj: Any) -> None:
+    reason = _outside_data(obj)
+    if reason:
+        raise ExternalDataError(
+            f"{obj.name} {reason}. adata reads only data held in the file itself."
+        )
+
+
+def _dataset_id_outside(dsid: Any) -> Optional[str]:
+    plist = dsid.get_create_plist()
+    if plist.get_layout() == h5py.h5d.VIRTUAL:
+        return "is a virtual dataset, which maps data held in other files"
+    if plist.get_external_count() > 0:
+        return "keeps its data in external files"
+    return None
+
+
+def check_hdf5_contents(group: Any, path: Any = None) -> None:
+    """Refuse an HDF5 file, or a group of one, that reads data from elsewhere.
+
+    Every link below `group` is looked at once, without reading any data:
+    an external link opens another file, and a dataset stored externally or
+    virtually reads one. None of these is something anndata writes, and
+    any of them would quietly copy another file's contents into an output,
+    so the input is refused before anything is read from it.
+    """
+    found: list = []
+
+    def visit(name: bytes, info: Any) -> None:
+        if found:
+            return
+        where = name.decode("utf-8", "replace")
+        if info.type == h5py.h5l.TYPE_EXTERNAL:
+            found.append((where, "is an external link into another file"))
+        elif info.type == h5py.h5l.TYPE_HARD:
+            oid = h5py.h5o.open(group.id, name)
+            if isinstance(oid, h5py.h5d.DatasetID):
+                reason = _dataset_id_outside(oid)
+                if reason:
+                    found.append((where, reason))
+        elif info.type != h5py.h5l.TYPE_SOFT:
+            found.append((where, "is a user-defined link"))
+
+    group.id.links.visit(visit, info=True)
+    if found:
+        where, reason = found[0]
+        base = getattr(group, "name", "/") or "/"
+        element = f"{base.rstrip('/')}/{where}"
+        source = f"'{path}'" if path is not None else "The input"
+        raise ExternalDataError(
+            f"{source} is refused: {element} {reason}. adata reads only "
+            "data held in the file itself."
+        )
+
+
+def check_hdf5_file(path: Path) -> None:
+    """`check_hdf5_contents` for a file on disk that is not open yet."""
+    with h5py.File(path, "r") as handle:
+        check_hdf5_contents(handle, path)
+
+
+#: Suffixes of the HDF5 files a folder source can hold (Space Ranger's
+#: matrices, Xenium's), checked before a converter reads them.
+HDF5_SUFFIXES = (".h5", ".hdf5", ".h5ad", ".h5mu", ".loom")
+
+
+def check_hdf5_inputs(path: Path) -> None:
+    """`check_hdf5_file` for a source that is not opened through
+    `open_store`: an HDF5 file, or the HDF5 files in a folder of outputs."""
+    path = Path(path)
+    if path.is_file():
+        files = [path]
+    elif path.is_dir() and not is_zarr_path(path):
+        files = sorted(
+            p for p in path.rglob("*") if p.suffix in HDF5_SUFFIXES and p.is_file()
+        )
+    else:
+        return
+    for file in files:
+        if h5py.is_hdf5(file):
+            check_hdf5_file(file)
+
+
 def zarr_format_of(obj: Any) -> Optional[int]:
     """The Zarr spec version (2 or 3) backing `obj`, or None for HDF5."""
     return getattr(getattr(obj, "metadata", None), "zarr_format", None)
-
-
-def _decode_attr(value: Any) -> Any:
-    if isinstance(value, bytes):
-        return value.decode("utf-8")
-    return value
 
 
 def _is_writable_mode(mode: str) -> bool:
@@ -186,8 +288,8 @@ def _is_writable_mode(mode: str) -> bool:
 
 
 def has_valid_anndata_root_attrs(root: Any) -> bool:
-    enc_type = _decode_attr(root.attrs.get("encoding-type", None))
-    enc_ver = _decode_attr(root.attrs.get("encoding-version", None))
+    enc_type = spec.decode_attr(root.attrs.get("encoding-type", None))
+    enc_ver = spec.decode_attr(root.attrs.get("encoding-version", None))
     return enc_type == ROOT_ENCODING_TYPE and enc_ver == ROOT_ENCODING_VERSION
 
 
@@ -196,12 +298,27 @@ def ensure_anndata_root_attrs(root: Any) -> None:
     root.attrs["encoding-version"] = ROOT_ENCODING_VERSION
 
 
+def is_legacy_root(root: Any) -> bool:
+    """A root as anndata 0.7 wrote it: no attributes of its own, and `obs`
+    and `var` tagged as that release's dataframes."""
+    if spec.encoding_type(root) is not None:
+        return False
+    for key in ("obs", "var"):
+        frame = root[key] if key in root else None
+        if not is_group(frame) or spec.encoding_of(frame) != (
+            spec.DATAFRAME, spec.LEGACY_DATAFRAME_VERSION
+        ):
+            return False
+    return True
+
+
 def warn_if_missing_anndata_root_attrs(root: Any, *, path: Path) -> None:
-    if has_valid_anndata_root_attrs(root):
+    # anndata 0.7 never stamped the root, so its stores are valid without.
+    if has_valid_anndata_root_attrs(root) or is_legacy_root(root):
         return
 
-    enc_type = _decode_attr(root.attrs.get("encoding-type", None))
-    enc_ver = _decode_attr(root.attrs.get("encoding-version", None))
+    enc_type = spec.decode_attr(root.attrs.get("encoding-type", None))
+    enc_ver = spec.decode_attr(root.attrs.get("encoding-version", None))
     warnings.warn(
         (
             f"Store '{path}' root has missing or invalid AnnData attrs "
@@ -213,21 +330,44 @@ def warn_if_missing_anndata_root_attrs(root: Any, *, path: Path) -> None:
     )
 
 
+def _decoded(value: Any) -> Any:
+    """Bytes as text and numpy values as Python's, at any depth of nesting."""
+    if isinstance(value, (bytes, np.bytes_)):
+        return bytes(value).decode("utf-8")
+    if isinstance(value, (list, tuple)):
+        return [_decoded(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return _decoded(value.tolist())
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _is_reference(value: Any) -> bool:
+    if isinstance(value, (h5py.Reference, h5py.RegionReference)):
+        return True
+    dtype = getattr(value, "dtype", None)
+    return dtype is not None and h5py.check_ref_dtype(dtype) is not None
+
+
+def _attrs_owner(attrs: Any) -> str:
+    """The name of the element `attrs` belong to, for a message."""
+    oid = getattr(attrs, "_id", None)
+    try:
+        return h5py.h5i.get_name(oid).decode("utf-8", "replace")
+    except Exception:  # not an h5py AttributeManager
+        return "an element"
+
+
 def _normalize_attr_value(value: Any, target_backend: str) -> Any:
+    if isinstance(value, h5py.Empty):
+        # An attribute with a null dataspace: present, but holding nothing.
+        return None if target_backend == "zarr" else value
     if target_backend == "zarr":
-        if isinstance(value, bytes):
-            return value.decode("utf-8")
-        if isinstance(value, (list, tuple)):
-            return [v.decode("utf-8") if isinstance(v, bytes) else v for v in value]
-        if isinstance(value, np.ndarray):
-            if value.dtype.kind in ("S", "O"):
-                return [
-                    v.decode("utf-8") if isinstance(v, bytes) else v
-                    for v in value.tolist()
-                ]
-            return value.tolist()
-        if isinstance(value, np.generic):
-            return value.item()
+        return _decoded(value)
+    if value is None:
+        # JSON's null, from a Zarr attribute; HDF5 spells it as nothing.
+        return h5py.Empty("f4")
     return value
 
 
@@ -239,10 +379,17 @@ def copy_attrs(src_attrs: Any, dst_attrs: Any, *, target_backend: str) -> None:
     one at a time means a separate round trip per attribute -- slow, and the
     place a `split` over many groups was observed to wedge in CI.
     """
-    normalized = {
-        str(k): _normalize_attr_value(v, target_backend)
-        for k, v in src_attrs.items()
-    }
+    normalized = {}
+    for k, v in src_attrs.items():
+        if _is_reference(v):
+            # It names an object by its address in the source file, which
+            # means nothing in another: h5py would write a dangling pointer,
+            # and Zarr has no way to hold one.
+            raise ValueError(
+                f"Attribute {k!r} of {_attrs_owner(src_attrs)} is an HDF5 "
+                "object reference, which cannot be copied out of its file."
+            )
+        normalized[str(k)] = _normalize_attr_value(v, target_backend)
     if not normalized:
         return
 
@@ -285,8 +432,9 @@ def dataset_create_kwargs(
         kw["fletcher32"] = bool(src.fletcher32)
         if src.scaleoffset is not None:
             kw["scaleoffset"] = src.scaleoffset
-        if src.fillvalue is not None:
-            kw["fillvalue"] = src.fillvalue
+        fill = _carried_fill(src)
+        if fill is not None:
+            kw["fillvalue"] = fill
     if (
         target_backend == "hdf5"
         and is_zarr_array(src)
@@ -302,7 +450,9 @@ def dataset_create_kwargs(
         kw["compression_opts"] = GZIP_LEVEL
     if target_backend == "zarr" and is_zarr_array(src):
         src_zarr_format = getattr(getattr(src, "metadata", None), "zarr_format", None)
-        target_format = _target_zarr_format(kw_target)
+        # Unknown means "carry nothing version-specific": guessing 3 once
+        # forwarded sharding into v2 arrays, which reject it outright.
+        target_format = kw_target
         # Only when both versions are known and equal can codecs travel.
         same_version = (
             target_format is not None and src_zarr_format == target_format
@@ -313,44 +463,80 @@ def dataset_create_kwargs(
         # accepts the other's. Across versions the target's default is used
         # rather than a translation that fails at creation time.
         if same_version:
+            # `compressors` on both versions: v2's own `compressor` is
+            # deprecated, and an error reading it once meant zarr's default
+            # Blosc. None, or an empty tuple, is "uncompressed", and is
+            # passed on as such -- left out, it too would mean Blosc.
+            compressors = tuple(src.compressors or ())
             if src_zarr_format == 3:
-                try:
-                    compressors = getattr(src, "compressors", None)
-                except Exception:
-                    compressors = None
-                if compressors is not None:
-                    kw["compressors"] = compressors
+                kw["compressors"] = compressors
             else:
-                try:
-                    compressor = getattr(src, "compressor", None)
-                except Exception:
-                    compressor = None
-                if compressor is not None:
-                    kw["compressor"] = compressor
+                kw["compressors"] = compressors[0] if compressors else None
 
-            try:
-                filters = getattr(src, "filters", None)
-            except Exception:
-                filters = None
+            filters = src.filters
             # A v2 string array carries VLenUTF8 in `filters`; the v3 string
             # dtype encodes variable length itself and rejects it.
             if filters and not _is_string_src(src):
                 kw["filters"] = filters
 
-        try:
-            shards = getattr(src, "shards", None)
-        except Exception:
-            shards = None
+        shards = src.shards
         if shards is not None and target_format == 3:
             kw["shards"] = shards
 
-        try:
-            fill_value = getattr(src, "fill_value", None)
-        except Exception:
-            fill_value = None
-        if fill_value is not None and not _is_string_src(src):
+        fill_value = src.fill_value
+        # A record's fill is a value of its fields, which change type when
+        # text is respelt for the target.
+        if (
+            fill_value is not None
+            and not _is_string_src(src)
+            and src.dtype.names is None
+        ):
             kw["fill_value"] = fill_value
     return kw
+
+
+def _carried_fill(src: Any) -> Any:
+    """An HDF5 dataset's fill value, when a copy should keep it.
+
+    Only a number other than zero, HDF5's own default, is worth carrying:
+    every copy writes every value, so the fill is only what the dataset
+    reports. A record's fill holds a value for each field, and when a field
+    is text h5py crashes the process creating a dataset with it.
+    """
+    dtype = src.dtype
+    if dtype.names is not None or dtype.kind not in "biufc":
+        return None
+    fill = src.fillvalue
+    if fill is None or not np.any(np.asarray(fill) != 0):
+        return None
+    return fill
+
+
+def _fill_as(fill: Any, dtype: Any) -> Any:
+    """`fill` converted to `dtype`, or None when it does not survive that.
+
+    A fill carried over from a source of another dtype -- recast to bool of
+    a float matrix -- is refused by h5py unless converted, and one that the
+    conversion would change (NaN for an integer) is better left to HDF5's
+    default than replaced by an arbitrary value.
+    """
+    if dtype is None:
+        return fill
+    try:
+        target = np.dtype(dtype)
+    except TypeError:
+        return None
+    value = np.asarray(fill)
+    if value.dtype == target:
+        return fill
+    if target.names is not None or target.kind not in "biufc":
+        return None
+    with np.errstate(all="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        converted = value.astype(target)
+        if not np.array_equal(converted.astype(value.dtype), value, equal_nan=True):
+            return None
+    return converted[()]
 
 
 def _create_string_dataset(
@@ -420,6 +606,15 @@ def create_dataset(
             kwargs.pop("compressor", None)
             kwargs.pop("filters", None)
 
+    if "fillvalue" in kwargs and not is_zarr_group(parent):
+        kwargs = dict(kwargs)
+        target = dtype if dtype is not None else getattr(data, "dtype", None)
+        if target is None and data is not None:
+            target = np.asarray(data).dtype
+        fill = _fill_as(kwargs.pop("fillvalue"), target)
+        if fill is not None:
+            kwargs["fillvalue"] = fill
+
     if is_zarr_group(parent):
         zarr_format = getattr(getattr(parent, "metadata", None), "zarr_format", None)
         if zarr_format == 3:
@@ -451,10 +646,7 @@ GZIP_LEVEL = 4
 
 def _zarr_is_compressed(src: Any) -> bool:
     """Does this Zarr array carry a compressor? (`compressors` covers v2 too.)"""
-    try:
-        return bool(getattr(src, "compressors", None))
-    except Exception:
-        return False
+    return bool(src.compressors)
 
 
 def fit_chunks(kw: dict, shape: Sequence[int], *, backend: str) -> dict:
@@ -566,23 +758,9 @@ def with_compression(
 
 
 def _is_null(src: Any) -> bool:
-    """Is `src` an explicit null -- `h5py.Empty` on HDF5, or tagged `null`?"""
-    if is_hdf5_dataset(src) and src.shape is None:
-        return True
-    value = src.attrs.get("encoding-type", None)
-    if isinstance(value, bytes):
-        value = value.decode("utf-8")
-    return value == "null"
-
-
-def _target_zarr_format(zarr_format: Optional[int]) -> Optional[int]:
-    """The destination's Zarr version, or None when the caller did not say.
-
-    Deliberately not defaulting to 3: guessing meant v3-only options such as
-    sharding were forwarded into v2 arrays, which reject them outright.
-    Unknown means "carry nothing version-specific".
-    """
-    return zarr_format
+    """Is `src` anndata's null: tagged `null`, an empty dataspace on HDF5 and
+    a 0-d bool on Zarr? An empty dataspace without the tag is not one."""
+    return spec.encoding_type(src) == spec.NULL
 
 
 def _is_string_src(src: Any) -> bool:
@@ -728,6 +906,7 @@ def copy_dataset(
     from adata.elements.strings import target_dtype
 
     target_backend = "zarr" if is_zarr_group(dst_group) else "hdf5"
+    _refuse_outside_data(src)
     if _is_null(src):
         # anndata writes an absent element, `raw` most often, as a null: an
         # empty dataspace on HDF5 and a 0-d bool on Zarr. Neither can be read
@@ -738,6 +917,19 @@ def copy_dataset(
         ds = write_null(dst_group, name)
         copy_attrs(src.attrs, ds.attrs, target_backend=target_backend)
         return ds
+    if is_hdf5_dataset(src) and src.shape is None:
+        return _copy_empty(src, dst_group, name, target_backend)
+    if is_hdf5_dataset(src):
+        _refuse_beyond_zarr(src, target_backend)
+        if h5py.check_ref_dtype(src.dtype) is not None:
+            # References name objects by their address in the source. HDF5's
+            # own copy brings what they point to along and repoints them.
+            dst_group.copy(src, dst_group, name, expand_refs=True)
+            return dst_group[name]
+    if src.dtype.names is not None:
+        return _copy_records(
+            src, dst_group, name, compression=compression, skip_attrs=skip_attrs
+        )
 
     shape = tuple(src.shape)
     zformat = zarr_format_of(dst_group)
@@ -777,16 +969,123 @@ def copy_dataset(
     return ds
 
 
-#: A dataframe as anndata 0.7 wrote it: each categorical a dataset of codes
-#: whose `categories` attribute is an object reference into `__categories`.
-LEGACY_DATAFRAME_VERSION = "0.1.0"
+def _copy_empty(src: Any, dst_group: Any, name: str, target_backend: str) -> Any:
+    """An HDF5 empty dataspace that is not tagged `null`.
+
+    anndata never writes one; other HDF5 writers leave them. Tagging it
+    `null` on the way, as once happened, made a store anndata 0.8 to 0.11
+    read into one they refuse. HDF5 copies it as it is; Zarr has no empty
+    dataspace, and any value written in its place would be invented, so it
+    is left out, and said so.
+    """
+    if target_backend == "hdf5":
+        ds = dst_group.create_dataset(name, data=h5py.Empty(src.dtype))
+        copy_attrs(src.attrs, ds.attrs, target_backend=target_backend)
+        return ds
+    warnings.warn(
+        f"Not copied: {src.name}, an HDF5 empty dataspace with no encoding, "
+        "which Zarr cannot hold.",
+        UserWarning,
+        stacklevel=3,
+    )
+    return None
+
+
+def _refuse_beyond_zarr(src: Any, target_backend: str) -> None:
+    """Refuse an HDF5 dataset Zarr cannot hold, before anything is written.
+
+    Its dtype is an `object` to numpy, which this layer once took for text:
+    variable-length numbers came out as the strings '[1 2 3]'.
+    """
+    if target_backend != "zarr":
+        return
+    if h5py.check_ref_dtype(src.dtype) is not None:
+        raise ValueError(
+            f"{src.name} holds HDF5 object references, which cannot be "
+            "copied to Zarr."
+        )
+    base = h5py.check_vlen_dtype(src.dtype)
+    if base is not None and base not in (str, bytes):
+        raise ValueError(
+            f"{src.name} holds variable-length sequences of {np.dtype(base)}, "
+            "which Zarr cannot store."
+        )
+
+
+def _copy_records(
+    src: Any, dst_group: Any, name: str, *, compression: Optional[str] = None,
+    skip_attrs: Sequence[str] = (),
+) -> Any:
+    """A record array (`rec-array`, scanpy's `rank_genes_groups`), field by
+    field.
+
+    Each backend spells a text field its own way and refuses the other's:
+    h5py variable-length str (an `object` to numpy, which Zarr calls
+    ambiguous), Zarr fixed-width `<U` (which h5py has no conversion for).
+    Text fields are respelt as anndata writes them, and the rest kept.
+    """
+    from adata.elements.strings import as_records, record_dtype
+
+    target_backend = "zarr" if is_zarr_group(dst_group) else "hdf5"
+    zformat = zarr_format_of(dst_group)
+    shape = tuple(src.shape)
+    # Rows per read: a text field's real width hides behind a pointer.
+    row = sum(
+        VLEN_ELEMENT_BYTES if sub.hasobject else sub.itemsize
+        for sub, *_ in src.dtype.fields.values()
+    )
+    step = _chunk_step(shape, getattr(src, "chunks", None), np.dtype(f"V{max(1, row)}"))
+    blocks = [(0, 0)] if shape == () else [
+        (start, min(start + step, shape[0])) for start in range(0, shape[0], step)
+    ]
+
+    def read(block: tuple) -> np.ndarray:
+        return np.asarray(src[()] if shape == () else src[block[0]:block[1]])
+
+    widths: dict = {}
+    if target_backend == "zarr":
+        # A fixed width has to be known before the array exists: one pass
+        # to measure the variable-length fields, a second to copy.
+        from adata.elements.strings import text_field_widths
+
+        for block in blocks:
+            for field, width in text_field_widths(read(block)).items():
+                widths[field] = max(width, widths.get(field, 1))
+    dtype = record_dtype(src.dtype, target_backend, widths)
+
+    kw = dataset_create_kwargs(src, target_backend=target_backend, zarr_format=zformat)
+    if compression is not None:
+        kw = with_compression(
+            kw, compression, shape=shape, dtype=dtype,
+            backend=target_backend, zarr_format=zformat,
+        )
+    with warnings.catch_warnings():
+        # zarr notes, on every write, that Zarr v3 has no specification for a
+        # record dtype yet. anndata writes rec-arrays to v3 just the same.
+        warnings.filterwarnings("ignore", message=".*does not have a Zarr V3 specification")
+        ds = create_dataset(
+            dst_group, name, shape=shape, dtype=dtype,
+            **fit_chunks(kw, shape, backend=target_backend),
+        )
+        attrs = src.attrs if not skip_attrs else {
+            k: v for k, v in src.attrs.items() if k not in skip_attrs
+        }
+        copy_attrs(attrs, ds.attrs, target_backend=target_backend)
+        for block in blocks:
+            values = as_records(read(block), dtype)
+            if shape == ():
+                ds[()] = values
+            else:
+                ds[block[0]:block[1]] = values
+    return ds
 
 
 def is_legacy_dataframe(obj: Any) -> bool:
-    return (
-        is_group(obj)
-        and _decode_attr(obj.attrs.get("encoding-type", None)) == "dataframe"
-        and str(_decode_attr(obj.attrs.get("encoding-version", None))) == LEGACY_DATAFRAME_VERSION
+    """A dataframe as anndata 0.7 wrote it: each categorical a dataset of
+    codes whose `categories` attribute is an object reference into
+    `__categories`."""
+    return is_group(obj) and spec.encoding_of(obj) == (
+        spec.DATAFRAME, spec.LEGACY_DATAFRAME_VERSION
     )
 
 
@@ -807,13 +1106,14 @@ def write_legacy_categorical(
     file nulls it, and Zarr cannot hold one -- so the column is rewritten in
     the layout anndata has written since 0.8, which needs none.
     """
-    from adata.elements.read import categories_dataset
+    from adata.elements.read import categories_dataset, is_ordered
 
     target_backend = "zarr" if is_zarr_group(dst_group) else "hdf5"
     group = dst_group.create_group(name)
     copy_attrs({
-        "encoding-type": "categorical", "encoding-version": "0.2.0",
-        "ordered": bool(_decode_attr(codes_src.attrs.get("ordered", False))),
+        "encoding-type": spec.CATEGORICAL,
+        "encoding-version": spec.CURRENT_VERSION[spec.CATEGORICAL],
+        "ordered": is_ordered(codes_src, frame),
     }, group.attrs, target_backend=target_backend)
     categories = categories_dataset(codes_src, frame)
     if kept is None:
@@ -843,7 +1143,7 @@ def copy_legacy_dataframe(
     target_backend = "zarr" if is_zarr_group(dst_group) else "hdf5"
     grp = dst_group.create_group(name)
     copy_attrs(src.attrs, grp.attrs, target_backend=target_backend)
-    grp.attrs["encoding-version"] = "0.2.0"
+    grp.attrs["encoding-version"] = spec.CURRENT_VERSION[spec.DATAFRAME]
     for key in src.keys():
         child = src[key]
         if key == "__categories":
@@ -871,7 +1171,14 @@ def copy_tree(
         # HDF5's own copy keeps every dataset exactly as it was, which is
         # what is wanted unless the caller asked for something else.
         if not exclude and compression is None:
-            dst_group.copy(src_obj, dst_group, name)
+            if is_hdf5_group(src_obj):
+                check_hdf5_contents(src_obj)
+            else:
+                _refuse_outside_data(src_obj)
+            # References below it -- anndata 0.7's categoricals, in a frame
+            # nested in raw, obsm or uns -- would otherwise come out null:
+            # with expand_refs HDF5 repoints them at their copies.
+            dst_group.copy(src_obj, dst_group, name, expand_refs=True)
             return dst_group[name]
     if is_dataset(src_obj):
         return copy_dataset(src_obj, dst_group, name, compression=compression)

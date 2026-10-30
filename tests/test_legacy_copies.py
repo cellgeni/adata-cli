@@ -132,3 +132,27 @@ def test_compression_applies_to_legacy_codes_taken_onto_a_modality(tmp_path):
         # Its labels are HDF5 strings, which are never compressed: only
         # their heap pointers would be.
         assert f["obs/leiden/codes"].compression == "gzip"
+
+
+def test_a_modality_with_a_legacy_raw_var_converts_to_h5ad(tmp_path):
+    """F006: a modality's raw, copied whole by h5py, kept raw/var's 0.1.0
+    categoricals with null references, and anndata could not open the
+    output: 'Invalid HDF5 object reference'."""
+    from tests.conftest import write_h5mu
+
+    truth = write_h5mu(tmp_path / "in.h5mu")
+    rna = truth.mods["rna"]
+    kinds = ["x" if i % 2 else "y" for i in range(rna.n_vars)]
+    with h5py.File(truth.path, "a") as f:
+        mod = f["mod/rna"]
+        if "raw" in mod:
+            del mod["raw"]
+        raw = mod.create_group("raw")
+        raw.attrs.update({"encoding-type": "raw", "encoding-version": "0.1.0"})
+        raw.create_dataset("X", data=np.ones((rna.n_obs, rna.n_vars), dtype=np.float32))
+        _legacy_frame(raw, "var", list(rna.var_names), {"kind": kinds})
+    out = tmp_path / "out.h5ad"
+    _ok("convert", truth.path, "-o", out, "--mod", "rna")
+    got = _read(out)
+    assert list(got.raw.var["kind"]) == kinds
+    assert list(got.raw.var_names) == list(rna.var_names)

@@ -559,3 +559,222 @@ def test_copy_dataset_of_a_row_chunked_source_round_trips(new_store):
         create_dataset(root["uns"], "src", data=values, chunks=(1, 4))
         copy_dataset(root["uns"]["src"], root["uns"], "dst")
         assert np.array_equal(root["uns"]["dst"][...], values)
+
+
+# ---------------------------------------------------------------------------
+# Data held outside the file
+
+
+def _anndata_root(f) -> None:
+    import h5py
+
+    f.attrs.update({"encoding-type": "anndata", "encoding-version": "0.1.0"})
+    for key, n in (("obs", 1), ("var", 8)):
+        frame = ew.write_dataframe_header(f, key, [f"{key}{i}" for i in range(n)], [])
+        assert isinstance(frame, h5py.Group)
+
+
+def _outside_file(temp_dir, kind: str):
+    """An h5ad whose X takes its data from another file."""
+    import h5py
+
+    other = temp_dir / "other.bin"
+    other.write_bytes(bytes(range(8)))
+    path = temp_dir / f"{kind}.h5ad"
+    with h5py.File(temp_dir / "other.h5", "w") as f:
+        f.create_dataset("data", data=np.arange(8, dtype="u1").reshape(1, 8))
+    with h5py.File(path, "w") as f:
+        _anndata_root(f)
+        if kind == "external":
+            ds = f.create_dataset("X", shape=(1, 8), dtype="u1", external=[(str(other), 0, 8)])
+        elif kind == "virtual":
+            layout = h5py.VirtualLayout(shape=(1, 8), dtype="u1")
+            layout[:] = h5py.VirtualSource(str(temp_dir / "other.h5"), "data", shape=(1, 8))
+            ds = f.create_virtual_dataset("X", layout)
+        else:
+            f["X"] = h5py.ExternalLink(str(temp_dir / "other.h5"), "data")
+            return path
+        spec.set_encoding(ds, spec.ARRAY)
+    return path
+
+
+KINDS = ["external", "virtual", "link"]
+
+
+def _cli_out(result) -> str:
+    import re
+
+    text = result.stdout + (result.stderr or "")
+    return " ".join(re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", text).split())
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_store_reading_another_file_is_refused_on_opening(temp_dir, kind):
+    """F041: a dataset or link whose data lives in another file was read
+    like any other, and copied into the output."""
+    from adata.storage import ExternalDataError
+
+    path = _outside_file(temp_dir, kind)
+    with pytest.raises(ExternalDataError, match=r"/X (keeps its data|is a virtual|is an external link)"):
+        open_store(path, "r")
+    with pytest.raises(ExternalDataError):
+        open_store(path, "a")
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["convert", "{src}", "-o", "{tmp}/out.zarr"],
+        ["convert", "{src}", "-o", "{tmp}/out.h5ad"],
+        ["subset", "{src}", "-q", "_index == 'obs0'", "-o", "{tmp}/out.h5ad"],
+        ["export", "array", "{src}", "X", "-o", "{tmp}/out.npy"],
+        ["view", "{src}"],
+    ],
+    ids=["convert-zarr", "convert-h5ad", "subset", "export", "view"],
+)
+def test_every_command_refuses_a_store_reading_another_file(temp_dir, kind, command):
+    """F041: commands read, copied and exported such data without a word."""
+    from typer.testing import CliRunner
+
+    from adata.cli import app
+
+    src = _outside_file(temp_dir, kind)
+    args = [a.format(src=src, tmp=temp_dir) for a in command]
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == 1, _cli_out(result)
+    assert "is refused" in _cli_out(result)
+    assert not list(temp_dir.glob("out*"))
+
+
+def test_an_hdf5_matrix_reading_another_file_is_refused_by_convert(temp_dir):
+    """F041: the other converters open their HDF5 with h5py directly."""
+    import h5py
+    from typer.testing import CliRunner
+
+    from adata.cli import app
+    from tests.conftest import write_10x_h5
+
+    h5 = write_10x_h5(
+        temp_dir / "m.h5", np.eye(3, dtype=np.int32),
+        barcodes=["a-1", "b-1", "c-1"], ids=["g1", "g2", "g3"], names=["G1", "G2", "G3"],
+    )
+    secret = temp_dir / "other.bin"
+    secret.write_bytes(np.ones(3, dtype=np.int32).tobytes())
+    with h5py.File(h5, "a") as f:
+        del f["matrix/data"]
+        f.create_dataset("matrix/data", shape=(3,), dtype=np.int32, external=[(str(secret), 0, 12)])
+    result = CliRunner().invoke(app, ["convert", str(h5), "-o", str(temp_dir / "out.h5ad")])
+    assert result.exit_code == 1
+    assert "/matrix/data keeps its data in external files" in _cli_out(result)
+    assert not (temp_dir / "out.h5ad").exists()
+
+
+@pytest.mark.parametrize("kind", ["external", "virtual"])
+def test_copy_tree_refuses_data_held_in_another_file(temp_dir, kind):
+    """F041: a copy from a file not opened through open_store (MuData's
+    modalities are copied from an h5py handle) is checked too."""
+    import h5py
+
+    from adata.storage import ExternalDataError
+
+    src = _outside_file(temp_dir, kind)
+    with h5py.File(src, "r") as f, open_store(temp_dir / "out.h5ad", "w") as dst:
+        for compression in (None, "gzip"):
+            with pytest.raises(ExternalDataError):
+                copy_tree(f["X"], dst.root, f"X_{compression}", compression=compression)
+        group = dst.root.create_group("holder")
+        with pytest.raises(ExternalDataError):
+            copy_tree(f, group, "everything")
+
+
+def test_a_store_holding_only_its_own_data_opens(temp_dir):
+    import h5py
+
+    path = temp_dir / "plain.h5ad"
+    with h5py.File(path, "w") as f:
+        _anndata_root(f)
+        f["X"] = np.ones((1, 8))
+        f["alias"] = h5py.SoftLink("/X")
+    with open_store(path, "r") as store:
+        assert store.root["alias"].shape == (1, 8)
+
+
+# ---------------------------------------------------------------------------
+# Fill values and attributes
+
+
+def test_a_fill_value_is_converted_with_the_dtype_or_left_out():
+    """F071: a float source's fill went to a bool dataset unconverted, which
+    h5py refuses; one the conversion would change is left to the default."""
+    from adata.storage import _fill_as
+
+    assert _fill_as(np.float32(1.0), np.bool_) == np.True_
+    assert _fill_as(np.float64(7.0), np.int16) == 7
+    assert _fill_as(np.float64(0.5), np.int16) is None
+    assert _fill_as(np.float64(np.nan), np.int64) is None
+    assert np.isnan(_fill_as(np.float32(np.nan), np.float64))
+    assert _fill_as(np.int8(3), np.dtype([("a", "i4")])) is None
+
+
+def test_only_a_numeric_fill_other_than_zero_is_carried(temp_dir):
+    """F021: a record's fill, a value for each field, crashed h5py when the
+    fields were text; and a zero fill is HDF5's default anyway."""
+    import h5py
+
+    path = temp_dir / "src.h5"
+    with h5py.File(path, "w") as f:
+        f.create_dataset("zero", shape=(4,), dtype="f4")
+        f.create_dataset("nan", shape=(4,), dtype="f4", fillvalue=np.nan)
+        f.create_dataset("records", shape=(4,), dtype=[("a", h5py.string_dtype()), ("b", "f4")])
+    with h5py.File(path, "r") as f:
+        assert "fillvalue" not in dataset_create_kwargs(f["zero"], target_backend="hdf5")
+        assert np.isnan(dataset_create_kwargs(f["nan"], target_backend="hdf5")["fillvalue"])
+        assert "fillvalue" not in dataset_create_kwargs(f["records"], target_backend="hdf5")
+        with open_store(temp_dir / "dst.h5ad", "w") as dst:
+            ds = copy_dataset(f["nan"], dst.root, "nan")
+            assert np.isnan(ds.fillvalue)
+            from adata.storage import create_dataset
+
+            kw = dataset_create_kwargs(f["nan"], target_backend="hdf5")
+            assert create_dataset(dst.root, "as_int", shape=(4,), dtype="i4", **kw).fillvalue == 0
+
+
+def test_copy_attrs_decodes_nested_bytes_and_empties_for_zarr(temp_dir):
+    """F130: bytes were decoded one level deep, and h5py.Empty not at all."""
+    import h5py
+
+    src_path = temp_dir / "src.h5ad"
+    with h5py.File(src_path, "w") as f:
+        f.attrs["grid"] = np.array([[b"a", b"b"], [b"c", b"d"]])
+        f.attrs["nothing"] = h5py.Empty("f4")
+        f.attrs["words"] = np.array(["x", "y"], dtype=h5py.string_dtype())
+    with h5py.File(src_path, "r") as src, open_store(temp_dir / "dst.zarr", "w") as dst:
+        copy_attrs(src.attrs, dst.root.attrs, target_backend="zarr")
+    with open_store(temp_dir / "dst.zarr", "r") as dst:
+        assert dst.root.attrs["grid"] == [["a", "b"], ["c", "d"]]
+        assert dst.root.attrs["nothing"] is None
+        assert dst.root.attrs["words"] == ["x", "y"]
+
+
+def test_dataset_create_kwargs_keeps_a_v2_arrays_compression_or_its_absence(temp_dir):
+    """F134, F135: a v2 array's codec was read through the deprecated
+    `compressor`, and an uncompressed one forwarded nothing, so zarr gave it
+    Blosc."""
+    import numcodecs
+
+    src = temp_dir / "v2.zarr"
+    with open_store(src, "w", zarr_format=2) as store:
+        store.root.create_array("zstd", data=np.arange(10), compressors=numcodecs.Zstd(level=5))
+        store.root.create_array("none", data=np.arange(10), compressors=None)
+    with open_store(src, "r") as store, open_store(temp_dir / "out.zarr", "w", zarr_format=2) as out:
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            for key in ("zstd", "none"):
+                kw = dataset_create_kwargs(store.root[key], target_backend="zarr", zarr_format=2)
+                copy_dataset(store.root[key], out.root, key)
+        assert out.root["zstd"].compressors == (numcodecs.Zstd(level=5),)
+        assert out.root["none"].compressors == ()
+        assert kw["compressors"] is None

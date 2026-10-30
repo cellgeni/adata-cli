@@ -178,7 +178,8 @@ def categories_dataset(col: Any, parent_group: Any | None = None) -> Any:
             return cats_grp[col_name]
 
     if cats_ref is not None and isinstance(cats_ref, (str, bytes)):
-        # Legacy Zarr: `categories` is an absolute path within the store.
+        # Legacy Zarr: `categories` names the labels' array by path, relative
+        # to the frame (`__categories/<key>`, as anndata 0.7 wrote it).
         path = spec.decode_attr(cats_ref).lstrip("/")
         if parent_group is not None and path.split("/")[-1] in parent_group:
             return parent_group[path.split("/")[-1]]
@@ -194,9 +195,22 @@ def read_categories(col: Any, parent_group: Any | None = None) -> np.ndarray:
     return np.asarray(decode_str_array(categories_dataset(col, parent_group)[...]), dtype=str)
 
 
-def is_ordered(col: Any) -> bool:
-    """Whether a categorical column declares an order over its categories."""
-    return bool(spec.decode_attr(col.attrs.get("ordered", False)))
+def is_ordered(col: Any, parent_group: Any | None = None) -> bool:
+    """Whether a categorical column declares an order over its categories.
+
+    anndata 0.7 kept a column's `ordered` on its labels, in `__categories`,
+    not on the codes, so a legacy column (a dataset of codes) is looked up
+    there too: reading only the codes made every such column unordered.
+    """
+    if spec.decode_attr(col.attrs.get("ordered", False)):
+        return True
+    if is_dataset(col) and "categories" in col.attrs:
+        try:
+            labels = categories_dataset(col, parent_group)
+        except KeyError:
+            return False
+        return bool(spec.decode_attr(labels.attrs.get("ordered", False)))
+    return False
 
 
 def read_categorical_column(
@@ -222,10 +236,17 @@ def read_categorical_column(
 
 
 def _format_values(values: np.ndarray) -> List[str]:
-    """Render a numeric or text array as strings without a lossy detour."""
+    """Render a numeric or text array as strings without a lossy detour.
+
+    A float32 or float16 is written at its own precision, the shortest text
+    that reads back as the same value, as pandas writes it: widened to a
+    Python float first, 0.1 became 0.10000000149011612.
+    """
     arr = np.asarray(values)
     if arr.dtype.kind in ("O", "S", "U", "T"):
         return decode_str_array(arr).tolist()
+    if arr.dtype.kind == "f" and arr.dtype.itemsize < 8:
+        return [str(v) for v in arr.reshape(-1)]
     return [str(v) for v in arr.tolist()]
 
 
