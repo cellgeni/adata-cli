@@ -156,3 +156,24 @@ def test_a_modality_with_a_legacy_raw_var_converts_to_h5ad(tmp_path):
     got = _read(out)
     assert list(got.raw.var["kind"]) == kinds
     assert list(got.raw.var_names) == list(rna.var_names)
+
+
+def test_a_nested_legacy_column_named_before_its_labels_leaves_no_stray_link(tmp_path):
+    """F006: HDF5 copies in name order, so a column sorting before
+    `__categories` ("Phase") had its labels copied ahead of their place in
+    the tree, under a second name at the output's root,
+    `~obj_pointed_by_<n>`."""
+    path = tmp_path / "legacy.h5ad"
+    with h5py.File(path, "w") as f:
+        _legacy_frame(f, "obs", CELLS, {"Phase": ["G1", "S", "G1", "G2M"]})
+        _legacy_frame(f, "var", ["g1", "g2"], {"kind": ["x", "y"]})
+        f.create_dataset("X", data=np.arange(8, dtype=np.float32).reshape(4, 2))
+        raw = f.create_group("raw")
+        raw.attrs.update({"encoding-type": "raw", "encoding-version": "0.1.0"})
+        raw.create_dataset("X", data=np.ones((4, 2), dtype=np.float32))
+        _legacy_frame(raw, "var", ["g1", "g2"], {"Kind": ["x", "y"]})
+    out = tmp_path / "out.h5ad"
+    _ok("convert", path, "-o", out)
+    with h5py.File(out) as f:
+        assert not [k for k in f if k.startswith("~")]
+    assert list(_read(out).raw.var["Kind"]) == ["x", "y"]

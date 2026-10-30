@@ -306,17 +306,80 @@ def test_a_dataset_of_references_is_refused_by_zarr(tmp_path):
     assert "/uns/pointers holds HDF5 object references" in _out(result)
 
 
-def test_a_dataset_of_references_copies_between_h5ad_files_with_compression(tmp_path):
-    """F126: copied dataset by dataset, its references were stringified."""
+@pytest.mark.parametrize("extra", [[], ["--compression", "gzip"]], ids=["whole", "by-dataset"])
+def test_a_reference_out_of_the_element_copied_is_refused_between_h5ad_files(tmp_path, extra):
+    """F126: copied dataset by dataset, references were stringified; copied
+    whole, HDF5 took their targets along -- here all of X, again, as a
+    stray `~obj_pointed_by_...` at the output's root. Both copies now refuse
+    a reference that leaves the element, alike."""
     def build(f):
         f["uns"].create_dataset("pointers", data=np.array([f["X"].ref], dtype=h5py.ref_dtype))
+        f["uns"].create_dataset("v", data=np.arange(2)).attrs["link"] = f["X"].ref
+
+    src = _with_uns(tmp_path / "src.h5ad", build)
+    result = runner.invoke(app, ["convert", str(src), "-o", str(tmp_path / "out.h5ad"), *extra])
+    assert result.exit_code == 1
+    assert re.search(r"/uns/(pointers|v) (holds HDF5 object references|refers to /X|is an HDF5 object reference)|Attribute 'link' of /uns/v", _out(result))
+    assert not (tmp_path / "out.h5ad").exists()
+
+
+def test_a_reference_inside_the_element_copied_is_repointed(tmp_path):
+    """F006's mechanism, for any reference that stays inside the element
+    copied: HDF5 points it at the copy of its target."""
+    def build(f):
+        group = f["uns"].create_group("g")
+        group.create_dataset("target", data=np.arange(3))
+        group.create_dataset("pointer", data=np.array([group["target"].ref], dtype=h5py.ref_dtype))
 
     src = _with_uns(tmp_path / "src.h5ad", build)
     out = tmp_path / "out.h5ad"
+    _ok("convert", src, "-o", out)
+    with h5py.File(out) as f:
+        target = f[f["uns/g/pointer"][0]]
+        assert target.name == "/uns/g/target"
+        np.testing.assert_array_equal(target[...], np.arange(3))
+        assert [k for k in f if k.startswith("~")] == []
+
+
+@pytest.mark.parametrize("target", ["out.zarr", "out.h5ad"])
+def test_a_record_with_a_field_of_variable_length_numbers(tmp_path, target):
+    """F126, for a record field: its numbers were taken for text, which h5py
+    refused with an error about a str, and Zarr with 'ambiguous Object'."""
+    def build(f):
+        dtype = np.dtype([("name", h5py.string_dtype()), ("values", h5py.vlen_dtype(np.int32))])
+        ds = f["uns"].create_dataset("records", shape=(2,), dtype=dtype)
+        ds[0] = ("a", np.array([1, 2], dtype=np.int32))
+        ds[1] = ("b", np.array([3], dtype=np.int32))
+
+    src = _with_uns(tmp_path / "src.h5ad", build)
+    out = tmp_path / target
+    if target.endswith("zarr"):
+        result = runner.invoke(app, ["convert", str(src), "-o", str(out)])
+        assert result.exit_code == 1
+        assert "/uns/records holds variable-length sequences of int32" in _out(result)
+        return
     _ok("convert", src, "-o", out, "--compression", "gzip")
     with h5py.File(out) as f:
-        target = f[f["uns/pointers"][0]]
-        np.testing.assert_array_equal(target[...], np.ones((2, 2), dtype=np.float32))
+        rows = f["uns/records"][...]
+        assert [r["name"] for r in rows] == [b"a", b"b"]
+        assert [list(r["values"]) for r in rows] == [[1, 2], [3]]
+
+
+def test_concat_keeps_a_rank_genes_groups_result_every_input_shares(tmp_path):
+    """scanpy's marker genes went through `--uns-merge same` as raw bytes,
+    which for h5py's text are heap pointers: two identical results never
+    compared equal, and the merge dropped them. anndata.concat keeps them."""
+    truth = _marker_genes()
+    a = _write(truth, tmp_path / "a.h5ad", "h5ad")
+    other = truth.copy()
+    other.obs_names = [f"d{i}" for i in range(other.n_obs)]
+    b = _write(other, tmp_path / "b.zarr", "zarr3")
+    out = tmp_path / "out.h5ad"
+    _ok("concat", a, b, "-o", out, "--uns-merge", "same")
+    want = ad.concat([_read(a), _read(b)], uns_merge="same")
+    got = _read(out)
+    assert sorted(got.uns["rank_genes_groups"]) == sorted(want.uns["rank_genes_groups"])
+    _same_markers(got, truth)
 
 
 # ---------------------------------------------------------------------------
@@ -458,6 +521,23 @@ def test_a_null_anndata_wrote_stays_a_null_in_every_backend(tmp_path):
 
 # ---------------------------------------------------------------------------
 # Fill values
+
+
+@pytest.mark.parametrize("fill", [np.nan, 2.0])
+def test_recast_to_bool_works_when_the_source_has_a_fill_of_its_own(tmp_path, fill):
+    """F071: a dense matrix made sparse creates its arrays as growable h5py
+    datasets, and the float fill went to them unconverted."""
+    values = np.array([[0, 1, 0], [1, 1, 0]], dtype=np.float32)
+    src = _write(ad.AnnData(values), tmp_path / "src.h5ad", "h5ad")
+    with h5py.File(src, "a") as f:
+        attrs = dict(f["X"].attrs)
+        del f["X"]
+        f.create_dataset("X", data=values, chunks=(1, 3), fillvalue=fill).attrs.update(attrs)
+    out = tmp_path / "out.h5ad"
+    _ok("recast", src, "X", "--dtype", "bool", "--layout", "csr", "-o", out)
+    got = _read(out).X
+    assert got.dtype == np.bool_
+    np.testing.assert_array_equal(got.toarray(), values.astype(bool))
 
 
 @pytest.mark.parametrize("layout", ["csr", "csc", "dense"])

@@ -346,8 +346,11 @@ Two HDF5 dtypes have no Zarr equivalent, and a copy to Zarr refuses them
 before writing anything, naming the element: variable-length sequences of
 numbers (`h5py.vlen_dtype(int)`) and object references, whether a dataset of
 them or an attribute holding one. Neither is anything anndata writes.
-Between HDF5 files both are copied, references pointed at the copies of
-what they named.
+Between HDF5 files, variable-length numbers are copied. A reference is
+copied only inside an element HDF5 copies whole, pointing at the copy of
+its target (as anndata 0.7's categoricals in a nested dataframe are); one
+that leads out of the element, or is copied on its own (`--compression`
+copies dataset by dataset), is refused, naming it.
 
 ### Elements with no `encoding-type`
 

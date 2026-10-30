@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from adata.elements import spec
-from adata.storage import is_dataset, is_group, is_hdf5_dataset
+from adata.storage import is_dataset, is_group, is_hdf5_dataset, refuse_outside_data
 
 
 def decode_str_array(array: np.ndarray) -> np.ndarray:
@@ -168,8 +168,16 @@ def categories_dataset(col: Any, parent_group: Any | None = None) -> Any:
 
     cats_ref = col.attrs.get("categories", None)
     if cats_ref is not None and is_hdf5_dataset(col):
-        # Legacy 0.7.x HDF5: an object reference into __categories.
-        return col.file[cats_ref]
+        # Legacy 0.7.x HDF5: an object reference into __categories. It can
+        # reach an object no link names, which no walk of the file met.
+        labels = col.file[cats_ref]
+        if labels.name is None:
+            raise ValueError(
+                f"The categories of {col.name} are an object with no name in "
+                "the file, which adata does not read."
+            )
+        refuse_outside_data(labels)
+        return labels
 
     if parent_group is not None and "__categories" in parent_group:
         col_name = str(getattr(col, "name", "")).split("/")[-1]

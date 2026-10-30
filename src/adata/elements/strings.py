@@ -121,7 +121,7 @@ def as_records(values: np.ndarray, dtype: np.dtype) -> np.ndarray:
     for field in dtype.names:
         column = values[field]
         target = dtype.fields[field][0]
-        if is_string_dtype(target) and target.kind != column.dtype.kind or target.kind == "O":
+        if is_string_dtype(target) and (target.kind == "O" or target.kind != column.dtype.kind):
             column = as_str_array(column)
         out[field] = column
     return out

@@ -346,7 +346,13 @@ HDF5 lets a dataset keep its data in other files (external storage, or a
 virtual dataset mapping datasets of other files), and lets a link point
 into another file. anndata writes none of these. This tool reads only data
 held in the file itself: a store holding any of them is refused when it is
-opened, naming the element, and so is an HDF5 source of `convert`.
+opened, naming the element, and so is an HDF5 source of `convert` (with the
+HDF5 files of a folder source). So is an object reference to an object the
+file gives no name, which no walk of its links would meet.
+
+A reference is copied to another HDF5 file only inside an element HDF5
+copies whole, pointed at the copy of its target; one leading out of the
+element is refused, as is a dataset of references copied on its own.
 
 ### Elements with no `encoding-type`
 

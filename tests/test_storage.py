@@ -778,3 +778,57 @@ def test_dataset_create_kwargs_keeps_a_v2_arrays_compression_or_its_absence(temp
         assert out.root["zstd"].compressors == (numcodecs.Zstd(level=5),)
         assert out.root["none"].compressors == ()
         assert kw["compressors"] is None
+
+
+def test_a_reference_to_an_object_no_link_names_is_refused(temp_dir):
+    """F041: the check walked links, and an object reachable only through a
+    reference -- here a legacy categorical's labels, created without a name
+    and holding external data -- was never seen, and was read."""
+    import h5py
+
+    from adata.storage import ExternalDataError
+
+    other = temp_dir / "other.bin"
+    other.write_bytes(b"ABC")
+    path = temp_dir / "anon.h5ad"
+    with h5py.File(path, "w") as f:
+        for key in ("obs", "var"):
+            frame = f.create_group(key)
+            frame.attrs.update({"_index": "_index", "encoding-type": "dataframe", "encoding-version": "0.1.0"})
+            frame.create_dataset("_index", data=np.array([b"a", b"b", b"c"]))
+        # A group linked to itself outlives its last name: what it holds is
+        # then reachable by reference only.
+        hidden = f.create_group("hidden")
+        h5py.h5o.link(hidden.id, hidden.id, b"self")
+        labels = hidden.create_dataset("labels", shape=(3,), dtype="S1", external=[(str(other), 0, 3)])
+        codes = f["obs"].create_dataset("kind", data=np.array([0, 1, 2], dtype="i1"))
+        codes.attrs["categories"] = labels.ref
+        del f["hidden"]
+    with pytest.raises(ExternalDataError, match="/obs/kind refers to an object with no name"):
+        open_store(path, "r")
+    with h5py.File(path, "r") as f:
+        from adata.elements.read import categories_dataset
+
+        with pytest.raises(ValueError, match="no name in the file"):
+            categories_dataset(f["obs/kind"], f["obs"])
+
+
+def test_the_hdf5_files_of_a_folder_are_checked_through_linked_folders(temp_dir):
+    """F041: the folder walk did not follow a linked subfolder, which the
+    converters' own globs do."""
+    import h5py
+
+    from adata.storage import ExternalDataError, check_hdf5_inputs
+
+    outs = temp_dir / "outs"
+    real = temp_dir / "elsewhere" / "binned"
+    real.mkdir(parents=True)
+    outs.mkdir()
+    (outs / "binned_outputs").symlink_to(real, target_is_directory=True)
+    (real / "loop").symlink_to(outs, target_is_directory=True)
+    other = temp_dir / "other.bin"
+    other.write_bytes(bytes(4))
+    with h5py.File(real / "matrix.h5", "w") as f:
+        f.create_dataset("data", shape=(4,), dtype="u1", external=[(str(other), 0, 4)])
+    with pytest.raises(ExternalDataError, match="matrix.h5' is refused: /data keeps its data"):
+        check_hdf5_inputs(outs)

@@ -195,7 +195,7 @@ def _outside_data(obj: Any) -> Optional[str]:
     return _dataset_id_outside(obj.id)
 
 
-def _refuse_outside_data(obj: Any) -> None:
+def refuse_outside_data(obj: Any) -> None:
     reason = _outside_data(obj)
     if reason:
         raise ExternalDataError(
@@ -212,16 +212,69 @@ def _dataset_id_outside(dsid: Any) -> Optional[str]:
     return None
 
 
-def check_hdf5_contents(group: Any, path: Any = None) -> None:
+def _references(oid: Any) -> list:
+    """The object references `oid` holds: in its attributes, and as its
+    values when it is a dataset of them. Other values are not read."""
+    refs: list = []
+    for index in range(h5py.h5a.get_num_attrs(oid)):
+        attr = h5py.h5a.open(oid, index=index)
+        if h5py.check_ref_dtype(attr.dtype) is None or attr.shape is None:
+            continue
+        values = np.empty(attr.shape, dtype=attr.dtype)
+        attr.read(values)
+        refs.extend(values.reshape(-1))
+    if isinstance(oid, h5py.h5d.DatasetID) and h5py.check_ref_dtype(oid.dtype) is not None:
+        refs.extend(np.asarray(h5py.Dataset(oid)[()]).reshape(-1))
+    return refs
+
+
+def _object_problem(oid: Any, within: Optional[str]) -> Optional[str]:
+    """Why `oid` cannot be read, or copied as part of `within`, or None.
+
+    A reference reaches an object no link does -- one created without a
+    name, which a walk of the links never meets -- so its target is
+    refused unless it has a name of its own (and then the walk checks it).
+    Copied as part of `within`, a reference must stay inside it: HDF5 takes
+    what it points to along, so a target elsewhere would be duplicated into
+    the output as a stray copy, or, if it read another file, carry that.
+    """
+    if isinstance(oid, h5py.h5d.DatasetID):
+        reason = _dataset_id_outside(oid)
+        if reason:
+            return reason
+    for ref in _references(oid):
+        if not ref:
+            continue
+        target = h5py.h5r.dereference(ref, oid)
+        name = h5py.h5i.get_name(target) if target is not None else None
+        if name is None:
+            return "refers to an object with no name in the file"
+        name = name.decode("utf-8", "replace")
+        if within is not None and not (
+            name == within or name.startswith(within.rstrip("/") + "/")
+        ):
+            return (
+                f"refers to {name}, outside {within}, which a copy of "
+                f"{within} cannot take along"
+            )
+    return None
+
+
+def check_hdf5_contents(group: Any, path: Any = None, *, within: Optional[str] = None) -> None:
     """Refuse an HDF5 file, or a group of one, that reads data from elsewhere.
 
     Every link below `group` is looked at once, without reading any data:
     an external link opens another file, and a dataset stored externally or
     virtually reads one. None of these is something anndata writes, and
     any of them would quietly copy another file's contents into an output,
-    so the input is refused before anything is read from it.
+    so the input is refused before anything is read from it. The object
+    references each object holds are followed too (`_object_problem`);
+    `within` names the element being copied, which they must stay inside.
     """
     found: list = []
+    root_problem = _object_problem(group.id, within)
+    if root_problem:
+        found.append(("", root_problem))
 
     def visit(name: bytes, info: Any) -> None:
         if found:
@@ -230,19 +283,18 @@ def check_hdf5_contents(group: Any, path: Any = None) -> None:
         if info.type == h5py.h5l.TYPE_EXTERNAL:
             found.append((where, "is an external link into another file"))
         elif info.type == h5py.h5l.TYPE_HARD:
-            oid = h5py.h5o.open(group.id, name)
-            if isinstance(oid, h5py.h5d.DatasetID):
-                reason = _dataset_id_outside(oid)
-                if reason:
-                    found.append((where, reason))
+            reason = _object_problem(h5py.h5o.open(group.id, name), within)
+            if reason:
+                found.append((where, reason))
         elif info.type != h5py.h5l.TYPE_SOFT:
             found.append((where, "is a user-defined link"))
 
-    group.id.links.visit(visit, info=True)
+    if is_hdf5_group(group):
+        group.id.links.visit(visit, info=True)
     if found:
         where, reason = found[0]
         base = getattr(group, "name", "/") or "/"
-        element = f"{base.rstrip('/')}/{where}"
+        element = f"{base.rstrip('/')}/{where}".rstrip("/") or "/"
         source = f"'{path}'" if path is not None else "The input"
         raise ExternalDataError(
             f"{source} is refused: {element} {reason}. adata reads only "
@@ -264,13 +316,25 @@ HDF5_SUFFIXES = (".h5", ".hdf5", ".h5ad", ".h5mu", ".loom")
 def check_hdf5_inputs(path: Path) -> None:
     """`check_hdf5_file` for a source that is not opened through
     `open_store`: an HDF5 file, or the HDF5 files in a folder of outputs."""
+    import os
+
     path = Path(path)
     if path.is_file():
         files = [path]
     elif path.is_dir() and not is_zarr_path(path):
-        files = sorted(
-            p for p in path.rglob("*") if p.suffix in HDF5_SUFFIXES and p.is_file()
-        )
+        # Into linked folders too, as the converters' own globs go; each
+        # real folder once, so a link loop ends.
+        files, seen = [], set()
+        for folder, subfolders, names in os.walk(path, followlinks=True):
+            real = os.path.realpath(folder)
+            if real in seen:
+                subfolders[:] = []
+                continue
+            seen.add(real)
+            files.extend(
+                Path(folder, n) for n in sorted(names)
+                if Path(n).suffix in HDF5_SUFFIXES and Path(folder, n).is_file()
+            )
     else:
         return
     for file in files:
@@ -539,6 +603,18 @@ def _fill_as(fill: Any, dtype: Any) -> Any:
     return converted[()]
 
 
+def fit_fill(kw: dict, dtype: Any) -> dict:
+    """Creation kwargs `kw` with the fill value made fit for `dtype`
+    (`_fill_as`), for a caller creating the HDF5 dataset itself."""
+    if "fillvalue" not in kw:
+        return kw
+    kw = dict(kw)
+    fill = _fill_as(kw.pop("fillvalue"), dtype)
+    if fill is not None:
+        kw["fillvalue"] = fill
+    return kw
+
+
 def _create_string_dataset(
     parent: Any,
     name: str,
@@ -607,13 +683,10 @@ def create_dataset(
             kwargs.pop("filters", None)
 
     if "fillvalue" in kwargs and not is_zarr_group(parent):
-        kwargs = dict(kwargs)
         target = dtype if dtype is not None else getattr(data, "dtype", None)
         if target is None and data is not None:
             target = np.asarray(data).dtype
-        fill = _fill_as(kwargs.pop("fillvalue"), target)
-        if fill is not None:
-            kwargs["fillvalue"] = fill
+        kwargs = fit_fill(kwargs, target)
 
     if is_zarr_group(parent):
         zarr_format = getattr(getattr(parent, "metadata", None), "zarr_format", None)
@@ -906,7 +979,7 @@ def copy_dataset(
     from adata.elements.strings import target_dtype
 
     target_backend = "zarr" if is_zarr_group(dst_group) else "hdf5"
-    _refuse_outside_data(src)
+    refuse_outside_data(src)
     if _is_null(src):
         # anndata writes an absent element, `raw` most often, as a null: an
         # empty dataspace on HDF5 and a 0-d bool on Zarr. Neither can be read
@@ -920,12 +993,7 @@ def copy_dataset(
     if is_hdf5_dataset(src) and src.shape is None:
         return _copy_empty(src, dst_group, name, target_backend)
     if is_hdf5_dataset(src):
-        _refuse_beyond_zarr(src, target_backend)
-        if h5py.check_ref_dtype(src.dtype) is not None:
-            # References name objects by their address in the source. HDF5's
-            # own copy brings what they point to along and repoints them.
-            dst_group.copy(src, dst_group, name, expand_refs=True)
-            return dst_group[name]
+        _refuse_unportable(src, target_backend)
     if src.dtype.names is not None:
         return _copy_records(
             src, dst_group, name, compression=compression, skip_attrs=skip_attrs
@@ -991,25 +1059,31 @@ def _copy_empty(src: Any, dst_group: Any, name: str, target_backend: str) -> Any
     return None
 
 
-def _refuse_beyond_zarr(src: Any, target_backend: str) -> None:
-    """Refuse an HDF5 dataset Zarr cannot hold, before anything is written.
+def _refuse_unportable(src: Any, target_backend: str) -> None:
+    """Refuse an HDF5 dataset a copy element by element cannot take, before
+    anything is written.
 
     Its dtype is an `object` to numpy, which this layer once took for text:
-    variable-length numbers came out as the strings '[1 2 3]'.
+    variable-length numbers came out as the strings '[1 2 3]'. References
+    name objects by their address in this file, which means nothing in
+    another; HDF5's own copy of a whole element (`copy_tree`) repoints those
+    that stay inside it, and that is the only way one is copied. Zarr holds
+    neither; a record's fields are checked one by one.
     """
-    if target_backend != "zarr":
-        return
-    if h5py.check_ref_dtype(src.dtype) is not None:
-        raise ValueError(
-            f"{src.name} holds HDF5 object references, which cannot be "
-            "copied to Zarr."
-        )
-    base = h5py.check_vlen_dtype(src.dtype)
-    if base is not None and base not in (str, bytes):
-        raise ValueError(
-            f"{src.name} holds variable-length sequences of {np.dtype(base)}, "
-            "which Zarr cannot store."
-        )
+    dtype = src.dtype
+    fields = [dtype.fields[f][0] for f in dtype.names] if dtype.names else [dtype]
+    for sub in fields:
+        if h5py.check_ref_dtype(sub) is not None:
+            raise ValueError(
+                f"{src.name} holds HDF5 object references, which cannot be "
+                "copied out of its file on their own."
+            )
+        base = h5py.check_vlen_dtype(sub)
+        if target_backend == "zarr" and base is not None and base not in (str, bytes):
+            raise ValueError(
+                f"{src.name} holds variable-length sequences of {np.dtype(base)}, "
+                "which Zarr cannot store."
+            )
 
 
 def _copy_records(
@@ -1171,14 +1245,19 @@ def copy_tree(
         # HDF5's own copy keeps every dataset exactly as it was, which is
         # what is wanted unless the caller asked for something else.
         if not exclude and compression is None:
-            if is_hdf5_group(src_obj):
-                check_hdf5_contents(src_obj)
-            else:
-                _refuse_outside_data(src_obj)
+            check_hdf5_contents(src_obj, within=src_obj.name)
             # References below it -- anndata 0.7's categoricals, in a frame
             # nested in raw, obsm or uns -- would otherwise come out null:
-            # with expand_refs HDF5 repoints them at their copies.
+            # with expand_refs HDF5 repoints them at their copies. A target
+            # copied before its place in the tree is reached also gets a
+            # second link, `~obj_pointed_by_<n>` at the root; every target is
+            # inside what was copied, so that link is only a duplicate name.
+            root = dst_group.file
+            before = set(root.keys())
             dst_group.copy(src_obj, dst_group, name, expand_refs=True)
+            for key in set(root.keys()) - before:
+                if key.startswith("~obj_pointed_by_") and h5py.h5o.get_info(root[key].id).rc > 1:
+                    del root[key]
             return dst_group[name]
     if is_dataset(src_obj):
         return copy_dataset(src_obj, dst_group, name, compression=compression)
