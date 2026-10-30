@@ -30,6 +30,14 @@ jobs:
             echo "::error::Tag $tag does not match pyproject version $declared"
             exit 1
           fi
+      # The GitHub release's notes are this section, so check it before
+      # anything is published rather than after.
+      - name: The changelog must have a section for the tag
+        run: |
+          if ! grep -qxF "## ${GITHUB_REF_NAME}" docs/changelog.md; then
+            echo "::error::docs/changelog.md has no '## ${GITHUB_REF_NAME}' section"
+            exit 1
+          fi
 
   test:
     uses: ./.github/workflows/tests.yml
@@ -91,3 +99,35 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  # Releases were cut by hand with `gh release create` until 0.11.1. The
+  # checklist never named that step, so 0.12.0 to 0.17.3 were tagged and
+  # published with no release page, and backfilled later. Running after PyPI
+  # means a release page never announces a version pip cannot install.
+  github-release:
+    needs: [publish-pypi]
+    if: |
+      always()
+      && needs.publish-pypi.result == 'success'
+      && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Notes from the changelog
+        run: |
+          awk -v tag="$GITHUB_REF_NAME" \
+            '$0 == "## " tag { on = 1; next } on && /^## / { exit } on' \
+            docs/changelog.md > notes.md
+          test -s notes.md
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # One cut by hand first is left alone.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists"; exit 0
+          fi
+          gh release create "$GITHUB_REF_NAME" --verify-tag \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md

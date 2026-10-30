@@ -55,6 +55,11 @@ Steps:
 
 ## Follow-ups noticed
 
+- GitHub releases stopped at 0.11.1: they were cut by hand, and the release
+  checklist never said so. PyPI, quay and the benchmark page were unaffected.
+  `publish.yml` now creates the release from the changelog section; 0.12.0
+  to 0.17.3 are backfilled from the changelog plus each tag's benchmark
+  artifact (kept 90 days, so by mid-January 2027).
 - `cell_id` (with `in_cell`, `in_nucleus`) on 2 µm bins, from Space Ranger
   4's `barcode_mappings.parquet` (a 0.17.x after the audit fixes).
 - Dropped: spatial bundles whose matrix is a MEX folder only. 10x always
