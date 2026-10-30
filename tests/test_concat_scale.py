@@ -359,3 +359,35 @@ def test_running_out_of_file_descriptors_says_how_to_raise_the_limit(tmp_path, m
     with pytest.raises(OSError, match=r"ulimit -n") as raised:
         concat_on_disk(paths, tmp_path / "out.h5ad", QUIET)
     assert "a.h5ad" in str(raised.value)
+
+
+@pytest.mark.parametrize("chunk", [1, 1024])
+def test_the_csc_scratch_on_disk_is_what_the_estimate_says(tmp_path, monkeypatch, chunk):
+    """F011, from the review: the buckets were three growing datasets each,
+    and HDF5 gives each a whole 65,536-entry chunk however little is in it,
+    so the scratch came to 1.6 times the estimate at the default --chunk and
+    16 times at --chunk 1, where there are hundreds of buckets. Each bucket
+    now has a fixed region of three datasets, and the scratch on disk is
+    the estimate: 16 bytes plus the value for each entry."""
+    import os
+
+    genes = [f"g{i}" for i in range(200)]
+    paths = [_csc_input(tmp_path / f"{t}.h5ad", "h5ad", t, 300, genes, seed=s)
+             for t, s in (("a", 0), ("b", 1))]
+    sizes = []
+    original = concat_mod._ColumnBuckets.runs
+
+    def measured(self, entries):
+        self.columns.file.flush()
+        sizes.append(os.path.getsize(self.columns.file.filename))
+        return original(self, entries)
+
+    monkeypatch.setattr(concat_mod._ColumnBuckets, "runs", measured)
+    out = tmp_path / "out.h5ad"
+    concat_on_disk(paths, out, QUIET, chunk_rows=chunk)
+    nnz = sum(int(_read(p).X.nnz) for p in paths)
+    estimate = nnz * (16 + 4)
+    assert len(sizes) == 2, "X and layers/counts"
+    assert all(estimate <= size <= estimate + (64 << 10) for size in sizes), (sizes, estimate)
+    assert np.array_equal(_read(out).X.toarray(),
+                          ad.concat([_read(p) for p in paths]).X.toarray())

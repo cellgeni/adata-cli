@@ -530,6 +530,9 @@ def test_concat_holds_a_bounded_number_of_inputs_open(tmp_path, monkeypatch):
     varm and uns."""
     from adata.core import concat
 
+    # About a megabyte for each open HDF5 input, so never more than 64,
+    # however high a cluster sets the descriptor limit.
+    assert concat.MAX_OPEN_INPUTS <= 64
     monkeypatch.setattr(concat, "MAX_OPEN_INPUTS", 4)
 
     def measure(n: int) -> int:
@@ -578,6 +581,43 @@ def test_one_input_over_the_limit_costs_about_one_reopen_a_pass(tmp_path, monkey
         f"{reopened} reopens over about {passes:.0f} passes with one input over "
         f"the limit; closing the least recently used would reopen all {n} each pass."
     )
+
+
+def test_csc_concat_holds_its_scratch_open_in_a_fixed_number_of_datasets(tmp_path):
+    """F011, from the review: the buckets were three growing datasets each,
+    all held open for the whole matrix, about 57 KB of memory a bucket; and
+    the buckets multiply with n_obs / --chunk, so memory grew with the
+    input after all (1.8 GB at 30,000 buckets). However many buckets there
+    are, the number of HDF5 datasets open at once must not grow."""
+    import h5py
+
+    def measure(n_obs: int) -> int:
+        directory = tmp_path / f"buckets{n_obs}"
+        directory.mkdir()
+        paths = []
+        for name, seed in (("a", 0), ("b", 1)):
+            values = np.random.default_rng(seed).poisson(1.0, (n_obs, 40)).astype("float32")
+            obj = ad.AnnData(X=sparse.csc_matrix(values),
+                             obs=pd.DataFrame(index=[f"{name}{i}" for i in range(n_obs)]),
+                             var=pd.DataFrame(index=[f"g{i}" for i in range(40)]))
+            obj.write_h5ad(directory / f"{name}.h5ad")
+            paths.append(directory / f"{name}.h5ad")
+        peak, write = [0], h5py.Dataset.__setitem__
+
+        def counting(self, key, value):
+            peak[0] = max(peak[0], h5py.h5f.get_obj_count(h5py.h5f.OBJ_ALL, h5py.h5f.OBJ_DATASET))
+            return write(self, key, value)
+
+        h5py.Dataset.__setitem__ = counting
+        try:
+            concat_on_disk(paths, directory / "out.h5ad", QUIET, chunk_rows=4)
+        finally:
+            h5py.Dataset.__setitem__ = write
+        assert peak[0] >= 3, "the scratch's datasets, at least"
+        return peak[0]
+
+    assert_independent_of(measure, what="HDF5 datasets open during a CSC concat",
+                          axis="n_obs (and so buckets)", sizes=(256, 4096))
 
 
 def _matrix_step_allocation(monkeypatch) -> List[int]:

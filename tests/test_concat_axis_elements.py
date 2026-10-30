@@ -283,7 +283,9 @@ def test_varp_in_another_gene_order_is_written_on_the_output_genes(tmp_path, ext
 def test_sparse_varp_is_compared_by_value_as_anndata_compares_it(tmp_path):
     """F118: anndata's `same` finds a CSR and a CSC entry with the same
     values equal, and float32 equal to float64, and ignores stored zeros;
-    a dense entry must match its dtype as well, as varm's does."""
+    a dense entry must match its dtype as well, as varm's does. A dense
+    entry never equals a sparse one here; anndata agrees when the dense one
+    comes first, and finds them equal the other way round."""
     genes = [f"g{i}" for i in range(5)]
     frame = _pairwise(genes, 5)
     with_zero = sparse.csr_matrix(frame.to_numpy())
@@ -292,12 +294,13 @@ def test_sparse_varp_is_compared_by_value_as_anndata_compares_it(tmp_path):
     without[np.unravel_index(np.flatnonzero(without)[0], without.shape)] = 0.0
     a = _varp_store(tmp_path / "a.h5ad", genes, {
         "formats": sparse.csr_matrix(frame.to_numpy()), "dtypes": sparse.csr_matrix(frame.to_numpy()),
-        "zeros": with_zero, "dense_dtypes": frame.to_numpy(),
+        "zeros": with_zero, "dense_dtypes": frame.to_numpy(), "dense_first": frame.to_numpy(),
     })
     b = _varp_store(tmp_path / "b.h5ad", genes, {
         "formats": sparse.csc_matrix(frame.to_numpy()),
         "dtypes": sparse.csr_matrix(frame.to_numpy().astype(np.float32)),
         "zeros": sparse.csr_matrix(without), "dense_dtypes": frame.to_numpy().astype(np.float32),
+        "dense_first": sparse.csr_matrix(frame.to_numpy()),
     })
     got = _concat(tmp_path, [a, b], merge="same")
     ref = ad.concat([ad.read_h5ad(a), ad.read_h5ad(b)], merge="same")

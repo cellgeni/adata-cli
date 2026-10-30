@@ -840,21 +840,32 @@ def test_an_outer_join_keeps_a_shared_var_order_beside_inputs_without_variables(
         (["b", "a"], ["b", "a"]),
         ([10, 2], [3, 10]),
         ([2.5, -1.0], [0.5]),
+        ([10, 2], [2.0]),
+        (["Mz", "Müller glia"], ["Muscle"]),
     ],
     ids=["new-categories", "same-set-reordered", "first-covers-the-union",
-         "second-covers-the-union", "identical", "integers", "floats"],
+         "second-covers-the-union", "identical", "integers", "floats",
+         "integers-meeting-floats", "accented"],
 )
 def test_merged_categories_are_ordered_as_anndata_orders_them(tmp_path, backend, first, second):
     """F114: merged categories came out in order of first appearance, where
     anndata natsorts the union -- unless the first input already holds every
     category, whose order pandas then keeps. `.cat.codes` and plotting order
-    differed from anndata.concat's."""
+    differed from anndata.concat's. Integer categories meeting float ones
+    are recast, which loses the first input's order in anndata too; and
+    text is compared in NFD form, as natsort compares it."""
+    def stored(categories):
+        # Numbers as an array, which keeps their dtype; a list is text.
+        values = categories if isinstance(categories[0], str) else np.asarray(categories)
+        return lambda g, name: ew.write_categorical(g, name, list(range(len(categories))), values)
+
     a = _on(backend, tmp_path, "a", [f"a{i}" for i in range(len(first))], ["g"],
-            obs={"c": categorical(first, list(range(len(first))))})
+            obs={"c": stored(first)})
     b = _on(backend, tmp_path, "b", [f"b{i}" for i in range(len(second))], ["g"],
-            obs={"c": categorical(second, list(range(len(second))))})
+            obs={"c": stored(second)})
     got = _concat([a, b], backend_path(tmp_path, backend, "out"))
     ref = _reference([a, b])
+    assert got.obs["c"].cat.categories.dtype == ref.obs["c"].cat.categories.dtype
     assert list(got.obs["c"].cat.categories) == list(ref.obs["c"].cat.categories)
     assert list(got.obs["c"]) == list(ref.obs["c"])
     assert not got.obs["c"].cat.ordered
@@ -923,8 +934,9 @@ def test_ordered_categoricals_stay_ordered_only_when_every_input_agrees(tmp_path
 # F116: --fill-value and integer matrices
 
 
+@pytest.mark.parametrize("fill", [-1, np.nan])
 @pytest.mark.parametrize("layout", ["dense", "csr"])
-def test_a_fill_value_leaves_integer_matrices_alone_when_nothing_is_filled(tmp_path, backend, layout):
+def test_a_fill_value_leaves_integer_matrices_alone_when_nothing_is_filled(tmp_path, backend, layout, fill):
     """F116: --fill-value made integer X and layers float64 on an inner join,
     where no cell is filled, doubling X; anndata.concat keeps them int32."""
     as_layout = {"csr": sparse.csr_matrix, "dense": np.asarray}[layout]
@@ -933,8 +945,8 @@ def test_a_fill_value_leaves_integer_matrices_alone_when_nothing_is_filled(tmp_p
             layers={"counts": matrix(as_layout(x * 2))})
     b = _on(backend, tmp_path, "b", ["b0", "b1"], ["g2", "g1", "g3"], X=as_layout(x + 10),
             layers={"counts": matrix(as_layout(x * 3))})
-    got = _concat([a, b], backend_path(tmp_path, backend, "out"), fill_value=-1)
-    ref = _reference([a, b], fill_value=-1)
+    got = _concat([a, b], backend_path(tmp_path, backend, "out"), fill_value=fill)
+    ref = _reference([a, b], fill_value=fill)
     dense = lambda m: m.toarray() if sparse.issparse(m) else np.asarray(m)
     for mine, theirs in ((got.X, ref.X), (got.layers["counts"], ref.layers["counts"])):
         assert mine.dtype == theirs.dtype == np.int32
@@ -953,12 +965,14 @@ def test_a_fill_value_leaves_integer_matrices_alone_when_nothing_is_filled(tmp_p
         (np.bool_, 1, np.bool_),
         (np.bool_, 2, np.float64),
         (np.float32, 0.5, np.float32),
+        (np.float32, 1e40, np.float64),
     ],
 )
 def test_an_outer_join_widens_a_matrix_only_for_a_fill_value_it_cannot_hold(tmp_path, dtype, fill, expected):
     """F116: when an outer join does fill cells, an integer matrix that can
-    hold the fill value keeps its dtype; one that cannot becomes float64.
-    The values are anndata.concat's either way."""
+    hold the fill value keeps its dtype; one that cannot becomes float64, as
+    does a float32 one for a value beyond its range, which it would have
+    held as infinity. The values are anndata.concat's either way."""
     x = np.array([[1, 0], [1, 1]], dtype=dtype)
     a = _store(tmp_path / "a.h5ad", ["a0", "a1"], ["g0", "g1"], X=x)
     b = _store(tmp_path / "b.h5ad", ["b0", "b1"], ["g0", "g2"], X=x)
@@ -966,3 +980,16 @@ def test_an_outer_join_widens_a_matrix_only_for_a_fill_value_it_cannot_hold(tmp_
     ref = _reference([a, b], join="outer", fill_value=fill)
     assert got.X.dtype == expected
     assert np.array_equal(got.X.astype(np.float64), ref.X.astype(np.float64), equal_nan=True)
+
+
+def test_dense_obsm_out_of_step_with_obs_is_refused_before_writing(tmp_path):
+    """An obsm array with more or fewer rows than its input's obs was
+    stacked anyway, every later input's rows shifted against their cells,
+    with exit 0. Sparse ones were refused; dense ones are now too."""
+    a = _store(tmp_path / "a.h5ad", ["a0", "a1", "a2", "a3"], ["g"],
+               obsm={"X_pca": dense(*[[1.0, 1.0]] * 3)})
+    b = _store(tmp_path / "b.h5ad", ["b0", "b1"], ["g"], obsm={"X_pca": dense(*[[2.0, 2.0]] * 2)})
+    out = tmp_path / "out.h5ad"
+    with pytest.raises(ValueError, match=r"obsm/X_pca.*a\.h5ad.* 3 rows of it but 4 obs"):
+        concat_on_disk([a, b], out, QUIET)
+    _no_output(out)

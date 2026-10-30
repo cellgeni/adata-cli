@@ -338,7 +338,9 @@ and `adata recast` can convert one to match. var's columns, varm (a SCope
 import's `Regulons`, pycisTopic's `topic_region`) and varp follow `--merge`,
 compared on the output's genes: an input lacking some of them, as in an
 outer join, counts as not having the entry. Sparse varp entries are compared
-by value, as anndata compares them, whatever their format and dtype. Without
+by value, whatever their format (CSR or CSC) and dtype, and stored zeros
+count as absent, as in anndata; a sparse entry never equals a dense one,
+where anndata's answer depends on which input comes first. Without
 `--merge`, varm and varp are dropped with a note.
 
 `obsp` and `raw` are **not** carried over — a value between two cells has no
@@ -350,9 +352,9 @@ compression, as sparse ones do. A dense integer matrix stays integer unless
 an outer join fills cells with a `--fill-value` it cannot hold, such as 0.5
 or NaN; then it becomes float64.
 
-concat opens its inputs as it needs them, at most a quarter of the
-process's file descriptor limit (`ulimit -n`) at once, so it takes any
-number of inputs. CSC matrices are read once each, a block of entries at a
+concat opens its inputs as it needs them, at most 64 at once (or a quarter
+of the process's file descriptor limit, `ulimit -n`, if that is fewer), so
+it takes any number of inputs. CSC matrices are read once each, a block of entries at a
 time, and their columns put together through a scratch file beside the
 output, of about 16 bytes plus the value per stored entry of the largest
 one. The free-space check counts it, for a Zarr output too.

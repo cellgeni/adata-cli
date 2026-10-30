@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import Counter
 from typing import Dict, Iterable, List, Sequence, Set
 
@@ -93,8 +94,9 @@ _DIGITS = re.compile(r"(\d+)")
 
 
 def natural_key(text: str) -> tuple:
-    """Sort key putting "A2" before "A10", as natsort's default does."""
-    parts = _DIGITS.split(text)
+    """Sort key putting "A2" before "A10", as natsort's default does, on the
+    text in NFD form as natsort compares it: "Müller" after "Muscle"."""
+    parts = _DIGITS.split(unicodedata.normalize("NFD", text))
     return tuple(int(part) if i % 2 else part for i, part in enumerate(parts))
 
 

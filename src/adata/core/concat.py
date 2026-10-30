@@ -72,10 +72,12 @@ MERGE_STRATEGIES = ("same", "unique", "first", "only")
 #: What the CLI accepts. "drop" is the default and maps to no merge at all.
 MERGE_CHOICES = ("drop",) + MERGE_STRATEGIES
 
-#: How many inputs concat holds open at once: a quarter of the file
-#: descriptor limit, as split caps its open outputs. Beyond that, inputs are
-#: closed and opened again as they are needed.
-MAX_OPEN_INPUTS = _open_output_limit()
+#: How many inputs concat holds open at once: 64, or a quarter of the file
+#: descriptor limit if that is fewer, as split caps its open outputs. Beyond
+#: that, inputs are closed and opened again as they are needed. Each open
+#: HDF5 input costs about a megabyte, so the limit is not left to grow with
+#: the descriptor limit, which a cluster may set in the thousands.
+MAX_OPEN_INPUTS = min(64, _open_output_limit())
 
 
 # ---------------------------------------------------------------------------
@@ -497,13 +499,16 @@ def _natural_order(values: List[Any], dtype: np.dtype) -> List[Any]:
     return sorted(values) if dtype.kind in "biuf" else natural_sorted(values)
 
 
-def _merged_categories(labels: List[np.ndarray], ordered: List[bool]) -> Tuple[np.ndarray, bool]:
+def _merged_categories(
+    labels: List[np.ndarray], ordered: List[bool], first_kept: bool = True
+) -> Tuple[np.ndarray, bool]:
     """A merged categorical's categories, and whether it stays ordered, as
     anndata decides them.
 
     Unordered, the first input's categories keep their order when they
-    already hold every input's, as pandas keeps them; otherwise the union is
-    natsorted, as anndata sorts it. First appearance, as an earlier version
+    already hold every input's and needed no cast (`first_kept`: integer
+    categories meeting float ones are recast, and pandas then reorders
+    them); otherwise the union is natsorted, as anndata sorts it. First appearance, as an earlier version
     used, gave other codes and another plotting order than anndata.concat.
 
     Ordered only when every input with categories is ordered and has the
@@ -526,7 +531,7 @@ def _merged_categories(labels: List[np.ndarray], ordered: List[bool]) -> Tuple[n
             o and c.size == len(union) and np.array_equal(c, stated[0][0]) for c, o in stated
         ):
             return stated[0][0], True
-    elif labels and labels[0].size == len(union):
+    elif first_kept and labels and labels[0].size == len(union):
         return labels[0], False
     return np.asarray(_natural_order(list(union), dtype), dtype=dtype), False
 
@@ -546,8 +551,11 @@ def _concat_categorical(
     for col, frame in column.present():
         labels.append(_categories(col, frame))
         ordered.append(_ordered(col, frame))
+    stored = [c.dtype for c in labels]
     labels = _category_labels(labels)
-    categories, keeps_order = _merged_categories(labels, ordered)
+    categories, keeps_order = _merged_categories(
+        labels, ordered, first_kept=bool(labels) and stored[0] == labels[0].dtype
+    )
     if any(ordered) and not keeps_order:
         console.print(
             f"[yellow]Column {name!r}: the inputs disagree on its category order, "
@@ -873,8 +881,12 @@ def _concat_sparse(
 
 
 def _dtype_holding(dtype: np.dtype, fill_value: float) -> np.dtype:
-    """`dtype`, or float64 if it cannot hold `fill_value` exactly."""
+    """`dtype`, or float64 if it cannot hold `fill_value`: exactly, for
+    integers and booleans; within its range, for floats."""
     dtype = np.dtype(dtype)
+    if dtype.kind == "f":
+        fits = not np.isfinite(fill_value) or abs(fill_value) <= float(np.finfo(dtype).max)
+        return dtype if fits else np.dtype(np.float64)
     if dtype.kind not in "biu":
         return dtype
     if not np.isfinite(fill_value) or fill_value != int(fill_value):
@@ -949,26 +961,26 @@ def _concat_dense(
 
 @contextmanager
 def _bucket_scratch(dst_parent: Any) -> Iterator[Any]:
-    """Where the buckets go: an HDF5 file beside the output, whatever the
-    output is. `scratch_group` keeps a Zarr output's scratch inside the
-    output, where every small append to a bucket rewrites that array's
-    metadata: putting a CSC matrix together there took sixty times as long
-    as in HDF5."""
-    from adata.core.csr_build import scratch_group
+    """A group for the buckets, in a temporary HDF5 file beside the output,
+    whatever the output is, and gone afterwards.
 
-    root = getattr(getattr(dst_parent, "store", None), "root", None)
-    if not is_zarr_group(dst_parent) or root is None:
-        with scratch_group(dst_parent, "__concat_scratch__") as group:
-            yield group
-        return
+    Beside the output rather than in the system temp directory, which on a
+    cluster node is often far too small. HDF5 for a Zarr output too: inside
+    a Zarr store every write to a bucket rewrites that array's metadata, and
+    putting a CSC matrix together there took sixty times as long.
+    """
+    if is_zarr_group(dst_parent):
+        root = getattr(dst_parent.store, "root", None)
+        where = Path(root).parent if root is not None else None
+    else:
+        where = Path(str(dst_parent.file.filename)).parent
     fd, path = tempfile.mkstemp(
-        prefix=".adata-", suffix=".concat-scratch.h5", dir=str(Path(root).parent)
+        prefix=".adata-", suffix=".concat-scratch.h5",
+        dir=str(where) if where is not None and where.is_dir() else None,
     )
     os.close(fd)
     try:
-        # No chunk cache, as `scratch_group`'s: each bucket would hold a
-        # partly written chunk in one.
-        with h5py.File(path, "w", rdcc_nbytes=0) as handle:
+        with h5py.File(path, "w") as handle:
             yield handle.create_group("buckets")
     finally:
         os.unlink(path)
@@ -985,42 +997,83 @@ def _csc_bounds(indptr: np.ndarray, entries: int) -> np.ndarray:
     return np.unique(np.concatenate((bounds, big, big + 1)))
 
 
-def _in_row_order(minors: Any, n: int, entries: int) -> bool:
-    """Whether a bucket's rows are in order already, read a piece at a time."""
-    last = -1
-    for lo in range(0, n, entries):
-        piece = np.asarray(minors[lo : lo + entries], dtype=np.int64)
-        if piece.size and (piece[0] < last or bool((piece[1:] < piece[:-1]).any())):
-            return False
-        last = int(piece[-1]) if piece.size else last
-    return True
+class _ColumnBuckets:
+    """Entries scattered into column-range buckets on disk, and read back a
+    bucket at a time, each in column order and then row order.
 
-
-def _csc_runs(sorter: Any, entries: int) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
-    """The buckets' `(rows, values)`, column by column, each in row order.
-
-    A bucket of several columns is read whole and sorted. A bucket of one
-    column holding more than `entries` is streamed instead: its entries
-    arrived input by input, each input's in row order, so they are sorted
-    already -- unless some input stored that column out of order, which a
-    first pass over the rows finds, and then it is sorted whole after all.
-    Otherwise a gene expressed in most of a large atlas's cells would put
-    millions of entries in memory at once.
+    Every output column's size is known before an entry is read, so each
+    bucket has a fixed region of three contiguous datasets (column, row and
+    value) and a cursor into it. `csr_build.BucketSorter` grows three
+    chunked datasets per bucket instead, and the buckets multiply as --chunk
+    shrinks: each held about 57 KB of memory open and a whole chunk of each
+    dataset, 1.3 MB, on disk however few entries it had. A CSC concat's
+    memory and scratch grew with n_obs / --chunk that way. Here three
+    datasets are open, and the scratch is exactly 16 bytes plus the value
+    for each entry, what the free-space check counts.
     """
-    for b, (majors, minors, values) in enumerate(sorter.buckets):
-        n = int(majors.shape[0])
-        if n == 0:
-            continue
-        one_column = int(sorter.bounds[b + 1] - sorter.bounds[b]) == 1
-        if one_column and n > entries and _in_row_order(minors, n, entries):
-            for lo in range(0, n, entries):
-                yield (np.asarray(minors[lo : lo + entries], dtype=np.int64),
-                       np.asarray(values[lo : lo + entries]))
-            continue
-        major = np.asarray(majors[...], dtype=np.int64)
-        minor = np.asarray(minors[...], dtype=np.int64)
-        order = np.lexsort((minor, major))
-        yield minor[order], np.asarray(values[...])[order]
+
+    def __init__(self, scratch: Any, indptr: np.ndarray, entries: int, dtype: np.dtype) -> None:
+        self.bounds = _csc_bounds(indptr, entries)
+        self.starts = indptr[self.bounds]
+        self.cursor = self.starts[:-1].copy()
+        total = int(indptr[-1])
+        self.columns = scratch.create_dataset("columns", shape=(total,), dtype=np.int64)
+        self.rows = scratch.create_dataset("rows", shape=(total,), dtype=np.int64)
+        self.values = scratch.create_dataset("values", shape=(total,), dtype=dtype)
+
+    def add(self, columns: np.ndarray, rows: np.ndarray, values: np.ndarray) -> None:
+        """Entries in any order: one write per bucket they fall in."""
+        if columns.size == 0:
+            return
+        which = np.searchsorted(self.bounds, columns, side="right") - 1
+        order = np.argsort(which, kind="stable")
+        which = which[order]
+        cuts = np.concatenate(([0], np.flatnonzero(np.diff(which)) + 1, [which.size]))
+        for lo, hi in zip(cuts[:-1], cuts[1:]):
+            bucket, pick = int(which[lo]), order[lo:hi]
+            at = int(self.cursor[bucket])
+            if at + pick.size > self.starts[bucket + 1]:
+                raise ValueError("A CSC matrix holds more entries than its pointers say.")
+            self.columns[at : at + pick.size] = columns[pick]
+            self.rows[at : at + pick.size] = rows[pick]
+            self.values[at : at + pick.size] = values[pick]
+            self.cursor[bucket] = at + pick.size
+
+    def runs(self, entries: int) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
+        """The buckets' `(rows, values)`, column by column, each in row order.
+
+        A bucket of several columns is read whole and sorted. A bucket of one
+        column holding more than `entries` is streamed instead: its entries
+        arrived input by input, each input's in row order, so they are sorted
+        already -- unless some input stored that column out of order, which a
+        first pass over the rows finds, and then it is sorted whole after
+        all. Otherwise a gene expressed in most of a large atlas's cells
+        would put millions of entries in memory at once.
+        """
+        if not np.array_equal(self.cursor, self.starts[1:]):
+            raise ValueError("A CSC matrix holds fewer entries than its pointers say.")
+        for b in range(len(self.bounds) - 1):
+            lo, hi = int(self.starts[b]), int(self.starts[b + 1])
+            if hi == lo:
+                continue
+            one_column = int(self.bounds[b + 1] - self.bounds[b]) == 1
+            if one_column and hi - lo > entries and self._in_row_order(lo, hi, entries):
+                for start in range(lo, hi, entries):
+                    stop = min(start + entries, hi)
+                    yield np.asarray(self.rows[start:stop]), np.asarray(self.values[start:stop])
+                continue
+            columns, rows = np.asarray(self.columns[lo:hi]), np.asarray(self.rows[lo:hi])
+            order = np.lexsort((rows, columns))
+            yield rows[order], np.asarray(self.values[lo:hi])[order]
+
+    def _in_row_order(self, lo: int, hi: int, entries: int) -> bool:
+        last = -1
+        for start in range(lo, hi, entries):
+            piece = np.asarray(self.rows[start : min(start + entries, hi)])
+            if piece[0] < last or bool((piece[1:] < piece[:-1]).any()):
+                return False
+            last = int(piece[-1])
+        return True
 
 
 def _concat_csc(
@@ -1043,12 +1096,11 @@ def _concat_csc(
     fetching the shard index too) to take a few hundred entries: 37 times
     the input's size read on h5ad, 572 times on Zarr. Instead each input is
     read once, in blocks of entries sized by `chunk_rows`, and its entries
-    scattered into column-range buckets on disk, as a streaming transpose
-    does (`core/csr_build.py`); the buckets are then read back in turn,
+    scattered into column-range buckets on disk (`_ColumnBuckets`), as a
+    streaming transpose's are; the buckets are then read back in turn,
     sorted and appended. The output's column pointers are known before any
     entry is read, from the inputs' own.
     """
-    from adata.core.csr_build import BucketSorter
     from adata.core.subset import _append, _growable_like
 
     group = _sparse_group(dst_parent, name, spec.CSC_MATRIX, (n_rows, n_cols))
@@ -1068,23 +1120,24 @@ def _concat_csc(
     if total:
         entries = _entries_per_block(total, n_rows, chunk_rows)
         with _bucket_scratch(dst_parent) as scratch:
-            sorter = BucketSorter(scratch, _csc_bounds(indptr, entries), dtype)
+            buckets = _ColumnBuckets(scratch, indptr, entries, dtype)
             offset = 0
             for i, (col_map, n_src_rows) in enumerate(zip(col_maps, row_counts)):
                 source = inputs.get(i, path)
                 src_indptr = np.asarray(source["indptr"][...], dtype=np.int64)
                 src_data, src_indices = source["data"], source["indices"]
+                first = int(src_indptr[0]) if src_indptr.size else 0
                 stored = int(src_indptr[-1]) if src_indptr.size else 0
-                for lo in range(0, stored, entries):
+                for lo in range(first, stored, entries):
                     hi = min(lo + entries, stored)
                     cols = np.searchsorted(src_indptr, np.arange(lo, hi), side="right") - 1
                     target = col_map[cols]
                     keep = target >= 0
                     rows = np.asarray(src_indices[lo:hi], dtype=np.int64)[keep] + offset
                     values = np.asarray(src_data[lo:hi])[keep].astype(dtype, copy=False)
-                    sorter.add(target[keep], rows, values)
+                    buckets.add(target[keep], rows, values)
                 offset += n_src_rows
-            for rows, values in _csc_runs(sorter, entries):
+            for rows, values in buckets.runs(entries):
                 _append(out_indices, rows.astype(index_dtype, copy=False))
                 _append(out_data, values)
 
@@ -1139,8 +1192,10 @@ def check_matrix_encodings(
 
     # obsm entries are stacked only when every input stores them alike; a
     # sparse entry dense elsewhere is refused here, as X would be, rather
-    # than dropped. Entries of different widths are skipped later, whatever
-    # their encodings, and dataframes are not matrices at all.
+    # than dropped, and so is one whose rows are not its input's obs, which
+    # was stacked out of line with the cells. Entries of different widths
+    # are skipped later, whatever their encodings, and dataframes are not
+    # matrices at all.
     for name in _index_union([inputs.keys(i, "obsm") for i in range(n)]):
         path = f"obsm/{name}"
         if not all(source is not None for source in inputs.each(path)):
@@ -1150,7 +1205,7 @@ def check_matrix_encodings(
             kinds.add(_matrix_kind(source))
             if _matrix_kind(source) != "other":
                 widths.add(_trailing_shape(source))
-        if kinds & spec.SPARSE_TYPES and kinds <= spec.SPARSE_TYPES | {"dense"} and len(widths) == 1:
+        if "other" not in kinds and len(widths) == 1:
             _check(path, path)
 
 
@@ -1371,8 +1426,9 @@ def _entries_on(obj: Any, col_map: np.ndarray, entries: int) -> Iterator[Tuple[n
     values)`, both renumbered by `col_map`, and those of genes the target
     lacks left out."""
     indptr = np.asarray(obj["indptr"][...], dtype=np.int64)
+    first = int(indptr[0]) if indptr.size else 0
     stored = int(indptr[-1]) if indptr.size else 0
-    for lo in range(0, stored, entries):
+    for lo in range(first, stored, entries):
         hi = min(lo + entries, stored)
         major = col_map[np.searchsorted(indptr, np.arange(lo, hi), side="right") - 1]
         minor = col_map[np.asarray(obj["indices"][lo:hi], dtype=np.int64)]
