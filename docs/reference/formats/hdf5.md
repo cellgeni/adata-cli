@@ -39,4 +39,8 @@ whose length does not fit is left out with a warning, and that axis is
 numbered. The dataset is read a slab of cells at a time, a whole number of
 its chunks along the cell axis (columns, with `--transpose`), as a
 [loom's matrix](loom.md) is, so each chunk is decompressed once and memory is set by the
-slab.
+slab. When a chunk spans more cells than a slab holds, slabs as wide as
+memory allows cut through it, decompressing it once for each; and when it
+spans the cells, as one gene to a chunk does, the dataset is read a few
+chunks at a time and the entries are sorted into cells through on-disk
+buckets. Either way memory stays set by the slab, not by the dataset.

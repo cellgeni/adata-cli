@@ -25,7 +25,7 @@ adata convert table.txt -o table.h5ad --delimiter ";" --dense
 
 | Flag | Meaning |
 |---|---|
-| `--delimiter` | A character, `tab` or `whitespace` (runs of spaces and tabs). Default from the extension: `,` for `.csv`, tab for `.tsv` and `.tab`, whitespace for `.txt` and `.data`, as `read_text` splits |
+| `--delimiter` | A character, `tab` or `whitespace` (runs of spaces and tabs). Default from the extension: `,` for `.csv`, tab for `.tsv` and `.tab`, whitespace for `.txt` and `.data`, as `read_text` splits. A letter, digit, `.`, `+`, `-`, `(`, `)` or `_` is refused: a number can hold it (numpy reads `nan(...)` as one) |
 | `--transpose` | The file holds genes as rows and cells as columns, as count tables often do |
 | `--first-column-names`, `--no-first-column-names` | Whether the first column names the rows, when detection gets it wrong |
 | `--dense` | Keep X dense (default: CSR) |
@@ -38,13 +38,15 @@ header with a field more than the values has a corner cell over the row
 names; one with as many (R's `write.table`) names only the columns. Lines
 starting with `#` before the data are comments, the last of them naming
 the columns when there is no header. Names have `"` stripped, and blank
-lines are skipped.
+lines are skipped, as is a UTF-8 byte order mark before the first line.
 
 Values keep integers: when every value is whole, X is int32 (int64 if a
 value needs it), as for [MTX folders](10x-mtx.md); otherwise it is float64, which holds
 what the text holds where anndata gives float32. A line with a different
-number of values, or a value that is not a number (`NA`), is refused with
-its line and column, before any output exists.
+number of values, a value that is not a number (`NA`), or an empty one, is
+refused with its line and column, before any output exists, as anndata
+refuses it. pandas writes NaN as an empty field, and some tables end every
+line with a delimiter, which leaves an empty field there too.
 
 The file is read twice, a block of lines at a time, each block parsed by
 numpy, so memory is set by the block rather than by the file: once to find

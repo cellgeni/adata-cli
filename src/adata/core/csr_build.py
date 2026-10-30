@@ -144,7 +144,11 @@ def scratch_group(dst_parent: Any, name: str) -> Iterator[Any]:
     )
     os.close(fd)
     try:
-        with h5py.File(path, "w") as handle:
+        # No chunk cache: each bucket's datasets would hold a partly written
+        # chunk in one, about a megabyte a bucket, so memory grew with the
+        # buckets rather than staying with the block. The scratch is
+        # uncompressed, so a write goes straight to the file.
+        with h5py.File(path, "w", rdcc_nbytes=0) as handle:
             yield handle.create_group(name)
     finally:
         os.unlink(path)

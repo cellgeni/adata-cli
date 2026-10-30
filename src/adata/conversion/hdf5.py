@@ -7,8 +7,9 @@ and columns, as `read_hdf` lists the file's keys.
 The dataset's rows are cells (`--transpose`: genes). Its names are the root
 datasets `row_names` and `col_names`, as `read_hdf` takes them, naming the
 dataset's rows and columns; `--obs-names-key` and `--var-names-key` name
-others. Values keep their dtype. The dataset is read a slab of cells at a
-time, a whole number of its chunks, as a loom's matrix is (`dense.py`).
+others. Values keep their dtype. The dataset is read as a loom's matrix is
+(`dense.py`): a slab of cells at a time, memory set by the slab whatever its
+chunks.
 
 A plain `.h5` is claimed by 10x, so it is read with `--from hdf5`; only
 `.hdf5`, `.he5` and `.hdf` are taken for this format by their extension.
