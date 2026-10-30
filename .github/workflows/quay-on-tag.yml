@@ -1,49 +1,98 @@
 name: Build & Push Docker image (tag)
 
+# Called by publish.yml once a tag has passed the suite, matched
+# pyproject.toml and reached PyPI; nothing triggers it on its own. Up to
+# 0.17.4 it ran on every tag by itself, so a tag whose tests failed, or that
+# named the wrong version, still pushed an image and moved :latest.
 on:
-  push:
-    tags:
-      - "*"
+  workflow_call:
+    inputs:
+      version:
+        description: The release, already checked against the tag and pyproject.toml
+        required: true
+        type: string
+    secrets:
+      QUAY_USERNAME:
+        required: true
+      QUAY_TOKEN:
+        required: true
 
-concurrency:
-  group: docker-${{ github.ref }}
-  cancel-in-progress: true
+permissions: {}
 
 jobs:
   docker:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      # :latest is the newest final release. Up to 0.17.4 it moved for any
+      # tag without a hyphen, which takes in 1.0.0rc1 and a backport tagged
+      # after a later release. Those keep their own tag and leave :latest be.
+      - name: Is this the newest release?
+        id: latest
+        env:
+          VERSION: ${{ inputs.version }}
+        # GitHub runs a bare `run:` without pipefail, which would let a failed
+        # ls-remote pass for "no newer release" and leave :latest behind.
+        run: |
+          set -o pipefail
+          newest=$(git ls-remote --tags --refs origin \
+            | sed 's#.*refs/tags/##' \
+            | { grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' || true; } \
+            | sort -V | tail -n 1)
+          echo "newest release: ${newest:-none}; this one: $VERSION"
+          if [ "$VERSION" = "$newest" ]; then
+            echo "latest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "latest=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: quay.io/cellgeni/adata-cli
+          tags: |
+            type=raw,value=${{ inputs.version }}
+            type=raw,value=latest,enable=${{ steps.latest.outputs.latest == 'true' }}
+
+      # Built into the local daemon, checked, and then that same image is
+      # pushed: nothing is rebuilt after the check. No cache from earlier
+      # runs: a release image is built from the pinned base, duckdb and lock
+      # alone.
+      - name: Build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: The image runs, as its own user and as the caller's
+        env:
+          VERSION: ${{ inputs.version }}
+        run: bash .github/scripts/smoke-image.sh "quay.io/cellgeni/adata-cli:$VERSION" "$VERSION"
 
       - name: Login to Quay
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: quay.io
           username: ${{ secrets.QUAY_USERNAME }}
           password: ${{ secrets.QUAY_TOKEN }}
 
-      - name: Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: quay.io/cellgeni/adata-cli
-          tags: |
-            type=ref,event=tag
-            # push "latest" only for tags WITHOUT hyphens (excludes pre-releases like 1.0.0-beta):
-            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Push the image that was checked
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          while read -r tag; do
+            if [ -n "$tag" ]; then docker push "$tag"; fi
+          done <<< "$TAGS"

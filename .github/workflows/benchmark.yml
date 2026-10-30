@@ -29,6 +29,10 @@ concurrency:
   group: benchmark-${{ github.ref }}
   cancel-in-progress: true
 
+# None by default: the repository's default token can write. The job that
+# measures reads; only the job that commits the results can write.
+permissions: {}
+
 jobs:
   benchmark:
     name: adata-cli vs anndata/scanpy
@@ -36,16 +40,26 @@ jobs:
     timeout-minutes: 90
     # Job level, not step level: a report must never mark a release red.
     continue-on-error: true
+    # The baselines are the newest anndata, scanpy, dask and geopandas from
+    # PyPI, which uv.lock does not hold, so this job runs code nobody pinned.
+    # Up to 0.17.4 it did so holding a token that could push to main.
     permissions:
-      contents: write
+      contents: read
+    outputs:
+      measured: ${{ steps.render.outputs.measured }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          # `git describe --tags` names the run after its tag.
           fetch-depth: 0
+          persist-credentials: false
 
-      - uses: astral-sh/setup-uv@v3
+      # No cache: what is restored here would run in the job that produces
+      # the numbers committed to main.
+      - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3.2.4
         with:
-          enable-cache: true
+          version: "0.13.1"
+          enable-cache: false
 
       # The checked-out source, not the published wheel. Benchmarking the
       # wheel would mean waiting on publish-pypi and then on index
@@ -57,45 +71,77 @@ jobs:
         run: df -h /
 
       - name: Run
+        env:
+          TIER: ${{ inputs.tier || 'ci' }}
         run: |
-          uv run python -m benchmarks.run \
-            --tier "${{ inputs.tier || 'ci' }}" \
+          uv run --frozen python -m benchmarks.run \
+            --tier "$TIER" \
             --out results.json \
             --work "$RUNNER_TEMP/bench"
 
       - name: Render
+        id: render
         run: |
-          uv run python -m benchmarks.report results.json --out summary.md
+          uv run --frozen python -m benchmarks.report results.json --out summary.md
           cat summary.md >> "$GITHUB_STEP_SUMMARY"
+          echo "measured=true" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
-          name: benchmark-${{ github.ref_name }}
+          name: benchmark-results
           path: |
             results.json
             summary.md
           retention-days: 90
 
-      # docs/ is the durable home: artifacts expire, and one absolute number
-      # with nothing to compare it against says very little. The page is
-      # already served by Pages from docs/, so this needs no extra machinery.
+  # docs/ is the durable home: artifacts expire, and one absolute number
+  # with nothing to compare it against says very little. The page is
+  # already served by Pages from docs/, so this needs no extra machinery.
+  #
+  # This job holds the write token, so it installs nothing: the report is
+  # the standard library and benchmarks/ from main, and results.json is read
+  # as data. It renders its own summary rather than take the one above.
+  publish:
+    name: Commit the results to docs/
+    needs: [benchmark]
+    # A pushed tag, or a dispatch that asks. A dispatch from a tag that does
+    # not ask must not overwrite that release's results with another tier.
+    if: needs.benchmark.outputs.measured == 'true' && (github.event_name == 'push' || inputs.publish)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    permissions:
+      contents: write   # push to main, and edit the release notes
+    steps:
+      # A tag build is on a detached HEAD; the page belongs on main. The
+      # credentials stay for the push, and nothing here is uploaded.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true # zizmor: ignore[artipacked] it pushes to main
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: benchmark-results
+          path: ${{ runner.temp }}/results
+
       - name: Publish to docs
-        if: github.ref_type == 'tag' || inputs.publish
+        env:
+          REF_NAME: ${{ github.ref_name }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # A tag build is on a detached HEAD; the page belongs on main.
-          git fetch origin main
-          git checkout -B main origin/main
-          uv run python -m benchmarks.report results.json --docs docs --publish
+          python3 -m benchmarks.report "$RUNNER_TEMP/results/results.json" --out "$RUNNER_TEMP/summary.md"
+          python3 -m benchmarks.report "$RUNNER_TEMP/results/results.json" --docs docs --publish
           git add docs/reference/benchmarks.md docs/benchmarks
           if git diff --cached --quiet; then
             echo "nothing to publish"; exit 0
           fi
-          git commit -m "Benchmark results for ${{ github.ref_name }} [skip ci]"
+          git commit -m "Benchmark results for $REF_NAME [skip ci]"
           # Another job may have landed on main in the meantime.
-          for attempt in 1 2 3; do
+          for _ in 1 2 3; do
             if git push origin main; then exit 0; fi
             git pull --rebase origin main
           done
@@ -108,17 +154,18 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
         run: |
-          tag="${{ github.ref_name }}"
-          gh release view "$tag" >/dev/null 2>&1 || {
-            echo "no release for $tag yet; skipping"; exit 0
+          gh release view "$TAG" >/dev/null 2>&1 || {
+            echo "no release for $TAG yet; skipping"; exit 0
           }
-          gh release view "$tag" --json body -q .body > body.md
+          gh release view "$TAG" --json body -q .body > "$RUNNER_TEMP/body.md"
           # Idempotent: replace any block this job wrote before.
-          python - <<'PY'
-          import pathlib, re
-          body = pathlib.Path("body.md").read_text()
-          summary = pathlib.Path("summary.md").read_text()
+          python3 - <<'PY'
+          import os, pathlib, re
+          tmp = pathlib.Path(os.environ["RUNNER_TEMP"])
+          body = (tmp / "body.md").read_text()
+          summary = (tmp / "summary.md").read_text()
           block = (
               "<!-- benchmark:start -->\n\n"
               "<details><summary>Benchmark vs anndata/scanpy</summary>\n\n"
@@ -132,6 +179,6 @@ jobs:
               if pattern.search(body)
               else body.rstrip() + "\n\n" + block + "\n"
           )
-          pathlib.Path("body.md").write_text(body)
+          (tmp / "body.md").write_text(body)
           PY
-          gh release edit "$tag" --notes-file body.md
+          gh release edit "$TAG" --notes-file "$RUNNER_TEMP/body.md"

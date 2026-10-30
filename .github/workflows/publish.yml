@@ -1,6 +1,17 @@
 name: Publish
 
 # Tags are bare MAJOR.MINOR.PATCH, matching the existing convention.
+#
+# What a run publishes, by how it started:
+#
+#   a pushed tag                            PyPI, then the image
+#   workflow_dispatch, target testpypi      TestPyPI only, from any ref
+#   workflow_dispatch, target pypi          PyPI, then the image; from a tag
+#                                           only, as check-version refuses a
+#                                           branch
+#
+# Nothing publishes unless the suite passed, and nothing reaches PyPI or
+# quay.io unless the tag matches pyproject.toml.
 on:
   push:
     tags: ["*"]
@@ -13,16 +24,33 @@ on:
         type: choice
         options: [testpypi, pypi]
 
+# None by default: the repository's default token can write, and a job that
+# names no permissions gets that. Each job below asks for what it uses.
+permissions: {}
+
 jobs:
   # The tag must match the version in pyproject.toml. Nothing enforced this
   # before, and 0.3.2 was tagged against a tree declaring 0.3.1.
   check-version:
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    # Every tag, and every dispatch to PyPI: one from a branch fails here,
+    # rather than pass having published nothing.
+    if: startsWith(github.ref, 'refs/tags/') || inputs.target == 'pypi'
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Tag must match the declared version
+        id: version
         run: |
+          if [ "$GITHUB_REF_TYPE" != tag ]; then
+            echo "::error::Publish to PyPI from a tag, not from $GITHUB_REF_NAME"
+            exit 1
+          fi
           declared=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
           tag="${GITHUB_REF_NAME}"
           echo "pyproject: $declared, tag: $tag"
@@ -30,64 +58,80 @@ jobs:
             echo "::error::Tag $tag does not match pyproject version $declared"
             exit 1
           fi
+          echo "version=$declared" >> "$GITHUB_OUTPUT"
 
   test:
-    uses: ./.github/workflows/tests.yml
+    uses: ./.github/workflows/tests.yml # zizmor: ignore[self-repository] actionlint 1.7 predates $/
+    # A called workflow gets no more than its caller grants, and the unit
+    # job in tests.yml writes a check run and comments on pull requests.
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
 
   build:
     needs: [test]
-    if: always() && needs.test.result == 'success'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3.2.4
+        with:
+          version: "0.13.1"
+          enable-cache: false
       - run: uv build
       - name: Check metadata renders on PyPI
-        run: uvx twine check dist/*
-      - uses: actions/upload-artifact@v4
+        run: uvx twine==7.0.0 check dist/*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist
           path: dist/
 
   publish-testpypi:
     needs: [build]
-    if: |
-      always()
-      && needs.build.result == 'success'
-      && github.event_name == 'workflow_dispatch'
-      && inputs.target == 'testpypi'
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
     runs-on: ubuntu-latest
     environment: testpypi
     permissions:
       id-token: write   # trusted publishing; no API token secret needed
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: dist
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           repository-url: https://test.pypi.org/legacy/
 
   publish-pypi:
+    # Both must succeed, and check-version refuses anything but a tag. The
+    # event test is what keeps a TestPyPI dispatch from a tag off PyPI; up
+    # to 0.17.4 any run from a tag published here.
     needs: [build, check-version]
-    # check-version only runs for tags, and GitHub skips a job whose
-    # dependency was skipped -- so without always() a manual dispatch to PyPI
-    # would never publish. Success of build is therefore asserted explicitly,
-    # and check-version is accepted as either passed or not applicable.
-    if: |
-      always()
-      && needs.build.result == 'success'
-      && (needs.check-version.result == 'success' || needs.check-version.result == 'skipped')
-      && (startsWith(github.ref, 'refs/tags/')
-          || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi'))
+    if: github.event_name == 'push' || inputs.target == 'pypi'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: dist
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+
+  # The image moves :latest, so it goes out only once PyPI has the release:
+  # after the suite, the version check and the upload have all passed.
+  image:
+    needs: [check-version, publish-pypi]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/quay-on-tag.yml # zizmor: ignore[self-repository] as above
+    with:
+      version: ${{ needs.check-version.outputs.version }}
+    secrets:
+      QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+      QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}

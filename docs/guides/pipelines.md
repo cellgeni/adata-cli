@@ -33,6 +33,21 @@ The image runs under any user id and on a read-only root filesystem: a
 Singularity or Apptainer bind of your home directory cannot shadow its
 packages, and Python's caches go to `/tmp`.
 
+From 0.17.5 it runs as an unprivileged user (uid 10001, working directory
+`/home/adata`) rather than root when nothing says otherwise. Singularity and
+Apptainer always run it as you. With Docker, the user it runs as has to be
+able to read your files and write to the output's directory, so run it as
+yourself:
+
+```bash
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD":/data \
+    quay.io/cellgeni/adata-cli:0.17.5 \
+    adata convert /data/counts.csv -o /data/counts.h5ad
+```
+
+and in Nextflow with Docker, set `docker.runOptions = '-u $(id -u):$(id -g)'`,
+as nf-core pipelines do.
+
 In a Nextflow process:
 
 ```nextflow
