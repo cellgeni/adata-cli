@@ -56,10 +56,11 @@ def _store(
     obs: Optional[Dict[str, Writer]] = None,
     var: Optional[Dict[str, Writer]] = None,
     obsm: Optional[Dict[str, Writer]] = None,
+    layers: Optional[Dict[str, Writer]] = None,
     zarr_format: Optional[int] = None,
 ) -> Path:
-    """A store with these names, whose columns and obsm entries are each
-    written by the function given for them."""
+    """A store with these names, whose columns, layers and obsm entries are
+    each written by the function given for them; X too, if given one."""
     with open_store(path, "w", zarr_format=zarr_format) as handle:
         root = handle.root
         for axis, names, columns in (("obs", cells, obs), ("var", genes, var)):
@@ -69,9 +70,10 @@ def _store(
         ew.ensure_anndata_skeleton(root)
         if X is None:
             X = np.arange(1, len(cells) * len(genes) + 1, dtype=np.float32).reshape(len(cells), len(genes))
-        _matrix(root, "X", X)
-        for name, write in (obsm or {}).items():
-            write(root["obsm"], name)
+        X(root, "X") if callable(X) else _matrix(root, "X", X)
+        for group, entries in (("obsm", obsm), ("layers", layers)):
+            for name, write in (entries or {}).items():
+                write(root[group], name)
     return path
 
 
@@ -107,6 +109,27 @@ def dense(*values: Any, dtype: Any = None) -> Writer:
 
 def matrix(value: Any) -> Writer:
     return lambda g, n: _matrix(g, n, value)
+
+
+def chunked(value: Any, chunks: tuple) -> Writer:
+    """A dense array stored in `chunks` and compressed with gzip, which no
+    backend's defaults give: a copy that keeps them kept them on purpose."""
+    def write(parent: Any, name: str) -> None:
+        value_ = np.asarray(value)
+        if isinstance(parent, h5py.Group):
+            out = parent.create_dataset(name, data=value_, chunks=chunks,
+                                        compression="gzip", compression_opts=6)
+        elif parent.metadata.zarr_format == 3:
+            from zarr.codecs import GzipCodec
+
+            out = parent.create_array(name, data=value_, chunks=chunks,
+                                      compressors=[GzipCodec(level=6)])
+        else:
+            from numcodecs import GZip
+
+            out = parent.create_array(name, data=value_, chunks=chunks, compressors=GZip(level=6))
+        spec.set_encoding(out, spec.ARRAY)
+    return write
 
 
 # ---------------------------------------------------------------------------
@@ -720,3 +743,226 @@ def test_inputs_sharing_no_variables_are_still_refused_under_an_inner_join(tmp_p
     b = _store(tmp_path / "b.h5ad", ["b0"], ["g2"])
     with pytest.raises(ValueError, match="--join outer"):
         concat_on_disk([a, b], tmp_path / "out.h5ad", QUIET)
+
+
+# ---------------------------------------------------------------------------
+# F075: dense layout
+
+
+def _layout(path: Path, element: str) -> tuple:
+    """A dense array's chunks and compression, as its backend spells them."""
+    with open_store(path, "r") as handle:
+        array = handle.root[element]
+        if isinstance(array, h5py.Dataset):
+            return array.chunks, array.compression
+        return tuple(array.chunks), [type(c).__name__ for c in array.compressors]
+
+
+@pytest.mark.parametrize("join", ["inner", "outer"])
+def test_dense_matrices_and_obsm_arrays_keep_the_sources_chunking_and_compression(tmp_path, backend, join):
+    """F075: dense X, layers and obsm arrays were written contiguous and
+    uncompressed whatever the inputs were, so 109 KB of gzip-compressed
+    input came out as 3.7 MB. The sparse path and varm kept theirs."""
+    rng = np.random.default_rng(0)
+
+    def make(stem, cells, genes):
+        x = rng.poisson(1, (len(cells), len(genes))).astype(np.float32)
+        return _on(backend, tmp_path, stem, cells, genes, X=chunked(x, (3, 2)),
+                   layers={"counts": chunked(x * 2, (3, 2))},
+                   obsm={"X_pca": chunked(rng.normal(size=(len(cells), 4)), (3, 4))})
+
+    a = make("a", [f"a{i}" for i in range(7)], ["g0", "g1", "g2", "g3"])
+    b = make("b", [f"b{i}" for i in range(5)], ["g0", "g1", "g2", "g4"])
+    out = backend_path(tmp_path, backend, "out")
+    got = _concat([a, b], out, join=join, chunk_rows=4)
+    for element in ("X", "layers/counts", "obsm/X_pca"):
+        assert _layout(out, element) == _layout(a, element), element
+    ref = _reference([a, b], join=join, fill_value=0)
+    assert np.array_equal(got.X, ref.X)
+    assert np.array_equal(got.layers["counts"], ref.layers["counts"])
+    assert np.array_equal(got.obsm["X_pca"], ref.obsm["X_pca"])
+
+
+# ---------------------------------------------------------------------------
+# F113: an outer join's var order
+
+
+@pytest.mark.parametrize("layout", ["csr", "csc", "dense"])
+@pytest.mark.parametrize(
+    "genes_b",
+    [["g2", "g0", "g1"], ["g0", "g1", "g2"], ["g3", "g0"], ["g2", "g0"]],
+    ids=["same-order", "reordered", "new-genes", "a-subset"],
+)
+def test_an_outer_join_orders_var_as_anndata_does(tmp_path, backend, layout, genes_b):
+    """F113: an outer join's var came out in order of first appearance, where
+    anndata.concat sorts the union unless every input has the same var in
+    the same order. Values matched once aligned, but code that aligns by
+    position against an anndata-made reference saw another matrix."""
+    genes_a = ["g2", "g0", "g1"]
+    as_layout = {"csr": sparse.csr_matrix, "csc": sparse.csc_matrix, "dense": np.asarray}[layout]
+
+    def X(n_cells, n_genes, start):
+        return as_layout(np.arange(start, start + n_cells * n_genes, dtype=np.float32).reshape(n_cells, n_genes))
+
+    a = _on(backend, tmp_path, "a", ["a0", "a1"], genes_a, X=X(2, 3, 1))
+    b = _on(backend, tmp_path, "b", ["b0", "b1", "b2"], genes_b, X=X(3, len(genes_b), 10))
+    got = _concat([a, b], backend_path(tmp_path, backend, "out"), join="outer")
+    ref = _reference([a, b], join="outer", fill_value=0)
+    assert list(got.var_names) == list(ref.var_names)
+    dense = lambda m: m.toarray() if sparse.issparse(m) else np.asarray(m)
+    assert np.array_equal(dense(got.X), dense(ref.X))
+
+
+def test_an_outer_join_keeps_a_shared_var_order_beside_inputs_without_variables(tmp_path):
+    """F113: an input with no variables has no say in the order, as in
+    anndata, where a union with an empty index is the other index as is."""
+    genes = ["g2", "g0", "g1"]
+    a = _store(tmp_path / "a.h5ad", ["a0"], genes)
+    empty = _store(tmp_path / "e.h5ad", ["e0"], [], X=np.zeros((1, 0), dtype=np.float32))
+    b = _store(tmp_path / "b.h5ad", ["b0"], genes)
+    got = _concat([a, empty, b], tmp_path / "out.h5ad", join="outer")
+    ref = _reference([a, empty, b], join="outer", fill_value=0)
+    assert list(got.var_names) == list(ref.var_names) == genes
+    assert np.array_equal(got.X, ref.X)
+
+
+# ---------------------------------------------------------------------------
+# F114: the order of merged categories
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        (["t2", "t10", "b"], ["t1", "b"]),
+        (["b", "a"], ["a", "b"]),
+        (["c", "b", "a"], ["a"]),
+        (["a"], ["c", "b", "a"]),
+        (["b", "a"], ["b", "a"]),
+        ([10, 2], [3, 10]),
+        ([2.5, -1.0], [0.5]),
+    ],
+    ids=["new-categories", "same-set-reordered", "first-covers-the-union",
+         "second-covers-the-union", "identical", "integers", "floats"],
+)
+def test_merged_categories_are_ordered_as_anndata_orders_them(tmp_path, backend, first, second):
+    """F114: merged categories came out in order of first appearance, where
+    anndata natsorts the union -- unless the first input already holds every
+    category, whose order pandas then keeps. `.cat.codes` and plotting order
+    differed from anndata.concat's."""
+    a = _on(backend, tmp_path, "a", [f"a{i}" for i in range(len(first))], ["g"],
+            obs={"c": categorical(first, list(range(len(first))))})
+    b = _on(backend, tmp_path, "b", [f"b{i}" for i in range(len(second))], ["g"],
+            obs={"c": categorical(second, list(range(len(second))))})
+    got = _concat([a, b], backend_path(tmp_path, backend, "out"))
+    ref = _reference([a, b])
+    assert list(got.obs["c"].cat.categories) == list(ref.obs["c"].cat.categories)
+    assert list(got.obs["c"]) == list(ref.obs["c"])
+    assert not got.obs["c"].cat.ordered
+
+
+@pytest.mark.parametrize("join", ["inner", "outer"])
+def test_merged_categories_follow_the_first_input_that_has_the_column(tmp_path, join):
+    """F114 under an outer join: the first input without the column has no
+    say, as in anndata."""
+    a = _store(tmp_path / "a.h5ad", ["a0"], ["g"], obs={"other": strings("x")})
+    b = _store(tmp_path / "b.h5ad", ["b0", "b1", "b2"], ["g"],
+               obs={"other": strings("y", "y", "y"), "c": categorical(["c", "b", "a"], [0, 1, 2])})
+    c = _store(tmp_path / "c.h5ad", ["c0"], ["g"],
+               obs={"other": strings("z"), "c": categorical(["a"], [0])})
+    got = _concat([a, b, c], tmp_path / "out.h5ad", join=join)
+    ref = _reference([a, b, c], join=join)
+    if join == "outer":
+        assert list(got.obs["c"].cat.categories) == list(ref.obs["c"].cat.categories)
+        assert _cells(got.obs["c"]) == _cells(ref.obs["c"])
+    else:
+        assert "c" not in got.obs and "c" not in ref.obs
+
+
+@pytest.mark.parametrize(
+    "second, keeps_order",
+    [
+        ((["lo", "mid", "hi"], True), True),
+        ((["hi", "mid", "lo"], True), False),
+        ((["lo", "mid", "hi", "max"], True), False),
+        ((["lo", "mid", "hi"], False), False),
+        (([], True), True),
+    ],
+    ids=["same-order", "reversed", "another-set", "second-unordered", "second-all-missing"],
+)
+def test_ordered_categoricals_stay_ordered_only_when_every_input_agrees(tmp_path, backend, second, keeps_order):
+    """F114: 'ordered' categoricals whose orders conflict kept the first
+    input's order, silently reversing what the second input's meant.
+    anndata gives up on the order (plain values); concat now writes them
+    unordered, with natsorted categories and a warning."""
+    first = ["lo", "mid", "hi"]
+    labels, ordered = second
+    a = _on(backend, tmp_path, "a", ["a0", "a1", "a2"], ["g"],
+            obs={"c": categorical(first, [0, 1, 2], ordered=True)})
+    codes = [len(labels) - 1, 0] if labels else [-1, -1]
+    b = _on(backend, tmp_path, "b", ["b0", "b1"], ["g"],
+            obs={"c": categorical(labels, codes, ordered=ordered)})
+    console = Console(record=True, width=200)
+    out = backend_path(tmp_path, backend, "out")
+    concat_on_disk([a, b], out, console)
+    got, ref = _read(out), _reference([a, b])
+    assert _cells(got.obs["c"]) == _cells(ref.obs["c"])
+    warned = "written unordered" in " ".join(console.export_text().split())
+    if keeps_order:
+        assert ref.obs["c"].cat.ordered and got.obs["c"].cat.ordered
+        assert list(got.obs["c"].cat.categories) == list(ref.obs["c"].cat.categories) == first
+        assert not warned
+    else:
+        assert ref.obs["c"].dtype == object
+        assert not got.obs["c"].cat.ordered
+        union = sorted(set(first) | set(labels))
+        assert list(got.obs["c"].cat.categories) == union
+        assert warned
+
+
+# ---------------------------------------------------------------------------
+# F116: --fill-value and integer matrices
+
+
+@pytest.mark.parametrize("layout", ["dense", "csr"])
+def test_a_fill_value_leaves_integer_matrices_alone_when_nothing_is_filled(tmp_path, backend, layout):
+    """F116: --fill-value made integer X and layers float64 on an inner join,
+    where no cell is filled, doubling X; anndata.concat keeps them int32."""
+    as_layout = {"csr": sparse.csr_matrix, "dense": np.asarray}[layout]
+    x = np.arange(6, dtype=np.int32).reshape(2, 3)
+    a = _on(backend, tmp_path, "a", ["a0", "a1"], ["g0", "g1", "g2"], X=as_layout(x),
+            layers={"counts": matrix(as_layout(x * 2))})
+    b = _on(backend, tmp_path, "b", ["b0", "b1"], ["g2", "g1", "g3"], X=as_layout(x + 10),
+            layers={"counts": matrix(as_layout(x * 3))})
+    got = _concat([a, b], backend_path(tmp_path, backend, "out"), fill_value=-1)
+    ref = _reference([a, b], fill_value=-1)
+    dense = lambda m: m.toarray() if sparse.issparse(m) else np.asarray(m)
+    for mine, theirs in ((got.X, ref.X), (got.layers["counts"], ref.layers["counts"])):
+        assert mine.dtype == theirs.dtype == np.int32
+        assert np.array_equal(dense(mine), dense(theirs))
+
+
+@pytest.mark.parametrize(
+    "dtype, fill, expected",
+    [
+        (np.int32, -1, np.int32),
+        (np.int32, 7, np.int32),
+        (np.int32, 0.5, np.float64),
+        (np.int32, np.nan, np.float64),
+        (np.uint8, -1, np.float64),
+        (np.uint8, 300, np.float64),
+        (np.bool_, 1, np.bool_),
+        (np.bool_, 2, np.float64),
+        (np.float32, 0.5, np.float32),
+    ],
+)
+def test_an_outer_join_widens_a_matrix_only_for_a_fill_value_it_cannot_hold(tmp_path, dtype, fill, expected):
+    """F116: when an outer join does fill cells, an integer matrix that can
+    hold the fill value keeps its dtype; one that cannot becomes float64.
+    The values are anndata.concat's either way."""
+    x = np.array([[1, 0], [1, 1]], dtype=dtype)
+    a = _store(tmp_path / "a.h5ad", ["a0", "a1"], ["g0", "g1"], X=x)
+    b = _store(tmp_path / "b.h5ad", ["b0", "b1"], ["g0", "g2"], X=x)
+    got = _concat([a, b], tmp_path / "out.h5ad", join="outer", fill_value=fill)
+    ref = _reference([a, b], join="outer", fill_value=fill)
+    assert got.X.dtype == expected
+    assert np.array_equal(got.X.astype(np.float64), ref.X.astype(np.float64), equal_nan=True)

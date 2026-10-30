@@ -17,6 +17,7 @@ from adata.core.concat import concat_on_disk
 
 ad = pytest.importorskip("anndata")
 pd = pytest.importorskip("pandas")
+sparse = pytest.importorskip("scipy.sparse")
 
 QUIET = Console(quiet=True, record=True)
 
@@ -192,3 +193,149 @@ def test_varm_differing_by_a_fraction_is_not_the_same(tmp_path):
     a = _varm_store(tmp_path / "a.h5ad", genes, {"x": values})
     b = _varm_store(tmp_path / "b.h5ad", genes, {"x": values + 0.5})
     assert "x" not in _concat(tmp_path, [a, b], merge="same").varm
+
+
+# ---------------------------------------------------------------------------
+# F118: varp
+
+
+def _varp_store(path: Path, genes, entries, *, n_cells: int = 2):
+    obj = ad.AnnData(
+        X=np.zeros((n_cells, len(genes)), dtype=np.float32),
+        obs=pd.DataFrame(index=[f"{path.stem}{i}" for i in range(n_cells)]),
+        var=pd.DataFrame(index=list(genes)),
+    )
+    for key, value in entries.items():
+        obj.varp[key] = value
+    if path.suffix == ".zarr":
+        obj.write_zarr(path)
+    else:
+        obj.write_h5ad(path)
+    return path
+
+
+def _pairwise(genes, seed: int = 0, density: float = 0.4) -> "pd.DataFrame":
+    """A gene x gene matrix, labelled so it can be put in any gene order."""
+    rng = np.random.default_rng(seed)
+    values = rng.integers(1, 9, (len(genes), len(genes))) * (rng.random((len(genes),) * 2) < density)
+    return pd.DataFrame(values.astype(np.float64), index=list(genes), columns=list(genes))
+
+
+def _as(layout: str, frame: "pd.DataFrame", genes=None):
+    values = (frame.loc[list(genes), list(genes)] if genes is not None else frame).to_numpy()
+    return {"dense": np.asarray, "csr": sparse.csr_matrix, "csc": sparse.csc_matrix}[layout](values)
+
+
+def _dense(value):
+    return value.toarray() if sparse.issparse(value) else np.asarray(value)
+
+
+
+@pytest.mark.parametrize("layout", ["dense", "csr", "csc"])
+@pytest.mark.parametrize("merge", ["same", "unique", "first", "only"])
+def test_varp_follows_merge_as_anndata_does(tmp_path, merge, layout):
+    """F118: varp was dropped whatever --merge said, with a reason ('pairwise
+    values have no meaning between cells from different inputs') that holds
+    for obsp only: varp relates genes, and anndata merges it as it merges
+    varm. b's genes are in another order, so its entries are compared and
+    written on a's."""
+    genes = [f"g{i}" for i in range(7)]
+    shuffled = list(np.random.default_rng(1).permutation(genes))
+    shared, own_a, own_b = _pairwise(genes, 0), _pairwise(genes, 1), _pairwise(genes, 2)
+    a = _varp_store(tmp_path / "a.h5ad", genes, {"corr": _as(layout, shared), "own": _as(layout, own_a)})
+    b = _varp_store(tmp_path / "b.h5ad", shuffled, {
+        "corr": _as(layout, shared, shuffled), "own": _as(layout, own_b, shuffled),
+        "only_b": _as(layout, own_b, shuffled),
+    })
+    got = _concat(tmp_path, [a, b], merge=merge, chunk_rows=2)
+    ref = ad.concat([ad.read_h5ad(a), ad.read_h5ad(b)], merge=merge)
+    assert sorted(got.varp) == sorted(ref.varp)
+    assert got.varp, "every strategy keeps something here"
+    for key in ref.varp:
+        assert np.array_equal(_dense(got.varp[key]), _dense(ref.varp[key])), key
+
+
+@pytest.mark.parametrize("ext", [".h5ad", ".zarr"])
+def test_varp_in_another_gene_order_is_written_on_the_output_genes(tmp_path, ext):
+    """F118: the entry kept comes from an input whose genes are in another
+    order, so a sparse one is rebuilt on the output's genes through buckets
+    on disk, and a dense one a block of rows at a time."""
+    genes = [f"g{i}" for i in range(30)]
+    shuffled = list(np.random.default_rng(3).permutation(genes))
+    frame = _pairwise(genes, 4)
+    entries = {layout: _as(layout, frame, shuffled) for layout in ("dense", "csr", "csc")}
+    bare = _varp_store(tmp_path / f"bare{ext}", genes, {})
+    b = _varp_store(tmp_path / f"b{ext}", shuffled, entries)
+    out = tmp_path / f"out{ext}"
+    concat_on_disk([bare, b], out, QUIET, merge="first", chunk_rows=3)
+    got = ad.read_zarr(out) if ext == ".zarr" else ad.read_h5ad(out)
+    ref = ad.concat([ad.read_h5ad(bare) if ext == ".h5ad" else ad.read_zarr(bare),
+                     ad.read_h5ad(b) if ext == ".h5ad" else ad.read_zarr(b)], merge="first")
+    assert list(got.var_names) == genes
+    for layout in ("dense", "csr", "csc"):
+        mine = got.varp[layout]
+        assert np.array_equal(_dense(mine), _dense(ref.varp[layout])), layout
+        assert np.array_equal(_dense(mine), frame.to_numpy()), layout
+        if layout != "dense":
+            assert mine.format == layout and mine.has_sorted_indices
+
+
+def test_sparse_varp_is_compared_by_value_as_anndata_compares_it(tmp_path):
+    """F118: anndata's `same` finds a CSR and a CSC entry with the same
+    values equal, and float32 equal to float64, and ignores stored zeros;
+    a dense entry must match its dtype as well, as varm's does."""
+    genes = [f"g{i}" for i in range(5)]
+    frame = _pairwise(genes, 5)
+    with_zero = sparse.csr_matrix(frame.to_numpy())
+    with_zero.data[0] = 0.0
+    without = frame.to_numpy().copy()
+    without[np.unravel_index(np.flatnonzero(without)[0], without.shape)] = 0.0
+    a = _varp_store(tmp_path / "a.h5ad", genes, {
+        "formats": sparse.csr_matrix(frame.to_numpy()), "dtypes": sparse.csr_matrix(frame.to_numpy()),
+        "zeros": with_zero, "dense_dtypes": frame.to_numpy(),
+    })
+    b = _varp_store(tmp_path / "b.h5ad", genes, {
+        "formats": sparse.csc_matrix(frame.to_numpy()),
+        "dtypes": sparse.csr_matrix(frame.to_numpy().astype(np.float32)),
+        "zeros": sparse.csr_matrix(without), "dense_dtypes": frame.to_numpy().astype(np.float32),
+    })
+    got = _concat(tmp_path, [a, b], merge="same")
+    ref = ad.concat([ad.read_h5ad(a), ad.read_h5ad(b)], merge="same")
+    assert sorted(got.varp) == sorted(ref.varp) == ["dtypes", "formats", "zeros"]
+
+
+def test_an_outer_join_drops_varp_an_input_cannot_cover(tmp_path):
+    """F118, as varm: an input lacking some of the output's genes has no
+    entry for them, so it counts as not having the entry."""
+    a = _varp_store(tmp_path / "a.h5ad", [f"g{i}" for i in range(6)],
+                    {"corr": _pairwise([f"g{i}" for i in range(6)]).to_numpy()})
+    b = _varp_store(tmp_path / "b.h5ad", [f"g{i}" for i in range(3, 8)],
+                    {"corr": _pairwise([f"g{i}" for i in range(3, 8)]).to_numpy()})
+    assert len(_concat(tmp_path, [a, b], join="outer", merge="same").varp) == 0
+    assert len(_concat(tmp_path, [a, b], join="outer", merge="first").varp) == 0
+
+
+def test_varp_is_dropped_without_merge_with_a_note_and_obsp_always(tmp_path):
+    """F118: without --merge varp is dropped as varm is, with a note that
+    says how to keep it; obsp is dropped whatever --merge says."""
+    genes = [f"g{i}" for i in range(4)]
+    paths = []
+    for tag in "ab":
+        obj = ad.AnnData(X=np.ones((3, 4), dtype=np.float32),
+                         obs=pd.DataFrame(index=[f"{tag}{i}" for i in range(3)]),
+                         var=pd.DataFrame(index=genes))
+        obj.varp["corr"] = np.eye(4)
+        obj.obsp["distances"] = sparse.csr_matrix(np.eye(3))
+        obj.write_h5ad(tmp_path / f"{tag}.h5ad")
+        paths.append(tmp_path / f"{tag}.h5ad")
+    console = Console(record=True, width=200)
+    concat_on_disk(paths, tmp_path / "plain.h5ad", console)
+    text = console.export_text()
+    assert "Dropping varp: pass --merge" in text and "Dropping obsp" in text
+    plain = ad.read_h5ad(tmp_path / "plain.h5ad")
+    assert len(plain.varp) == 0 and len(plain.obsp) == 0
+    console = Console(record=True, width=200)
+    concat_on_disk(paths, tmp_path / "merged.h5ad", console, merge="same")
+    merged = ad.read_h5ad(tmp_path / "merged.h5ad")
+    assert list(merged.varp) == ["corr"] and len(merged.obsp) == 0
+    assert "Dropping obsp" in console.export_text()

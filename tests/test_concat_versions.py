@@ -68,3 +68,33 @@ def test_an_outer_join_missing_a_text_column_opens_in_the_release_that_wrote_the
         ["a", "bb", "ccc", "d", "ee", "f"]
     )
     assert read_back(out, "str(a.obs['cell_type'].dtype)") == "category"
+
+
+def test_a_csc_concat_with_varp_opens_in_the_release_that_wrote_the_inputs(
+    store, tmp_path, fmt, read_back
+):
+    """F011, F075, F118, F114: CSC X put together through buckets, dense
+    layers written with the input's layout, varp merged under --merge and an
+    ordered categorical kept ordered -- all opened by the release that wrote
+    the inputs, 0.8 to 0.13."""
+    csc = tmp_path / f"csc.{fmt}"
+    result = runner.invoke(app, [
+        "recast", str(store), "X", "layers/counts", "-o", str(csc), "--layout", "csc",
+    ])
+    assert result.exit_code == 0, _out(result)
+    other = tmp_path / f"other.{fmt}"
+    shutil.copytree(csc, other) if csc.is_dir() else shutil.copy2(csc, other)
+
+    out = tmp_path / f"merged.{fmt}"
+    result = runner.invoke(app, [
+        "concat", str(csc), str(other), "-o", str(out), "--merge", "same",
+        "--index-unique", "-", "--chunk", "2",
+    ])
+    assert result.exit_code == 0, _out(result)
+
+    assert read_back(out, "a.shape") == f"({2 * N_OBS}, 4)"
+    assert read_back(out, "a.X.format") == "csc"
+    assert read_back(out, "bool((a.X.toarray()[:6] == a.X.toarray()[6:]).all())") == "True"
+    assert read_back(out, "bool((a.layers['counts'].toarray() == a.layers['dense']).all())") == "True"
+    assert read_back(out, "sorted(a.varp)") == "['corr']"
+    assert read_back(out, "a.obs['cell_type'].cat.ordered") == "True"

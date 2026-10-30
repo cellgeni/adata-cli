@@ -33,8 +33,9 @@ an outer-join concat really does produce n_obs x n_var_union cells.
 from __future__ import annotations
 
 import pathlib
+from contextlib import contextmanager
 from pathlib import Path
-from typing import List, Optional
+from typing import Iterator, List, Optional
 
 import numpy as np
 import pytest
@@ -430,6 +431,219 @@ def test_obs_column_allocation_grows_linearly(tmp_path, kind):
         what=f"concat allocation, {kind} obs column",
         axis="n_obs",
         sizes=(256, 1024, 4096),
+    )
+
+
+# ---------------------------------------------------------------------------
+# concat: CSC inputs, open inputs and per-row counts
+
+
+def _csc_inputs(tmp_path: Path, tag: str, n_var: int, ext: str, n_obs: int = 256) -> List[Path]:
+    """Two inputs whose CSC X holds one entry a row, so nnz stays n_obs
+    whatever n_var is: only the number of columns changes."""
+    directory = tmp_path / tag
+    directory.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for name in "ab":
+        rows = np.arange(n_obs)
+        obj = ad.AnnData(
+            X=sparse.csc_matrix((np.ones(n_obs, dtype="float32"), (rows, rows % n_var)),
+                                shape=(n_obs, n_var)),
+            obs=pd.DataFrame(index=[f"{name}c{i}" for i in range(n_obs)]),
+            var=pd.DataFrame(index=[f"g{i}" for i in range(n_var)]),
+        )
+        path = directory / f"{name}{ext}"
+        obj.write_zarr(path) if ext == ".zarr" else obj.write_h5ad(path)
+        paths.append(path)
+    return paths
+
+
+def _count_x_reads(monkeypatch) -> List[int]:
+    """Read calls on X's own arrays, on either backend: each one fetches and
+    decompresses at least a chunk, however few entries it takes."""
+    import h5py
+    import zarr
+
+    calls = [0]
+    h5_get, zarr_get = h5py.Dataset.__getitem__, zarr.Array.__getitem__
+
+    def h5(self, key):
+        calls[0] += self.name.startswith("/X/")
+        return h5_get(self, key)
+
+    def zr(self, key):
+        calls[0] += (self.path or "").startswith("X/")
+        return zarr_get(self, key)
+
+    monkeypatch.setattr(h5py.Dataset, "__getitem__", h5)
+    monkeypatch.setattr(zarr.Array, "__getitem__", zr)
+    return calls
+
+
+@pytest.mark.parametrize("ext", [".h5ad", ".zarr"])
+def test_csc_concat_reads_each_input_in_blocks_not_a_column_at_a_time(tmp_path, monkeypatch, ext):
+    """F011: CSC inputs were read one column at a time, 2 x n_var x n_inputs
+    reads that each decompressed a chunk (and on sharded Zarr fetched the
+    shard index) to take a few entries: 37 times the input read on h5ad and
+    572 times on Zarr, so atlas-sized CSC inputs never finished. At a fixed
+    number of entries, reads must not grow with the number of columns."""
+    calls = _count_x_reads(monkeypatch)
+
+    def measure(n_var: int) -> int:
+        files = _csc_inputs(tmp_path, f"csc{ext}{n_var}", n_var, ext)
+        calls[0] = 0
+        concat_on_disk(files, tmp_path / f"ocsc{n_var}{ext}", QUIET)
+        assert calls[0] >= 6, "indptr, indices and data of each input"
+        return calls[0]
+
+    assert_independent_of(measure, what=f"CSC concat reads of X ({ext})", axis="n_var")
+
+
+@contextmanager
+def _count_open_files() -> Iterator[List[int]]:
+    """The most HDF5 files open at once while the block runs, beyond those
+    open before it, as `[n]`: sampled each time one is opened."""
+    import h5py
+
+    def open_now() -> int:
+        return h5py.h5f.get_obj_count(h5py.h5f.OBJ_ALL, h5py.h5f.OBJ_FILE)
+
+    peak, before, init = [0], open_now(), h5py.File.__init__
+
+    def counting(self, *args, **kwargs):
+        init(self, *args, **kwargs)
+        peak[0] = max(peak[0], open_now() - before)
+
+    h5py.File.__init__ = counting
+    try:
+        yield peak
+    finally:
+        h5py.File.__init__ = init
+
+
+def test_concat_holds_a_bounded_number_of_inputs_open(tmp_path, monkeypatch):
+    """F076: every input was opened up front and held to the end, so concat
+    ran out of file descriptors at about 253 HDF5 inputs under macOS's
+    default limit, and each input's caches added 0.8 to 2.7 MB of memory
+    whatever --chunk was. At most `MAX_OPEN_INPUTS` are open at once now,
+    however many there are, through every step: obs, var, matrices, obsm,
+    varm and uns."""
+    from adata.core import concat
+
+    monkeypatch.setattr(concat, "MAX_OPEN_INPUTS", 4)
+
+    def measure(n: int) -> int:
+        files = _inputs(tmp_path, f"open{n}", count=n, n_obs=2, n_var=4, n_categories=2,
+                        frames=True)
+        with _count_open_files() as peak:
+            concat_on_disk(files, tmp_path / f"oopen{n}.h5ad", QUIET, merge="same",
+                           uns_merge="same")
+        assert peak[0] >= 2, "an input and the output, at least"
+        return peak[0]
+
+    assert_independent_of(measure, what="HDF5 files open at once", axis="n_inputs",
+                          sizes=(8, 64))
+
+
+def test_one_input_over_the_limit_costs_about_one_reopen_a_pass(tmp_path, monkeypatch):
+    """F076: concat passes over its inputs, first to last, once per column
+    and element. Closing the input used longest ago to make room would close
+    each one just before the pass reached it again, reopening every input on
+    every pass; closing the one used last keeps all but about one open."""
+    from adata.core import concat
+
+    n = 8
+    files = _inputs(tmp_path, "reopen", count=n, n_obs=2, n_var=4, n_categories=2, frames=True)
+    opens = [0]
+    original = concat._open_input
+
+    def counting(path):
+        opens[0] += 1
+        return original(path)
+
+    monkeypatch.setattr(concat, "_open_input", counting)
+
+    def measure(limit: int) -> int:
+        monkeypatch.setattr(concat, "MAX_OPEN_INPUTS", limit)
+        opens[0] = 0
+        concat_on_disk(files, tmp_path / f"oreopen{limit}.h5ad", QUIET, merge="same",
+                       uns_merge="same")
+        return opens[0]
+
+    assert measure(n) == n, "each input opened once when all fit"
+    passes = measure(1) / n
+    assert passes >= 10, "enough passes over the inputs to tell the policies apart"
+    reopened = measure(n - 1) - n
+    assert reopened <= 2 * passes, (
+        f"{reopened} reopens over about {passes:.0f} passes with one input over "
+        f"the limit; closing the least recently used would reopen all {n} each pass."
+    )
+
+
+def _matrix_step_allocation(monkeypatch) -> List[int]:
+    """Peak Python allocation of the matrix step alone, past what was already
+    held when it began (obs names, which concat keeps by design)."""
+    import tracemalloc
+
+    from adata.core import concat
+
+    peaks: List[int] = []
+    original = concat._write_matrices
+
+    def measured(*args, **kwargs):
+        tracemalloc.reset_peak()
+        base = tracemalloc.get_traced_memory()[0]
+        original(*args, **kwargs)
+        peaks.append(tracemalloc.get_traced_memory()[1] - base)
+
+    monkeypatch.setattr(concat, "_write_matrices", measured)
+    return peaks
+
+
+def test_csr_concat_keeps_row_pointers_in_numpy_arrays(tmp_path, monkeypatch):
+    """F132: each output row's pointer went into a Python list of int
+    objects, 36 to 40 bytes a row against numpy's 8, before being written:
+    about 400 MB for 10M cells, beside the obs names. What the matrix step
+    holds per row is its int64 pointers and one input's, and no more."""
+    peaks = _matrix_step_allocation(monkeypatch)
+
+    def measure(n: int) -> int:
+        files = _inputs(tmp_path, f"ptr{n}", n_obs=n, n_var=4)
+        with count_allocations():
+            concat_on_disk(files, tmp_path / f"optr{n}.h5ad", QUIET)
+        return peaks[-1]
+
+    small, large = 4096, 16384
+    per_row = (measure(large) - measure(small)) / (2 * (large - small))
+    assert 8 <= per_row <= 20, (
+        f"{per_row:.1f} bytes a row of output held by the matrix step; an int64 "
+        f"indptr is 8, plus up to 8 for the input being read. A Python list is 36+."
+    )
+
+
+def test_sparsify_keeps_per_row_counts_in_numpy_arrays(tmp_path):
+    """F132, in `recast --layout csr`: sparsify extended a Python list with
+    every row's count of nonzeros, 36 bytes a row once a count passes 256,
+    before turning it into the indptr. Here each row holds 300."""
+    import h5py
+
+    from adata.core.recast import Matrix, sparsify
+    from adata.elements import spec
+
+    def measure(n: int) -> int:
+        with h5py.File(tmp_path / f"sp{n}.h5", "w") as f:
+            src = f.create_dataset("X", data=np.ones((n, 300), dtype="int8"))
+            with count_allocations() as peak:
+                sparsify(Matrix(src, "dense", (n, 300), src.dtype), f, "out",
+                         enc=spec.CSR_MATRIX, data_dtype=np.dtype("int8"),
+                         index_dtype=np.dtype("int32"), chunk_rows=256)
+        return peak[0]
+
+    small, large = 2048, 8192
+    per_row = (measure(large) - measure(small)) / (large - small)
+    assert per_row <= 30, (
+        f"{per_row:.1f} bytes a row held by sparsify: the counts, their sum "
+        f"and the indptr are 8 each as int64. A Python list of counts is 36 more."
     )
 
 

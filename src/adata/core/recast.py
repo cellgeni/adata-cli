@@ -24,7 +24,7 @@ store is worse than a refusal:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 from rich.console import Console
@@ -615,7 +615,9 @@ def sparsify(
     out_indices = _growable_like(
         group, "indices", index_dtype, src.obj, compression=compression
     )
-    counts: List[int] = []
+    # Per-major counts in one int64 array: a Python list of int objects
+    # took 36 to 40 bytes a row against 8.
+    counts = np.zeros(n_major, dtype=np.int64)
 
     for lo in range(0, n_major, chunk_rows):
         hi = min(lo + chunk_rows, n_major)
@@ -623,13 +625,13 @@ def sparsify(
         if not csr:
             block = block.T  # iterate majors as rows either way
         nonzero_major, nonzero_minor = np.nonzero(block)
-        counts.extend(np.bincount(nonzero_major, minlength=hi - lo).tolist())
+        counts[lo:hi] = np.bincount(nonzero_major, minlength=hi - lo)
         _append(out_indices, nonzero_minor.astype(index_dtype, copy=False))
         _append(out_data, block[nonzero_major, nonzero_minor].astype(
             data_dtype, copy=False
         ))
 
-    indptr = np.concatenate(([0], np.cumsum(counts, dtype=np.int64)))
+    indptr = np.concatenate(([0], np.cumsum(counts)))
     kw = {}
     if compression is not None:
         kw = with_compression(
