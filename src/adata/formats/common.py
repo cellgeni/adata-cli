@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from typing import Any
+import io
+import os
+import sys
+from contextlib import contextmanager
+from typing import Any, Iterator
 
 import numpy as np
 
@@ -49,3 +53,28 @@ def _check_json_exportable(h5obj: Any, max_elements: int, path: str = "") -> Non
             child_path = f"{path}/{key}" if path else key
             if is_group(child) or is_dataset(child):
                 _check_json_exportable(child, max_elements=max_elements, path=child_path)
+
+
+def _silence_stdout() -> None:
+    """Point stdout at /dev/null, so the flush at exit has nowhere to fail."""
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        os.close(devnull)
+    except (OSError, ValueError, io.UnsupportedOperation):
+        pass  # not a real file (a test's capture): nothing will flush it
+
+
+@contextmanager
+def stdout_reader_may_stop() -> Iterator[None]:
+    """End an export quietly when what reads its stdout stops early.
+
+    `adata export ... | head` closes the pipe after a few lines; the next
+    write then raises BrokenPipeError, which was reported as an error with
+    exit 1 although the reader had all it asked for.
+    """
+    try:
+        yield
+        sys.stdout.flush()
+    except BrokenPipeError:
+        _silence_stdout()

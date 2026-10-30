@@ -64,6 +64,9 @@ Each layer calls only the layers below it:
 - **`cli.py`**: the whole Typer app, including the `export` and `import` sub-apps.
   - Commands parse options, validate cheap things such as `--zarr-format`, call
     into `commands/`, and turn exceptions into `Error:` plus exit code 1.
+  - Shared options are defined once and reused: `_chunk_option` gives every
+    `--chunk` its `min=1`, and `_space_check_option` is `--no-space-check`.
+    A new command that takes either uses these, not its own `typer.Option`.
   - `console` writes to **stderr**. Only `out_console` and data go to stdout,
     so output pipes cleanly.
 - **`commands/`**: one module per command. Each orchestrates its command:
@@ -132,6 +135,11 @@ Each layer calls only the layers below it:
   walks a GeoJSON FeatureCollection a feature at a time and measures each
   polygon's centroid and area (Space Ranger 4's cell outlines).
 - **`util/`**: `staging.py` and `path.py` (below), plus `names.py`.
+  - `path.check_output(output, inputs)` is the one output check, and
+    `path.output_target(source, output, inplace)` wraps it for commands with
+    `--inplace`.
+  - `staging.check_free_space` and `staging.disk_size` are the free-space
+    preflight.
 
 ## Rules the code depends on
 
@@ -143,13 +151,39 @@ These are easy to break without any test noticing straight away:
     write succeeds.
   - It moves an existing output aside to `*.adata-old.*` and deletes it only
     once every new output is in place.
-  - It refuses to start if leftovers from an interrupted run exist.
+  - It refuses to start if leftovers from an interrupted run exist, naming
+    them all.
+  - It claims each output with an `O_EXCL` lock file (`out.h5ad.adata-lock`,
+    holding host and pid) for the whole write, so two runs cannot write one
+    output. A lock whose process is dead on this host is taken over.
+  - It follows an output that is a symlink, so the link survives.
+  - SIGTERM and SIGHUP raise `Terminated` (a `SystemExit`) inside it, so a
+    scheduler's kill gets the same cleanup as a failure.
+  - Before replacing an existing output it fsyncs the new one and gives it
+    the old one's mode and group.
   - `--inplace` passes the source itself as the output. Open the source
     *inside* the staging block, so it is closed before it is renamed aside.
-- **Refuse an output that names the input** with `util/path.same_path`. With
-  Zarr, opening the output `"w"` clears the directory that is still being read.
+- **`Store.close` raises.** A failed HDF5 flush or Zarr consolidation means an
+  incomplete store, so it must reach staging, which then discards it. Only a
+  close made while another exception propagates (`__exit__`) stays quiet.
+  Never catch and drop an error from closing a store you wrote.
+- **Check the output before opening anything**, with
+  `util/path.output_target` (commands with `--inplace`) or `check_output`.
+  They refuse an output that is the input under any alias (`same_path` asks
+  the filesystem, so hard links and case-only aliases count), lies inside a
+  Zarr input, or is a folder or non-HDF5 file a store would replace; and
+  `--inplace` with `-o`. `output_target` follows a symlinked `--inplace`
+  source, so the link survives. With Zarr, opening the output `"w"` clears
+  the directory that is still being read.
+- **Check free space before writing a large store**, with
+  `util/staging.check_free_space`, against an estimate from `disk_size` of
+  the source, passed as a function so a Zarr output (which is not checked:
+  a full disk there is an ordinary error) never walks the source. A full
+  disk part way through an HDF5 write can abort inside the library, where
+  no cleanup runs. Honour `--no-space-check`.
 - **Validate before the output exists.** Resolve selections, check casts and
-  build plans first, so that a refusal writes nothing.
+  build plans first, so that a refusal writes nothing. An empty selection is
+  a refusal, never an empty store.
 - **Zarr outputs keep the source's version.**
   - Pass `zarr_format=` to `open_store`. Without it zarr-python writes v3, and a
     v2 input gets silently upgraded.

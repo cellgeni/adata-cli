@@ -25,11 +25,10 @@ from adata.core.subset import aligned_rows
 from adata.core.select import read_names
 from adata.elements import spec
 from adata.elements.read import (
+    categories_dataset,
     dataframe_columns,
     decode_str_array,
-    element_len,
     read_str_all,
-    read_categories,
     is_ordered,
     resolve_index,
 )
@@ -55,6 +54,7 @@ from adata.storage import (
     is_group,
     open_store,
 )
+from adata.util.names import natural_sorted
 from adata.util.staging import staged_outputs
 
 MERGE_STRATEGIES = ("same", "unique", "first", "only")
@@ -126,6 +126,28 @@ def _resolve_keys(
             f"--keys must be unique; repeated: {', '.join(duplicates)}."
         )
     return list(keys)
+
+
+def _refuse_repeated_var_names(files: Sequence[Path], var_names: List[List[str]]) -> None:
+    """Refuse inputs whose var names repeat, naming them.
+
+    Inputs are aligned by var name, so a name that occurs twice sends two
+    source columns to one target column: CSR wrote both entries into it,
+    dense kept the last, and an outer join lost a variable, all with exit 0.
+    anndata.concat refuses the same inputs.
+    """
+    for path, names in zip(files, var_names):
+        repeated = _duplicates(names)
+        if not repeated:
+            continue
+        shown = ", ".join(repeated[:10])
+        if len(repeated) > 10:
+            shown += f" and {len(repeated) - 10:,} more"
+        raise ValueError(
+            f"'{path}' repeats var names: {shown}. concat matches inputs by "
+            "var name, so each name must be unique. Make them unique first, "
+            "e.g. with anndata's var_names_make_unique()."
+        )
 
 
 def _duplicates(values: Sequence[str]) -> List[str]:
@@ -212,9 +234,17 @@ def _equal(a: Any, b: Any) -> bool:
 
 
 def _column_kind(obj: Any) -> str:
-    """Classify a column by how it must be concatenated."""
+    """Classify a column by how it must be concatenated.
+
+    A dataset with a `categories` attribute is a categorical as anndata 0.7
+    wrote it: the dataset holds the codes and the attribute points at the
+    labels. Taking it for a plain integer column mixed codes from different
+    category sets.
+    """
     enc = spec.encoding_type(obj)
     if enc == spec.CATEGORICAL or (is_group(obj) and "codes" in obj):
+        return "categorical"
+    if is_dataset(obj) and "categories" in obj.attrs:
         return "categorical"
     if enc in spec.MASKED_TYPES or (is_group(obj) and "values" in obj):
         return "masked"
@@ -223,134 +253,230 @@ def _column_kind(obj: Any) -> str:
     return "other"
 
 
+def _masked_encoding(obj: Any) -> str:
+    """A `values`/`mask` group's encoding, inferred from its values if untagged."""
+    enc = spec.encoding_type(obj)
+    if enc in spec.MASKED_TYPES:
+        return enc
+    dtype = obj["values"].dtype
+    if is_string_dtype(dtype):
+        return spec.NULLABLE_STRING_ARRAY
+    return spec.NULLABLE_BOOLEAN if dtype.kind == "b" else spec.NULLABLE_INTEGER
+
+
+def _family(obj: Any) -> str:
+    """What a column holds, whatever its encoding: categories, text or numbers."""
+    kind = _column_kind(obj)
+    if kind == "masked":
+        return "text" if _masked_encoding(obj) == spec.NULLABLE_STRING_ARRAY else "number"
+    return {"string": "text", "numeric": "number"}.get(kind, kind)
+
+
+def _codes(col: Any) -> Any:
+    """A categorical's codes: its `codes` member, or the 0.7 dataset itself."""
+    return col["codes"] if is_group(col) else col
+
+
+def _categories(col: Any, frame: Any = None) -> np.ndarray:
+    """A categorical's categories in their stored dtype: numbers stay numbers,
+    and text is decoded to str, whichever backend spelled it."""
+    values = np.asarray(categories_dataset(col, frame)[...])
+    if is_string_dtype(values.dtype):
+        return np.asarray(decode_str_array(values).tolist(), dtype=object)
+    return values
+
+
+def _ordered(col: Any, frame: Any = None) -> bool:
+    """Whether a categorical is ordered. anndata 0.7 kept the flag on the
+    categories dataset rather than on the codes."""
+    if is_group(col):
+        return is_ordered(col)
+    return is_ordered(col) or is_ordered(categories_dataset(col, frame))
+
+
+def _category_labels(per_input: List[np.ndarray]) -> List[np.ndarray]:
+    """Category sets cast to one dtype: their own when they are all numbers,
+    or all booleans; text otherwise, the one form every value has. An empty
+    set has no say: anndata writes an all-missing categorical's categories
+    as float64, and this tool as text."""
+    voters = [c for c in per_input if c.size]
+    kinds = {c.dtype.kind for c in voters}
+    if kinds and kinds <= set("iuf"):
+        dtype = np.result_type(*[c.dtype for c in voters])
+        return [c.astype(dtype) for c in per_input]
+    if kinds == {"b"}:
+        return [c.astype(bool) for c in per_input]
+    return [
+        c if c.dtype == object else np.asarray(decode_str_array(c).tolist(), dtype=object)
+        for c in per_input
+    ]
+
+
 def _concat_categorical(
-    parent: Any, name: str, columns: List[Optional[Any]], lengths: List[int]
+    parent: Any,
+    name: str,
+    columns: List[Optional[Any]],
+    frames: List[Any],
+    lengths: List[int],
 ) -> None:
     """Concatenate categorical columns, unioning their category sets.
 
     Inputs rarely share a category order, so codes are remapped rather than
     concatenated directly. A row from an input lacking the column gets code
-    -1, which anndata reads back as a missing value.
+    -1, which anndata reads back as a missing value. Categories keep their
+    dtype: integer categories stay integers rather than becoming '1', '2'.
     """
+    present = [(c, f) for c, f in zip(columns, frames) if c is not None]
+    labels = _category_labels([_categories(c, f) for c, f in present])
+
     # Hash lookup, not list membership. `if category not in categories` on a
     # list is O(k) per probe and so O(k^2) over the union -- around 2 million
     # string comparisons at 1024 categories, and 5 billion at 100k. It reads
     # the same number of bytes either way, so only a comparison count sees it.
-    lookup: Dict[str, int] = {}
-    for col in columns:
-        if col is None:
-            continue
-        for category in read_categories(col):
-            text = str(category)
-            if text not in lookup:
-                lookup[text] = len(lookup)
-
-    categories = list(lookup)
-    ordered = all(is_ordered(c) for c in columns if c is not None)
+    lookup: Dict[Any, int] = {}
+    for source in labels:
+        for category in source.tolist():
+            lookup.setdefault(category, len(lookup))
+    dtype = labels[0].dtype if labels else np.dtype(object)
+    categories = np.asarray(list(lookup), dtype=dtype)
+    ordered = all(_ordered(c, f) for c, f in present)
 
     codes = np.full(sum(lengths), -1, dtype=np.int64)
     offset = 0
+    source_labels = iter(labels)
     for col, length in zip(columns, lengths):
         if col is not None:
-            source_cats = [str(c) for c in read_categories(col)]
-            remap = np.array(
-                [lookup[c] for c in source_cats] + [-1], dtype=np.int64
-            )
-            source_codes = np.asarray(col["codes"][...], dtype=np.int64)
-            source_codes[source_codes < 0] = len(source_cats)
+            source = next(source_labels).tolist()
+            remap = np.array([lookup[c] for c in source] + [-1], dtype=np.int64)
+            source_codes = np.asarray(_codes(col)[...], dtype=np.int64)
+            source_codes[(source_codes < 0) | (source_codes >= len(source))] = len(source)
             codes[offset : offset + length] = remap[source_codes]
         offset += length
 
     write_categorical(parent, name, codes, categories, ordered=ordered)
 
 
-def _concat_numeric(
+def _concat_numbers(
     parent: Any, name: str, columns: List[Optional[Any]], lengths: List[int]
 ) -> None:
-    """Concatenate numeric columns, promoting to float when rows are missing.
+    """Concatenate number columns, plain or nullable, as pandas does.
 
-    An integer column cannot represent "absent", so a column missing from some
-    input is promoted to float and padded with NaN -- the same thing pandas
-    does on an outer join.
+    A nullable input makes the result nullable: int64 with Int64 is Int64,
+    bool with boolean is boolean, and Int64 with boolean promotes to Int64,
+    as numpy promotes bool to int. A column missing from some input needs a
+    way to say "absent": booleans become nullable-boolean, integers float
+    padded with NaN, as pandas pads them. Floats, which have no nullable
+    encoding, hold missing values as NaN.
     """
     present = [c for c in columns if c is not None]
-    dtype = np.result_type(*[c.dtype for c in present])
-    complete = len(present) == len(columns)
-
-    if not complete and dtype.kind in ("i", "u", "b"):
-        dtype = np.dtype("float64")
-
-    out = np.empty(sum(lengths), dtype=dtype)
-    if not complete:
-        out[:] = np.nan if dtype.kind == "f" else 0
-
-    offset = 0
-    for col, length in zip(columns, lengths):
-        if col is not None:
-            out[offset : offset + length] = np.asarray(col[...], dtype=dtype)
-        offset += length
-
-    write_dense(parent, name, out)
-
-
-def _concat_masked(
-    parent: Any, name: str, columns: List[Optional[Any]], lengths: List[int]
-) -> None:
-    """Concatenate nullable columns, masking rows from inputs that lack them."""
-    kinds = {spec.encoding_type(c) for c in columns if c is not None}
-    enc = kinds.pop() if len(kinds) == 1 else spec.NULLABLE_STRING_ARRAY
+    nullable = any(_column_kind(c) == "masked" for c in present)
+    dtype = np.result_type(
+        *[(c["values"] if _column_kind(c) == "masked" else c).dtype for c in present]
+    )
+    gaps = nullable or len(present) < len(columns)
 
     total = sum(lengths)
-    mask = np.ones(total, dtype=bool)
-    present = [c for c in columns if c is not None]
-
-    # Fill a typed buffer by slice, rather than a Python list of length
-    # n_obs one element at a time. The list cost an object per row and three
-    # full passes over it, which is what made obs concatenation the most
-    # allocation-hungry part of a streamed concat.
-    if enc == spec.NULLABLE_STRING_ARRAY:
-        from adata.elements.read import decode_str_array
-
-        filled = np.empty(total, dtype=object)
-        filled[:] = ""
-    else:
-        decode_str_array = None
-        dtype = np.result_type(*[c["values"].dtype for c in present])
-        filled = np.zeros(total, dtype=dtype)
-
+    values = np.zeros(total, dtype=dtype)
+    missing = np.ones(total, dtype=bool)
     offset = 0
     for col, length in zip(columns, lengths):
         if col is not None:
-            chunk = np.asarray(col["values"][...])
-            if decode_str_array is not None:
-                chunk = decode_str_array(chunk)
-            filled[offset : offset + length] = chunk
-            mask[offset : offset + length] = np.asarray(
-                col["mask"][...], dtype=bool
+            if _column_kind(col) == "masked":
+                values[offset : offset + length] = np.asarray(col["values"][...], dtype=dtype)
+                missing[offset : offset + length] = np.asarray(col["mask"][...], dtype=bool)
+            else:
+                values[offset : offset + length] = np.asarray(col[...], dtype=dtype)
+                missing[offset : offset + length] = False
+        offset += length
+
+    if not gaps:
+        write_dense(parent, name, values)
+    elif dtype.kind == "b":
+        write_masked(parent, name, values, missing, spec.NULLABLE_BOOLEAN)
+    elif dtype.kind in "iu" and nullable:
+        write_masked(parent, name, values, missing, spec.NULLABLE_INTEGER)
+    elif dtype.kind in "iufc":
+        values = values.astype(np.float64) if dtype.kind in "iu" else values
+        values[missing] = np.nan
+        write_dense(parent, name, values)
+    else:
+        write_dense(parent, name, values)
+
+
+def _text(col: Any, frame: Any) -> Tuple[np.ndarray, np.ndarray]:
+    """A text-like column as `(values, missing)`: str values, and True where
+    a categorical's code is -1 or a nullable column's mask is set."""
+    kind = _column_kind(col)
+    if kind == "categorical":
+        # Rendered as text, numeric categories too: this column is meeting
+        # text in another input.
+        labels = decode_str_array(_categories(col, frame))
+        codes = np.asarray(_codes(col)[...], dtype=np.int64)
+        missing = (codes < 0) | (codes >= len(labels))
+        table = np.append(labels.astype(object), "")
+        return table[np.where(missing, len(labels), codes)], missing
+    if kind == "masked":
+        values = decode_str_array(np.asarray(col["values"][...])).astype(object)
+        return values, np.asarray(col["mask"][...], dtype=bool)
+    values = decode_str_array(np.asarray(col[...])).astype(object)
+    return values, np.zeros(len(values), dtype=bool)
+
+
+def _concat_text(
+    parent: Any,
+    name: str,
+    columns: List[Optional[Any]],
+    frames: List[Any],
+    lengths: List[int],
+) -> None:
+    """Concatenate text columns, whatever mix of plain strings, categoricals
+    and nullable strings encodes them, keeping every missing value missing:
+    an input's own (code -1, a set mask) and the rows of inputs that lack
+    the column. Rendering them all as strings, as an earlier version did,
+    turned the missing values into empty strings."""
+    total = sum(lengths)
+    values = np.empty(total, dtype=object)
+    values[:] = ""
+    missing = np.ones(total, dtype=bool)
+    nullable = False
+    offset = 0
+    for col, frame, length in zip(columns, frames, lengths):
+        if col is not None:
+            values[offset : offset + length], missing[offset : offset + length] = _text(col, frame)
+            nullable = nullable or (
+                _column_kind(col) == "masked"
+                and _masked_encoding(col) == spec.NULLABLE_STRING_ARRAY
             )
         offset += length
+    _write_text(parent, name, values, missing, nullable=nullable)
 
-    write_masked(parent, name, filled, mask, enc)
 
-
-def _concat_string(
-    parent: Any, name: str, columns: List[Optional[Any]], lengths: List[int]
+def _write_text(
+    parent: Any, name: str, values: np.ndarray, missing: np.ndarray, *, nullable: bool
 ) -> None:
-    """Concatenate string columns, masking rows from inputs that lack them."""
-    total = sum(lengths)
-    values: List[str] = [""] * total
-    mask = np.zeros(total, dtype=bool)
+    """Write a concatenated text column, choosing the encoding that holds it.
 
-    offset = 0
-    for col, length in zip(columns, lengths):
-        if col is None:
-            mask[offset : offset + length] = True
-        else:
-            values[offset : offset + length] = read_str_all(col)
-        offset += length
-
-    if mask.any():
-        write_masked(parent, name, values, mask, spec.NULLABLE_STRING_ARRAY)
+    The one place that choice is made. With nothing missing: plain strings.
+    With missing values: a nullable-string-array if an input already used
+    that encoding, so its readers need anndata 0.11 or later anyway; else a
+    categorical whose missing rows have code -1, with categories in natural
+    order. That is what anndata itself writes for a text column with missing
+    values, and every release reads it, where 0.8, 0.9 and 0.10 cannot open
+    a file holding a nullable-string-array at all.
+    """
+    if nullable:
+        values = values.copy()
+        values[missing] = ""
+        write_masked(parent, name, values, missing, spec.NULLABLE_STRING_ARRAY)
+    elif missing.any():
+        # Coded through np.unique, so the Python work is per category, not
+        # per row.
+        distinct, inverse = np.unique(values[~missing], return_inverse=True)
+        categories = natural_sorted(distinct.tolist())
+        rank = {c: i for i, c in enumerate(categories)}
+        codes = np.full(len(values), -1, dtype=np.int64)
+        codes[~missing] = np.array([rank[c] for c in distinct.tolist()], dtype=np.int64)[inverse]
+        write_categorical(parent, name, codes, categories)
     else:
         write_string_array(parent, name, values)
 
@@ -359,26 +485,35 @@ def _concat_obs_column(
     parent: Any,
     name: str,
     columns: List[Optional[Any]],
+    frames: List[Any],
     lengths: List[int],
     console: Console,
 ) -> bool:
-    """Write one concatenated annotation column. Returns whether it was kept."""
-    kinds = {_column_kind(c) for c in columns if c is not None}
+    """Write one concatenated annotation column. Returns whether it was kept.
 
-    if kinds == {"categorical"}:
-        _concat_categorical(parent, name, columns, lengths)
-    elif kinds == {"numeric"}:
-        _concat_numeric(parent, name, columns, lengths)
-    elif kinds == {"masked"}:
-        _concat_masked(parent, name, columns, lengths)
-    elif kinds <= {"string", "categorical", "masked"}:
-        # Mixed text-like encodings: fall back to plain strings, which every
-        # one of them can represent.
-        _concat_string(parent, name, columns, lengths)
+    `frames` are the dataframes the columns come from, which a 0.7
+    categorical needs to find its categories on Zarr.
+    """
+    present = [c for c in columns if c is not None]
+    families = {_family(c) for c in present}
+    # Text meeting nullable numbers is kept as text, the numbers rendered and
+    # their mask kept; meeting plain numbers it is dropped below. Both as
+    # before, since anndata cannot write either mix itself.
+    nullable_numbers = all(
+        _column_kind(c) == "masked" for c in present if _family(c) == "number"
+    )
+
+    if families == {"categorical"}:
+        _concat_categorical(parent, name, columns, frames, lengths)
+    elif families == {"number"}:
+        _concat_numbers(parent, name, columns, lengths)
+    elif families <= {"text", "categorical", "number"} and nullable_numbers:
+        _concat_text(parent, name, columns, frames, lengths)
     else:
+        kinds = sorted({_column_kind(c) for c in columns if c is not None})
         console.print(
             f"[yellow]Dropping column {name!r}: "
-            f"cannot concatenate encodings {sorted(kinds)}[/]"
+            f"cannot concatenate encodings {kinds}[/]"
         )
         return False
     return True
@@ -448,7 +583,10 @@ def _concat_sparse(
     """Concatenate CSR matrices row-wise, remapping columns as they stream.
 
     Absent columns need no fill: a sparse matrix's zeros are implicit, so
-    dropped entries simply do not appear in the output.
+    dropped entries simply do not appear in the output. An input whose var
+    order differs from the target's has its rows re-sorted by target column,
+    so the output stays canonical; appending them in source order wrote
+    column indices out of order within a row.
     """
     from adata.core.subset import _append, _growable_like
 
@@ -471,6 +609,8 @@ def _concat_sparse(
         src_indptr = np.asarray(source["indptr"][...], dtype=np.int64)
         src_data, src_indices = source["data"], source["indices"]
         n_src_rows = len(src_indptr) - 1
+        kept_cols = col_map[col_map >= 0]
+        increasing = bool(np.all(kept_cols[1:] > kept_cols[:-1]))
 
         for start in range(0, n_src_rows, chunk_rows):
             end = min(start + chunk_rows, n_src_rows)
@@ -484,20 +624,23 @@ def _concat_sparse(
                 np.asarray(src_data[lo:hi]) if hi > lo else np.empty(0, dtype=dtype)
             )
 
-            kept_idx: List[np.ndarray] = []
-            kept_data: List[np.ndarray] = []
-            for row in range(start, end):
-                sl = slice(int(src_indptr[row]) - lo, int(src_indptr[row + 1]) - lo)
-                mapped = col_map[block_idx[sl]]
-                keep = mapped >= 0
-                kept_idx.append(mapped[keep])
-                kept_data.append(block_data[sl][keep])
-                nnz += int(keep.sum())
-                indptr.append(nnz)
+            rows = np.repeat(
+                np.arange(end - start), np.diff(src_indptr[start : end + 1])
+            )
+            mapped = col_map[block_idx]
+            keep = mapped >= 0
+            rows, mapped, values = rows[keep], mapped[keep], block_data[keep]
+            if not increasing:
+                # Rows stay in order and each row's entries sort by target
+                # column: one sort per block, not one per row.
+                order = np.lexsort((mapped, rows))
+                mapped, values = mapped[order], values[order]
 
-            if kept_idx:
-                _append(out_indices, np.concatenate(kept_idx))
-                _append(out_data, np.concatenate(kept_data).astype(dtype))
+            counts = np.bincount(rows, minlength=end - start)
+            indptr.extend((nnz + np.cumsum(counts)).tolist())
+            nnz += int(counts.sum())
+            _append(out_indices, mapped)
+            _append(out_data, values.astype(dtype))
 
     _write_indptr(group, indptr, pointer_dtype, sources[0]["indptr"])
 
@@ -635,6 +778,32 @@ def check_matrix_encodings(roots: List[Any], console: Console) -> None:
         if all("layers" in r and name in r["layers"] for r in roots):
             _check(f"layers/{name}", [r["layers"][name] for r in roots])
 
+    # obsm entries are stacked only when every input stores them alike; a
+    # sparse entry dense elsewhere is refused here, as X would be, rather
+    # than dropped. Entries of different widths are skipped later, whatever
+    # their encodings, and dataframes are not matrices at all.
+    names = _index_union([list(r["obsm"].keys()) if "obsm" in r else [] for r in roots])
+    for name in names:
+        if not all("obsm" in r and name in r["obsm"] for r in roots):
+            continue
+        sources = [r["obsm"][name] for r in roots]
+        kinds = {_matrix_kind(s) for s in sources}
+        if (kinds & spec.SPARSE_TYPES and kinds <= spec.SPARSE_TYPES | {"dense"}
+                and len({_trailing_shape(s) for s in sources}) == 1):
+            _check(f"obsm/{name}", sources)
+
+
+def _shape(obj: Any) -> Tuple[int, ...]:
+    """A matrix's shape, sparse (from its `shape` attribute) or dense."""
+    if spec.encoding_type(obj) in spec.SPARSE_TYPES:
+        return tuple(int(d) for d in np.asarray(obj.attrs["shape"]).reshape(-1))
+    return tuple(int(d) for d in obj.shape)
+
+
+def _trailing_shape(obj: Any) -> Tuple[int, ...]:
+    """An obsm entry's shape past the obs axis."""
+    return _shape(obj)[1:]
+
 
 def _concat_matrix(
     dst_parent: Any,
@@ -708,18 +877,32 @@ def _concat_obsm(
     if all(spec.encoding_type(s) == spec.DATAFRAME for s in sources) and target_obs is not None:
         _concat_frame(dst_parent, name, sources, lengths or [], join, target_obs, console)
         return True
-    if not all(is_dataset(s) for s in sources):
+    kinds = {_matrix_kind(s) for s in sources}
+    if "other" in kinds:
         console.print(f"[yellow]Skipping obsm/{name}: not an array, or not a dataframe, in every input[/]")
         return False
 
-    widths = {tuple(s.shape[1:]) for s in sources}
+    widths = {_trailing_shape(s) for s in sources}
     if len(widths) != 1:
         console.print(
             f"[yellow]Skipping obsm/{name}: inputs disagree on shape {sorted(widths)}[/]"
         )
         return False
+    if len(kinds) != 1:
+        # A backstop: `check_matrix_encodings` refuses this before writing.
+        raise ValueError(f"Cannot concatenate 'obsm/{name}': inputs use {', '.join(sorted(kinds))}.")
 
     trailing = widths.pop()
+    if kinds != {"dense"}:
+        # Sparse in every input, with one encoding (checked before writing):
+        # stacked as X is, every column kept where it is.
+        same = [np.arange(trailing[0], dtype=np.int64)] * len(sources)
+        if kinds == {spec.CSR_MATRIX}:
+            _concat_sparse(dst_parent, name, sources, same, n_rows, trailing[0], chunk_rows)
+        else:
+            _concat_csc(dst_parent, name, sources, same, [_shape(s)[0] for s in sources],
+                        n_rows, trailing[0])
+        return True
     dtype = np.result_type(*[s.dtype for s in sources])
     out = create_dataset(
         dst_parent, name, shape=(n_rows,) + trailing, dtype=dtype
@@ -755,7 +938,7 @@ def _concat_frame(
     written = [
         column for column in names
         if _concat_obs_column(frame, column, [s[column] if column in s else None for s in sources],
-                              lengths, console)
+                              sources, lengths, console)
     ]
     set_column_order(frame, written)
 
@@ -801,10 +984,9 @@ def _varm_snapshot(obj: Any, where: np.ndarray, block_rows: int) -> Any:
             _digest(hasher, values)
             columns.append((name, str(values.dtype), hasher.digest()))
         elif kind == "categorical":
-            categories = np.asarray([str(c) for c in read_categories(column)] + [""], dtype=object)
-            codes = np.asarray(column["codes"][...], dtype=np.int64)[where]
-            _digest(hasher, codes < 0)
-            _digest(hasher, categories[codes])
+            values, missing = _text(column, obj)
+            _digest(hasher, missing[where])
+            _digest(hasher, values[where])
             columns.append((name, "categorical", hasher.digest()))
         elif kind == "masked":
             _digest(hasher, np.asarray(column["mask"][...], dtype=bool)[where])
@@ -877,7 +1059,7 @@ def _write_varm(
             frame = write_dataframe_header(varm, name, target_var, [])
             columns = dataframe_columns(obj, resolve_index(obj, "var")[1])
             for column in columns:
-                _write_var_column(frame, column, obj[column], take)
+                _write_var_column(frame, column, obj[column], take, obj)
             set_column_order(frame, columns)
         else:
             console.print(f"[yellow]Skipping varm/{name}: neither an array nor a dataframe[/]")
@@ -894,40 +1076,65 @@ def _merge_group(
     strategy: Optional[str],
     console: Console,
 ) -> None:
-    """Merge a mapping (uns, varm, ...) across inputs under `strategy`."""
+    """Merge a mapping (uns) across inputs under `strategy`, as anndata's
+    `merge_nested` does: mappings every input holds under a key are merged
+    member by member, whatever the strategy, and a mapping left with no
+    members is dropped rather than written empty."""
     target = write_mapping(dst_parent, name)
     if strategy is None:
         return
+    present = [g for g in groups if g is not None]
+    # An input without the mapping holds none of its keys, so `same` keeps
+    # nothing, as anndata's intersection with an empty `uns` does.
+    if strategy == "same" and len(present) < len(groups):
+        present = []
+    _write_merged(target, _merge_plan(present, strategy))
 
-    keys: List[str] = []
+
+def _is_mapping(obj: Any) -> bool:
+    """A group anndata reads as a dict: tagged so, or untagged (0.7)."""
+    return (
+        is_group(obj)
+        and spec.encoding_type(obj) in (spec.DICT, None)
+        and "h5sparse_format" not in obj.attrs
+    )
+
+
+def _merge_plan(groups: List[Any], strategy: str) -> Dict[str, Any]:
+    """What to keep of `groups` merged: for each key, the member to copy, or
+    a nested plan for a mapping. `same` considers the keys every group has,
+    the other strategies the keys any group has; only `same` and `unique`
+    compare values, `first` and `only` decide by presence."""
+    keys: Dict[str, None] = {}
     for group in groups:
-        if group is None:
-            continue
         for key in group.keys():
-            if key not in keys:
-                keys.append(key)
+            keys.setdefault(key, None)
+    if strategy == "same":
+        keys = {k: None for k in keys if all(k in g for g in groups)}
 
+    plan: Dict[str, Any] = {}
     for key in keys:
-        members = [
-            g[key] if g is not None and key in g else _MISSING for g in groups
-        ]
-        present = [m for m in members if m is not _MISSING]
-
-        if all(is_group(m) for m in present) and strategy in ("same", "unique"):
-            # Nested mappings are merged member-wise rather than compared whole.
-            if all(spec.encoding_type(m) == spec.DICT for m in present):
-                _merge_group(target, key, [
-                    m if m is not _MISSING else None for m in members
-                ], strategy, console)
-                continue
-
-        comparable = [
-            _MISSING if m is _MISSING else _readable_value(m) for m in members
-        ]
-        keep, _ = _merge_values(comparable, strategy)
+        members = [g[key] for g in groups if key in g]
+        if all(_is_mapping(m) for m in members):
+            nested = _merge_plan(members, strategy)
+            if nested:
+                plan[key] = nested
+            continue
+        compares = strategy in ("same", "unique")
+        keep, _ = _merge_values(
+            [_readable_value(m) if compares else _PRESENT for m in members], strategy
+        )
         if keep:
-            source = next(m for m in members if m is not _MISSING)
-            copy_tree(source, target, key)
+            plan[key] = members[0]
+    return plan
+
+
+def _write_merged(target: Any, plan: Dict[str, Any]) -> None:
+    for key, value in plan.items():
+        if isinstance(value, dict):
+            _write_merged(write_mapping(target, key), value)
+        else:
+            copy_tree(value, target, key)
 
 
 #: Elements larger than this are not compared value-by-value.
@@ -983,14 +1190,27 @@ def _readable_value(obj: Any, budget: Optional[List[int]] = None) -> Any:
 
 
 def _hashable(value: Any) -> Any:
-    """Reduce a value to something `_equal` can compare reliably."""
-    if isinstance(value, np.ndarray):
-        return (value.shape, value.dtype.kind, value.tobytes()
-                if value.dtype.kind not in ("O", "T") else tuple(map(str, value.reshape(-1).tolist())))
+    """Reduce a value to something `_equal` can compare reliably.
+
+    Text is compared decoded, as a tuple of str, whatever spelled it: HDF5
+    hands back bytes, or an object array of bytes, where Zarr hands back str
+    or StringDType, and comparing those undecoded meant a string never
+    matched across an h5ad and a Zarr input. A list (how Zarr returns an
+    array attribute) is compared as the array HDF5 returns for it.
+    """
+    if isinstance(value, (bytes, np.bytes_)):
+        return value.decode("utf-8", "surrogateescape")
     if isinstance(value, np.generic):
         return value.item()
     if isinstance(value, (list, tuple)):
-        return tuple(_hashable(v) for v in value)
+        try:
+            value = np.asarray(value)
+        except ValueError:
+            return tuple(_hashable(v) for v in value)
+    if isinstance(value, np.ndarray):
+        if value.dtype.kind in "OSUT":
+            return ("text", value.shape, tuple(decode_str_array(value).reshape(-1).tolist()))
+        return (value.shape, value.dtype.kind, value.tobytes())
     return value
 
 
@@ -1047,13 +1267,16 @@ def concat_on_disk(
         var_names = [read_names(r, "var") for r in roots]
         obs_names = [read_names(r, "obs") for r in roots]
         obs_counts = [axis_len(r, "obs") for r in roots]
+        _refuse_repeated_var_names(files, var_names)
 
         target_var = (
             _index_intersection(var_names)
             if join == "inner"
             else _index_union(var_names)
         )
-        if not target_var:
+        # Inputs with no variables at all concatenate to n_obs x 0, as in
+        # anndata; the refusal is for inputs that have some but share none.
+        if not target_var and any(var_names):
             raise ValueError(
                 "No variables are shared by all inputs. Use --join outer to "
                 "keep their union instead."
@@ -1163,7 +1386,7 @@ def _write_obs(
 
     for name in names:
         columns = [g[name] if name in g else None for g in groups]
-        if _concat_obs_column(obs_group, name, columns, obs_counts, console):
+        if _concat_obs_column(obs_group, name, columns, groups, obs_counts, console):
             written.append(name)
 
     if label:
@@ -1219,7 +1442,7 @@ def _write_var(
             # generator -- as an earlier version did -- re-read the whole
             # column for every target variable, which is quadratic and turns a
             # 36k-var merge into hours of pure CPU.
-            values = read_str_all(group[name])
+            values = read_str_all(group[name], parent_group=group)
             aligned.append(tuple(values[i] for i in where))
 
         keep, _ = _merge_values(aligned, merge)
@@ -1231,29 +1454,29 @@ def _write_var(
         )
         column = groups[source_i][name]
         take = positions[source_i]
-        _write_var_column(var_group, name, column, take)
+        _write_var_column(var_group, name, column, take, groups[source_i])
         written.append(name)
 
     set_column_order(var_group, written)
 
 
 def _write_var_column(
-    parent: Any, name: str, column: Any, take: np.ndarray
+    parent: Any, name: str, column: Any, take: np.ndarray, frame: Any = None
 ) -> None:
     """Write one var column, reordered onto the target var index.
 
     Each encoding is rewritten as itself. Rendering everything as text -- as an
     earlier version did for nullable columns -- turned missing values into
-    empty strings and lost the numeric and boolean dtypes.
+    empty strings and lost the numeric and boolean dtypes. A categorical keeps
+    its categories' dtype, and one written by anndata 0.7 (a dataset of
+    codes) is found through `frame`, the dataframe it belongs to.
     """
     kind = _column_kind(column)
 
     if kind == "categorical":
-        categories = [str(c) for c in read_categories(column)]
-        codes = np.asarray(column["codes"][...], dtype=np.int64)[take]
-        write_categorical(
-            parent, name, codes, categories, ordered=is_ordered(column)
-        )
+        categories = _categories(column, frame)
+        codes = np.asarray(_codes(column)[...], dtype=np.int64)[take]
+        write_categorical(parent, name, codes, categories, ordered=_ordered(column, frame))
         return
 
     if kind == "numeric":

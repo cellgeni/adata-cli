@@ -545,7 +545,7 @@ class VisiumImport(Converter):
                         _write_obs(root, group, detail)
                     write_var(root, target)
                     tenx._write_uns(root, matrix)
-                    _write_spatial_uns(root, detail)
+                    _write_spatial_uns(root, detail, console)
 
             with console.status("[cyan]Copying X...[/]"):
                 fan_out_sparse_matrix(
@@ -715,7 +715,7 @@ def _write_csv_positions(root: Any, obs: Any, detail: _Plan, pixels: Sequence[st
     return list(columns)
 
 
-def _write_spatial_uns(root: Any, detail: _Plan) -> None:
+def _write_spatial_uns(root: Any, detail: _Plan, console: Console) -> None:
     """`uns["spatial"][library_id]`, as squidpy writes it.
 
     A PNG decodes only whole, so each image is read as it is written and
@@ -727,7 +727,14 @@ def _write_spatial_uns(root: Any, detail: _Plan) -> None:
         holder = write_mapping(library, "images")
         for name, path in detail.images.items():
             write_image(holder, name, path)
-    write_json_value(library, "scalefactors", detail.scalefactors)
+    skipped = write_json_value(library, "scalefactors", detail.scalefactors)
+    if skipped:
+        # anndata 0.8 to 0.11 cannot read a null, and leave out None themselves.
+        console.print(
+            f"[yellow]Warning:[/] scalefactors_json.json holds null for "
+            f"{', '.join(path.rsplit('/', 1)[-1] for path in skipped)}; left out, as "
+            "anndata leaves out None."
+        )
     metadata = write_mapping(library, "metadata")
     for key in ("chemistry_description", "software_version"):
         value = detail.matrix.attrs.get(key)

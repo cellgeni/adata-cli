@@ -216,7 +216,6 @@ def test_what_cannot_be_read_is_refused_by_name(tmp_path, banner, message):
         ("1 1 1\n1 0 1\n", 2, "column index is outside"),
         ("1 1 1\n1 2 1.5\n", 2, "not 3 numbers"),
         ("1 1 1\n1 2\n", 2, "does not hold 3 fields"),
-        ("1 1 1\n\n1 2 1\n", 2, "blank line"),
     ],
 )
 def test_a_bad_body_is_refused_before_anything_is_written(tmp_path, body, nnz, message):
@@ -225,6 +224,53 @@ def test_a_bad_body_is_refused_before_anything_is_written(tmp_path, body, nnz, m
     header = read_header(path)
     with pytest.raises(ValueError, match=message):
         scan(header, EntryMap(n_rows=2, n_cols=2))
+
+
+@pytest.mark.parametrize("block_bytes", [None, 8], ids=["one-block", "small-blocks"])
+def test_a_short_line_beside_a_long_one_is_refused_by_number(tmp_path, block_bytes):
+    """F129: only a block's field total was checked, so a line a field short
+    and a later one a field long paired values with the wrong coordinates
+    (1 1 / 2 2 3 7 read as 1 1 2 and 2 3 7), and the file read without
+    complaint."""
+    path = tmp_path / "ragged.mtx"
+    path.write_text(
+        "%%MatrixMarket matrix coordinate integer general\n% a comment\n3 3 3\n"
+        "1 1\n2 2 3 7\n3 3 9\n"
+    )
+    pd = pytest.importorskip("pandas")
+    with pytest.raises(Exception, match="Expected 2 fields in line 5, saw 4"):
+        pd.read_csv(path, sep=r"\s+", comment="%", header=None, skiprows=3)
+    header = read_header(path)
+    kw = {"block_bytes": block_bytes} if block_bytes else {}
+    with pytest.raises(ValueError, match="line 4 does not hold 3 fields: it holds 2"):
+        scan(header, EntryMap(n_rows=3, n_cols=3), **kw)
+
+
+@pytest.mark.parametrize("block_bytes", [None, 7, 12], ids=["one-block", "7", "12"])
+def test_blank_lines_among_the_entries_are_skipped_as_scipy_skips_them(tmp_path, block_bytes):
+    """A blank line was refused, unless a block happened to end on it, when
+    it was dropped: what a file meant depended on where blocks fell."""
+    path = tmp_path / "blank.mtx"
+    path.write_text(
+        "%%MatrixMarket matrix coordinate integer general\n3 3 3\n"
+        "1 1 1\n\n2 2 5\n   \n3 3 9\n\n"
+    )
+    header = read_header(path)
+    kw = {"block_bytes": block_bytes} if block_bytes else {}
+    rows, cols, values = (np.concatenate(a) for a in zip(*iter_entries(header, **kw)))
+    got = sparse.coo_matrix((values, (rows, cols)), shape=(3, 3)).toarray()
+    assert np.array_equal(got, mmread(path).toarray())
+
+
+def test_lines_are_numbered_past_blank_lines_in_the_header(tmp_path):
+    """Entry lines were numbered from the comments alone, so each blank line
+    in the header put every number one short."""
+    path = tmp_path / "bad.mtx"
+    path.write_text(
+        "%%MatrixMarket matrix coordinate integer general\n% c\n\n3 3 2\n1 1 1\n2 2\n"
+    )
+    with pytest.raises(ValueError, match="line 6 does not hold 3 fields"):
+        list(iter_entries(read_header(path)))
 
 
 def test_a_real_file_with_fractional_coordinates_is_refused(tmp_path):

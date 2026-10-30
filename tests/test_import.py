@@ -2,16 +2,26 @@
 
 import json
 import re
+import warnings
 from pathlib import Path
 
+import anndata as ad
 import h5py
 import numpy as np
+import pandas as pd
+import pytest
+from scipy import io as scipy_io
+from scipy import sparse
 from typer.testing import CliRunner
 
+from rich.console import Console
+
 from adata.cli import app
+from tests.conftest import backend_path, backend_zarr_format
 
 
 runner = CliRunner()
+QUIET = Console(quiet=True)
 
 
 def strip_ansi(text: str) -> str:
@@ -164,7 +174,7 @@ class TestImportDataframe:
             ],
         )
         assert result.exit_code == 1
-        assert "not found" in result.output.lower()
+        assert "has no 'nonexistent' column; it has: a, b, c" in strip_ansi(result.output)
 
     def test_import_dataframe_at_arbitrary_path(self, sample_h5ad_file, temp_dir):
         """Dataframes can be imported anywhere, not just obs/var (issue #4)."""
@@ -556,3 +566,462 @@ class TestImportValidation:
         with h5py.File(sample_h5ad_file, "r") as f:
             np.testing.assert_allclose(f["X"][...], new_arr)
             assert not np.allclose(f["X"][...], original_X)
+
+
+# ---------------------------------------------------------------------------
+# Read back with anndata and pandas
+#
+# The tests above look for the written elements with h5py. These read the
+# whole store back with anndata, on every backend, and compare what it holds
+# with what pandas, numpy and scipy read from the input (F089).
+
+N_OBS = 6
+
+
+def _out(result) -> str:
+    return " ".join(strip_ansi(result.output).split())
+
+
+def _read(path: Path):
+    """anndata's reading of the store, its complaints about format as errors."""
+    from anndata._warnings import OldFormatWarning
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", OldFormatWarning)
+        return ad.read_h5ad(path) if path.suffix == ".h5ad" else ad.read_zarr(path)
+
+
+@pytest.fixture
+def written(temp_dir, backend):
+    """A store anndata wrote, holding every slot an import can aim at."""
+    obj = ad.AnnData(
+        X=np.arange(N_OBS * 3, dtype="float32").reshape(N_OBS, 3),
+        obs=pd.DataFrame({"n": np.arange(N_OBS)}, index=[f"c{i}" for i in range(N_OBS)]),
+        var=pd.DataFrame({"m": [1.0, 2.0, 3.0]}, index=["g1", "g2", "g3"]),
+    )
+    obj.obsm["X_pca"] = np.ones((N_OBS, 2))
+    obj.varm["PCs"] = np.ones((3, 2))
+    obj.layers["counts"] = obj.X.copy()
+    obj.obsp["distances"] = sparse.csr_matrix(np.eye(N_OBS, dtype="float32"))
+    obj.uns["keep"] = {"a": 1}
+    obj.raw = obj
+    path = backend_path(temp_dir, backend, "written")
+    previous = ad.settings.zarr_write_format
+    ad.settings.zarr_write_format = backend_zarr_format(backend) or previous
+    try:
+        obj.write_h5ad(path) if backend == "h5ad" else obj.write_zarr(path)
+    finally:
+        ad.settings.zarr_write_format = previous
+    return path
+
+
+def _import(kind, store, entry, source, *extra):
+    out = store.with_name(f"out{len(list(store.parent.glob('out*')))}{store.suffix}")
+    result = runner.invoke(app, ["import", kind, str(store), entry, str(source), "-o", str(out), *extra])
+    return result, out
+
+
+def _pandas_frame(csv: Path, index: str):
+    """What anndata writes for `pd.read_csv`'s frame: text that repeats a
+    value becomes a categorical."""
+    frame = pd.read_csv(csv).set_index(index)
+    frame.index.name = None
+    frame.index = frame.index.astype(str)
+    obj = ad.AnnData(obs=frame)
+    obj.strings_to_categoricals()
+    return obj.obs
+
+
+def _labels(column) -> list:
+    return column.astype(object).where(column.notna(), "<na>").map(str).tolist()
+
+
+def _same_frame(got, expected) -> None:
+    assert list(got.index) == list(expected.index)
+    assert list(got.columns) == list(expected.columns)
+    for name in expected.columns:
+        a, b = got[name], expected[name]
+        if isinstance(b.dtype, pd.CategoricalDtype):
+            assert isinstance(a.dtype, pd.CategoricalDtype), name
+            assert list(a.cat.categories) == list(b.cat.categories), name
+            assert a.isna().tolist() == b.isna().tolist(), name
+            assert _labels(a) == _labels(b), name
+        elif pd.api.types.is_string_dtype(b):
+            # Text: str in pandas 3, objects in pandas 2; anndata reads a Zarr
+            # string array as objects and an HDF5 one as str.
+            assert pd.api.types.is_string_dtype(a), (name, a.dtype)
+            assert _labels(a) == _labels(b), name
+        elif b.dtype == object:
+            # pandas reads True/False with gaps as Python objects, a column
+            # anndata cannot write: it stays the text it was, a categorical.
+            assert isinstance(a.dtype, pd.CategoricalDtype), name
+            assert _labels(a) == _labels(b), name
+        else:
+            assert a.dtype == b.dtype, (name, a.dtype, b.dtype)
+            np.testing.assert_array_equal(a.to_numpy(), b.to_numpy(), name)
+
+
+CELLS = (
+    "﻿cell,score,count,gappy,flag,flags,label,note,sample\n"
+    "c0,1.5,1,1,True,True,A,one,1_1\n"
+    "c1,,2,,False,,B,two,1_10\n"
+    "c2,2.5,3,3,True,False,A,three,11_0\n"
+    "c3,NA,4,4,False,True,C,four,2_1\n"
+    "c4,3.5,5,5,True,,B,five,2_2\n"
+    "c5,4.5,6,6,True,True,A,six,2_3\n"
+)
+
+
+def test_imported_columns_are_typed_as_pandas_reads_them(written, temp_dir):
+    """F018: a numeric column with a gap was stored as strings ('1.5', '',
+    'NA'), True/False as a categorical of strings, labels like 1_1 as
+    integers (F020), and the BOM Excel writes stayed in the first name."""
+    csv = temp_dir / "cells.csv"
+    csv.write_text(CELLS, encoding="utf-8")
+
+    result, out = _import("dataframe", written, "obs", csv, "-i", "cell")
+
+    assert result.exit_code == 0, _out(result)
+    got = _read(out).obs
+    expected = _pandas_frame(csv, "cell")
+    kinds = {
+        k: "text" if pd.api.types.is_string_dtype(v) and v.dtype != "category" else str(v.dtype)
+        for k, v in expected.items()
+    }
+    assert kinds == {
+        "score": "float64", "count": "int64", "gappy": "float64", "flag": "bool",
+        "flags": "object", "label": "category", "note": "text", "sample": "text",
+    }
+    _same_frame(got, expected)
+
+
+def test_a_short_row_is_refused_before_the_store_is_touched(written, temp_dir):
+    """F018: a row with too few fields was taken, its missing cells NaN."""
+    csv = temp_dir / "cells.csv"
+    csv.write_text("cell,a,b\n" + "".join(f"c{i},{i},{i}\n" for i in range(N_OBS - 1)) + f"c{N_OBS - 1},1\n")
+
+    result = runner.invoke(app, ["import", "dataframe", str(written), "obs", str(csv), "--inplace"])
+
+    assert result.exit_code == 1
+    assert f"line {N_OBS + 1}: 2 fields where the header has 3" in _out(result)
+    assert list(_read(written).obs.columns) == ["n"]
+
+
+def test_the_export_of_a_dataframe_imports_back_as_pandas_reads_it(temp_dir, backend):
+    """F018: nullable integers and categoricals with gaps are exported as
+    empty fields, and came back as columns of strings."""
+    obs = pd.DataFrame(
+        {
+            "real": [0.5, np.nan, 1.5, 2.5],
+            "whole": pd.array([1, None, 3, 4], dtype="Int64"),
+            "flag": [True, False, True, True],
+            "maybe": pd.array([True, None, False, True], dtype="boolean"),
+            "kind": pd.Categorical(["a", None, "b", "a"]),
+            "name": ["w", "x", "y", "z"],
+        },
+        index=["c0", "c1", "c2", "c3"],
+    )
+    obj = ad.AnnData(obs=obs)
+    path = backend_path(temp_dir, backend, "frames")
+    obj.write_h5ad(path) if backend == "h5ad" else obj.write_zarr(path)
+    csv, out = temp_dir / "obs.csv", temp_dir / ("back" + path.suffix)
+
+    exported = runner.invoke(app, ["export", "dataframe", str(path), "obs", "-o", str(csv)])
+    assert exported.exit_code == 0, _out(exported)
+    result = runner.invoke(app, ["import", "dataframe", str(path), "obs", str(csv), "-o", str(out), "-i", "_index"])
+
+    assert result.exit_code == 0, _out(result)
+    got = _read(out).obs
+    _same_frame(got, _pandas_frame(csv, "_index"))
+    assert str(got["whole"].dtype) == "float64" and got["whole"].isna().tolist() == [False, True, False, False]
+    assert got["kind"].isna().tolist() == [False, True, False, False]
+
+
+def test_categorical_overrides_still_apply(written, temp_dir):
+    """--categorical makes a text column a categorical whatever its values,
+    and --no-auto-categorical keeps the others as strings."""
+    csv = temp_dir / "cells.csv"
+    csv.write_text(CELLS, encoding="utf-8")
+
+    forced, out = _import("dataframe", written, "obs", csv, "-i", "cell", "--categorical", "note,count")
+    assert forced.exit_code == 0, _out(forced)
+    assert "'count' holds int64 values, so it stays as it is" in _out(forced)
+    got = _read(out).obs
+    assert got["note"].dtype == "category" and got["count"].dtype == "int64"
+
+    plain, out = _import("dataframe", written, "obs", csv, "-i", "cell", "--no-auto-categorical")
+    assert plain.exit_code == 0, _out(plain)
+    got = _read(out).obs
+    assert not any(isinstance(t, pd.CategoricalDtype) for t in got.dtypes)
+    assert got["label"].tolist() == ["A", "B", "A", "C", "B", "A"]
+
+    unknown, _ = _import("dataframe", written, "obs", csv, "-i", "cell", "--categorical", "nope")
+    assert unknown.exit_code == 1
+    assert "--categorical names 'nope', which cells.csv does not have" in _out(unknown)
+
+
+def test_a_dataframe_import_holds_a_block_not_the_file(temp_dir, monkeypatch):
+    """F034: the whole CSV was read into a list of dicts and then a list per
+    column, so memory grew with the file. Eight times the rows must not
+    take much more memory.
+
+    Measured on HDF5. Zarr picks a column's chunks itself, the whole column
+    at these sizes, and rewrites a chunk with each block written into it,
+    so there memory is set by its chunk as well as by the block."""
+    import tracemalloc
+
+    from adata.elements.write import write_dataframe_header
+    from adata.formats import dataframe, table
+
+    real_scan, real_write = table.scan_table, table.write_table
+    # Small blocks, so that both sizes take several.
+    monkeypatch.setattr(dataframe, "scan_table", lambda *a, **k: real_scan(*a, block_bytes=1 << 16, **k), raising=False)
+    monkeypatch.setattr(dataframe, "write_table", lambda *a, **k: real_write(*a, block_bytes=1 << 16, **k), raising=False)
+
+    def peak(n: int) -> int:
+        path = temp_dir / f"s{n}.h5ad"
+        with h5py.File(path, "w") as f:
+            write_dataframe_header(f, "obs", [f"c{i}" for i in range(n)], [])
+        csv = temp_dir / f"t{n}.csv"
+        csv.write_text("id,a,b,c\n" + "".join(f"c{i},{i % 97},{i % 89 / 4},l{i % 7}\n" for i in range(n)))
+        with h5py.File(path, "a") as f:
+            tracemalloc.start()
+            try:
+                dataframe.import_dataframe(f, "obs", csv, "id", QUIET)
+                return tracemalloc.get_traced_memory()[1]
+            finally:
+                tracemalloc.stop()
+
+    small, large = peak(5_000), peak(40_000)
+    assert large < 2 * small, f"{small:,} bytes at 5,000 rows, {large:,} at 40,000"
+
+
+@pytest.mark.parametrize(
+    "kind,entry,source",
+    [
+        ("array", "obs", "rows.npy"),
+        ("array", "var", "genes.npy"),
+        ("array", "obsm", "rows.npy"),
+        ("array", "layers", "matrix.npy"),
+        ("array", "uns", "rows.npy"),
+        ("array", "raw", "matrix.npy"),
+        ("array", "raw/var", "genes.npy"),
+        ("sparse", "obs", "matrix.mtx"),
+        ("sparse", "obsm", "matrix.mtx"),
+        ("sparse", "layers", "matrix.mtx"),
+        ("sparse", "obs/col", "matrix.mtx"),
+        ("dict", "obs", "params.json"),
+        ("dict", "obsm", "params.json"),
+        ("dict", "X", "params.json"),
+        ("dict", "layers/counts", "params.json"),
+        ("dataframe", "obsm", "rows.csv"),
+        ("dataframe", "X", "rows.csv"),
+        ("dataframe", "uns", "rows.csv"),
+        ("array", "obs/n", "matrix.npy"),
+        ("image", "uns", "tissue.png"),
+        ("image", "layers", "tissue.png"),
+    ],
+)
+def test_an_element_of_the_wrong_kind_is_refused_where_the_layout_fixes_one(
+    written, temp_dir, kind, entry, source
+):
+    """F019: `import array data obs a.npy` (and sparse and dict, into obs,
+    var, obsm or layers) exited 0, and anndata could then not read the
+    store at all; with --inplace that destroyed the source's obs."""
+    np.save(temp_dir / "rows.npy", np.ones((N_OBS, 2)))
+    np.save(temp_dir / "genes.npy", np.ones((3, 2)))
+    np.save(temp_dir / "matrix.npy", np.ones((N_OBS, 3)))
+    scipy_io.mmwrite(temp_dir / "matrix.mtx", sparse.csr_matrix(np.ones((N_OBS, 3))))
+    (temp_dir / "params.json").write_text('{"a": 1}')
+    (temp_dir / "rows.csv").write_text("id,a\n" + "".join(f"c{i},{i}\n" for i in range(N_OBS)))
+    from PIL import Image
+
+    Image.fromarray(np.zeros((4, 4), dtype="uint8")).save(temp_dir / "tissue.png")
+    before = _read(written)
+
+    result = runner.invoke(app, ["import", kind, str(written), entry, str(temp_dir / source), "--inplace"])
+
+    assert result.exit_code == 1, _out(result)
+    assert any(
+        message in _out(result)
+        for message in ("would leave a store anndata cannot read", "is a group of elements", "which holds 1-D arrays")
+    ), _out(result)
+    after = _read(written)
+    assert list(after.obs.columns) == list(before.obs.columns)
+    np.testing.assert_array_equal(after.obs["n"], before.obs["n"])
+    assert set(after.obsm) == set(before.obsm) and set(after.layers) == set(before.layers)
+
+
+def test_an_entry_inside_a_mapping_is_still_replaced_with_any_kind(written, temp_dir):
+    """Naming the entry is how to replace it: a dataframe in obsm with an
+    array, or a dict in uns with an array."""
+    np.save(temp_dir / "rows.npy", np.full((N_OBS, 2), 7.0))
+    result, out = _import("array", written, "obsm/X_pca", temp_dir / "rows.npy")
+    assert result.exit_code == 0, _out(result)
+    np.testing.assert_array_equal(_read(out).obsm["X_pca"], np.full((N_OBS, 2), 7.0))
+
+    result, out = _import("array", written, "uns/keep", temp_dir / "rows.npy")
+    assert result.exit_code == 0, _out(result)
+    np.testing.assert_array_equal(_read(out).uns["keep"], np.full((N_OBS, 2), 7.0))
+
+
+@pytest.mark.parametrize(
+    "array",
+    [
+        np.arange(N_OBS * 4, dtype="int16").reshape(N_OBS, 4),
+        np.linspace(0, 1, N_OBS * 2).reshape(N_OBS, 2).astype("float32"),
+        np.asfortranarray(np.arange(N_OBS * 3, dtype="float64").reshape(N_OBS, 3)),
+        np.array([[f"label {i}", f"é{i}"] for i in range(N_OBS)]),
+    ],
+    ids=["int16", "float32", "fortran", "text"],
+)
+def test_an_imported_array_reads_back_as_numpy_saved_it(written, temp_dir, array):
+    source = temp_dir / "a.npy"
+    np.save(source, array)
+
+    result, out = _import("array", written, "obsm/new", source)
+
+    assert result.exit_code == 0, _out(result)
+    got = np.asarray(_read(out).obsm["new"])
+    np.testing.assert_array_equal(got, np.load(source))
+    if array.dtype.kind != "U":
+        assert got.dtype == array.dtype
+
+
+def test_an_array_import_holds_a_block_not_the_array(new_store, temp_dir):
+    """F034: `np.load` read the whole .npy (40 GB for a large X) before
+    writing it in one call."""
+    import tracemalloc
+
+    from adata.formats.array import import_npy
+
+    path, opener = new_store()
+    source = temp_dir / "big.npy"
+    np.save(source, np.arange(1 << 20, dtype="float64").reshape(-1, 8))
+    with opener("a") as root:
+        tracemalloc.start()
+        try:
+            import_npy(root, "uns/big", source, QUIET, chunk_elements=1 << 12)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+    assert peak < (1 << 20) * 8 / 8, f"{peak:,} bytes for an 8 MiB array"
+    with opener("r") as root:
+        np.testing.assert_array_equal(root["uns"]["big"][...], np.load(source))
+
+
+def test_an_imported_matrix_reads_back_as_scipy_reads_it(written, temp_dir):
+    source = temp_dir / "m.mtx"
+    matrix = sparse.random(N_OBS, 3, density=0.5, format="csr", random_state=0, dtype="float64")
+    scipy_io.mmwrite(source, matrix)
+
+    result, out = _import("sparse", written, "layers/new", source)
+
+    assert result.exit_code == 0, _out(result)
+    got = _read(out).layers["new"]
+    expected = scipy_io.mmread(source).tocsr()
+    assert sparse.issparse(got) and (got != expected).nnz == 0
+
+
+def test_a_json_null_is_left_out_so_older_anndata_can_read_the_store(written, temp_dir):
+    """F035: a null was written as `encoding-type: null`, which anndata 0.8
+    to 0.11 cannot read, so one null in params.json made the whole store
+    unreadable to the release that wrote it."""
+    source = temp_dir / "params.json"
+    source.write_text('{"x": null, "kept": 1, "deep": {"y": null, "z": "s"}}')
+
+    result, out = _import("dict", written, "uns/meta", source)
+
+    assert result.exit_code == 0, _out(result)
+    assert "2 null values were left out, as anndata leaves out None: uns/meta/x, uns/meta/deep/y" in _out(result)
+    meta = _read(out).uns["meta"]
+    assert meta == {"kept": 1, "deep": {"z": "s"}}
+    nulls = []
+    if out.suffix == ".h5ad":
+        with h5py.File(out) as f:
+            f.visititems(lambda name, obj: nulls.append(name) if obj.attrs.get("encoding-type") == "null" else None)
+    else:
+        nulls = [str(p) for p in out.rglob("*") if p.name in ("zarr.json", ".zattrs") and '"null"' in p.read_text()]
+    assert nulls == []
+
+    (temp_dir / "null.json").write_text("null")
+    refused, _ = _import("dict", written, "uns/meta", temp_dir / "null.json")
+    assert refused.exit_code == 1 and "holds only null" in _out(refused)
+
+
+def test_json_arrays_are_typed_where_their_values_share_a_type(written, temp_dir):
+    """F067: a mixed or nullable array was stringified value by value with
+    Python's str() (`[1, null]` became ['1', 'None'])."""
+    source = temp_dir / "params.json"
+    payload = {
+        "gaps": [1, None, 3],
+        "grid": [[1.5, None], [2, 3]],
+        "wide": [2**63, 1],
+        "flags": [True, False],
+        "mixed": [1, "x"],
+        "texts": ["a", None],
+        "bools_and_numbers": [True, 1],
+        "nulls": [None, None],
+    }
+    source.write_text(json.dumps(payload))
+
+    result, out = _import("dict", written, "uns/meta", source)
+
+    assert result.exit_code == 0, _out(result)
+    meta = _read(out).uns["meta"]
+    np.testing.assert_array_equal(meta["gaps"], [1.0, np.nan, 3.0])
+    np.testing.assert_array_equal(meta["grid"], [[1.5, np.nan], [2.0, 3.0]])
+    assert meta["wide"].dtype == np.uint64 and meta["wide"].tolist() == [2**63, 1]
+    assert meta["flags"].dtype == bool
+    for name in ("mixed", "texts", "bools_and_numbers", "nulls"):
+        assert json.loads(meta[name]) == payload[name], name
+
+
+@pytest.mark.parametrize(
+    "text,message",
+    [
+        ('{"n": 99999999999999999999999}', "uns/meta/n holds the whole number 99999999999999999999999"),
+        ('{"n": [1, -99999999999999999999]}', "which no 64-bit integer holds"),
+        ('{"a/b": 1}', "uns/meta has the name 'a/b', which cannot name an element"),
+        ('{"ok": {"": 1}}', "uns/meta/ok has the name '', which cannot name an element"),
+        ('{".zarray": 1, "x": 1}', "has the name '.zarray', which cannot name an element"),
+        ('{"zarr.json": 1}', "has the name 'zarr.json', which cannot name an element"),
+        ('[1, 2]', None),
+    ],
+)
+def test_json_that_no_element_can_hold_is_refused_before_writing(written, temp_dir, text, message):
+    """F067: an integer past 64 bits was written as an object array that
+    made the store unreadable, and a key holding '/' made nested groups. A
+    key named as Zarr's metadata files vanished, or failed half way through
+    replacing the entry."""
+    source = temp_dir / "params.json"
+    source.write_text(text)
+    entry = "uns" if message is None else "uns/meta"
+
+    result = runner.invoke(app, ["import", "dict", str(written), entry, str(source), "--inplace"])
+
+    assert result.exit_code == 1
+    assert (message or "'uns' must stay a mapping") in _out(result)
+    assert _read(written).uns == {"keep": {"a": 1}}
+
+
+@pytest.mark.parametrize(
+    "header,index,message",
+    [
+        (",cell,score", "cell", "has a column with no name, as pandas writes an unnamed index"),
+        ("cell,a/b,score", "cell", "has the name 'a/b', which cannot name an element"),
+        ("cell,.zattrs,score", "cell", "has the name '.zattrs', which cannot name an element"),
+    ],
+)
+def test_a_column_name_no_element_can_have_is_refused_before_writing(written, temp_dir, header, index, message):
+    """A column with no name (`df.to_csv()` writes its index so) failed
+    after obs had been deleted, so with --inplace anndata could no longer
+    read the source; a name holding '/' made a nested group."""
+    csv = temp_dir / "cells.csv"
+    csv.write_text(header + "\n" + "".join(f"{i},c{i},{i}\n" for i in range(N_OBS)))
+
+    result = runner.invoke(app, ["import", "dataframe", str(written), "obs", str(csv), "-i", index, "--inplace"])
+
+    assert result.exit_code == 1
+    assert message in _out(result)
+    assert list(_read(written).obs.columns) == ["n"]

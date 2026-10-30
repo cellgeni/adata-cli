@@ -65,14 +65,21 @@ existing output is first renamed aside to `out.adata-old.h5ad`, and deleted
 once the new one is in place. So:
 
 - a failed command leaves no partial output for the next step to read as if
-  it were whole;
+  it were whole, even when the failure is the last flush to disk;
 - an existing output, or with `--inplace` the source, survives a failure;
 - the temporary store sits in the output's directory, on the same filesystem,
-  which needs room for it, not the system's `/tmp`.
+  which needs room for it, not the system's `/tmp`. Commands that can write
+  a large store check that room first; see
+  [Writing outputs](../reference/commands.md#writing-outputs).
 
-A run killed outright (by the out-of-memory killer, or a scheduler's time
-limit) cannot clean up after itself, and the next run that would write the
-same output refuses to start:
+A scheduler's SIGTERM (a time limit, `scancel`, `bkill`) is handled like any
+other failure: the temporary store is removed and the command exits with
+code 143. Two runs writing the same output cannot overlap: the second is
+refused while the first holds `out.h5ad.adata-lock`.
+
+A run killed outright (by the out-of-memory killer, with SIGKILL) cannot
+clean up after itself, and the next run that would write the same output
+refuses to start:
 
 ```
 Error: 'out.adata-tmp.h5ad' already exists, probably left by an interrupted
@@ -82,6 +89,7 @@ run. Check what it holds, remove it, and try again.
 An `adata-tmp` store is always incomplete: delete it. An `adata-old` store is
 the previous output, left because the run died between the two renames: if
 `out.h5ad` is missing, rename `out.adata-old.h5ad` back; otherwise delete it.
+A leftover `out.h5ad.adata-lock` goes too, once no run is writing.
 
 {: .note }
 In Nextflow, a retried task starts in a fresh work directory and never sees
@@ -97,17 +105,17 @@ most data:
 | `subset`, `split`, `concat`, `recast` | 1,024 | rows of a dense matrix |
 | `export dataframe` | 10,000 | rows |
 | `export array` | 100,000 | elements |
+| `import array` | 1,048,576 | elements |
 
 A dense block holds `--chunk` × n_var values, so lower it for very wide dense
-matrices. Sparse matrices stream in blocks too. obs and var columns are read
+matrices. It must be at least 1; zero or a negative value is a usage error. Sparse matrices stream in blocks too. obs and var columns are read
 whole, which is what grows with the number of cells.
 [Benchmarks](../reference/benchmarks.md) gives peak memory per command on a
 50,000 × 20,000 store, measured on every release: between 70 and 330 MB in
 0.16.1. A request of 1 to 2 GB leaves room for larger stores.
 
-`export array` to stdout holds the array in memory, since a pipe cannot be
-seeked; give `-o` in a pipeline. A loom output is dense by definition, so
-`convert` to `.loom` warns above 10 GB before compression.
+A loom output is dense by definition, so `convert` to `.loom` warns above
+10 GB before compression.
 
 ## Exit codes and output streams
 
@@ -116,10 +124,12 @@ seeked; give `-o` in a pipeline. A loom output is dense by definition, so
 | 0 | Done. Warnings, if any, are on stderr |
 | 1 | Refused or failed. One line on stderr starting `Error:` says why; nothing was written |
 | 2 | A usage error: an unknown option, a missing argument, an input path that does not exist |
+| 143 | Stopped by SIGTERM (a scheduler's time limit, `scancel`, `bkill`); the partial output was removed |
 
 Data goes to stdout and everything else (progress, notes, warnings, errors)
 to stderr, so `adata export dataframe in.h5ad obs > obs.csv` is clean, and
-`2> adata.log` keeps the log.
+`2> adata.log` keeps the log. An export piped to a reader that stops early,
+such as `head`, ends quietly with exit code 0.
 
 ## Zarr v2 and v3
 
