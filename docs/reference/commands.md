@@ -287,7 +287,7 @@ adata concat a.h5ad b.h5ad -o m.h5ad --keys a,b --index-unique - --uns-merge sam
 | `--keys` | Names for the inputs; defaults to their filenames |
 | `--index-unique` | Delimiter for suffixing obs names with their key |
 | `--merge` / `--uns-merge` | `drop` (default), `same`, `unique`, `first`, `only` |
-| `--fill-value` | Value for dense cells introduced by an outer join |
+| `--fill-value` | Value for dense cells introduced by an outer join; an integer matrix that cannot hold it becomes float64 |
 | `--chunk`, `-C` | Row chunk size while streaming (at least 1) |
 | `--zarr-format` | Zarr version to write; defaults to the inputs' when they agree, otherwise v3 |
 | `--no-space-check` | Write even if the disk looks too small; see [Writing outputs](#writing-outputs) |
@@ -299,11 +299,21 @@ them; make them unique first (anndata's `var_names_make_unique()`).
 are refused under `--join inner`; inputs with no variables at all
 concatenate to n_obs × 0.
 
+var is in the order `anndata.concat` gives it. Under `--join inner` that is
+the first input's order. Under `--join outer` it is the inputs' own order
+when every input has the same variables in the same order, and the union
+sorted otherwise; an input with no variables has no say.
+
 obs columns keep their dtypes: categoricals union their category sets
 (numeric categories stay numeric, and anndata 0.7's categoricals are read by
 label), and nullable columns keep their masks. Under `--join outer` a column
-missing from one input is padded rather than dropped. Missing values stay
-missing:
+missing from one input is padded rather than dropped. Merged categories are
+ordered as anndata orders them: the first input's order, if its categories
+already include every input's; otherwise the union in natural order (`t2`
+before `t10`, numbers by value). An ordered categorical stays ordered only
+if every input has the same categories in the same order; otherwise it is
+written unordered, with a warning, as anndata keeps no order either.
+Missing values stay missing:
 
 - Text with missing values (from a categorical, a nullable column, or an
   input without the column) is written as a categorical whose missing rows
@@ -324,15 +334,28 @@ obsm entries present in every input are stacked: arrays as they are, sparse
 matrices as X is, and dataframes (a SCope import's `RegulonsAUC`) as obs is,
 their columns following `--join`. Like X, an entry must be stored the same
 way in every input (CSR, CSC or dense); concat refuses a mix before writing,
-and `adata recast` can convert one to match. var's columns and varm (a SCope
-import's `Regulons`, pycisTopic's `topic_region`) follow `--merge`, compared
-on the output's genes: an input lacking some of them, as in an outer join,
-counts as not having the entry. Without `--merge`, varm is dropped with a
-note.
+and `adata recast` can convert one to match. var's columns, varm (a SCope
+import's `Regulons`, pycisTopic's `topic_region`) and varp follow `--merge`,
+compared on the output's genes: an input lacking some of them, as in an
+outer join, counts as not having the entry. Sparse varp entries are compared
+by value, as anndata compares them, whatever their format and dtype. Without
+`--merge`, varm and varp are dropped with a note.
 
-`obsp`, `varp` and `raw` are **not** carried over — a pairwise value has no
-meaning between cells from different inputs. anndata's own `concat_on_disk`
-refuses these too.
+`obsp` and `raw` are **not** carried over — a value between two cells has no
+meaning when they come from different inputs. anndata's own
+`concat_on_disk` refuses these too.
+
+Dense matrices and obsm arrays keep the first input's chunking and
+compression, as sparse ones do. A dense integer matrix stays integer unless
+an outer join fills cells with a `--fill-value` it cannot hold, such as 0.5
+or NaN; then it becomes float64.
+
+concat opens its inputs as it needs them, at most a quarter of the
+process's file descriptor limit (`ulimit -n`) at once, so it takes any
+number of inputs. CSC matrices are read once each, a block of entries at a
+time, and their columns put together through a scratch file beside the
+output, of about 16 bytes plus the value per stored entry of the largest
+one. The free-space check counts it, for a Zarr output too.
 
 ### Merge strategies
 
