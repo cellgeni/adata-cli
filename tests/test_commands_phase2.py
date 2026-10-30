@@ -780,26 +780,30 @@ def test_split_zarr_format_selects_the_output_version(tmp_path, version):
     assert ad.read_zarr(part).shape == (2, 2)
 
 
-def test_split_defaults_to_the_source_zarr_version(tmp_path):
-    src = tmp_path / "src.zarr"
+@pytest.mark.parametrize("version", [2, 3])
+def test_split_defaults_to_the_source_zarr_version(tmp_path, version):
+    """F088: this built its source with anndata's default, v3 since 0.13,
+    the same as zarr-python's default for a new store, so it passed even
+    with split ignoring the source's version. v2 is what can be lost."""
+    h5ad = tmp_path / "src.h5ad"
     ad.AnnData(
         X=np.ones((2, 2), dtype="float32"),
         obs=pd.DataFrame(
             {"grp": pd.Categorical(["a", "b"])}, index=["c0", "c1"]
         ),
         var=pd.DataFrame(index=["g1", "g2"]),
-    ).write_zarr(src)
+    ).write_h5ad(h5ad)
+    src = _as_zarr(h5ad, version)
+    assert _zarr_version(src) == version
 
-    import zarr
-
-    source_version = zarr.open_group(str(src)).metadata.zarr_format
     out_dir = tmp_path / "parts"
     assert runner.invoke(
         app, ["split", str(src), "--by", "grp", "-o", str(out_dir)]
     ).exit_code == 0
 
     part = out_dir / "a.zarr"
-    assert zarr.open_group(str(part)).metadata.zarr_format == source_version
+    assert _zarr_version(part) == version
+    assert ad.read_zarr(part).shape == (1, 2)
 
 
 def test_split_rejects_a_bad_zarr_format(tmp_path, sample):

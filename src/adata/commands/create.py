@@ -15,6 +15,8 @@ from rich.console import Console
 
 from adata.elements.write import ensure_anndata_skeleton, write_dataframe_header
 from adata.storage import open_store
+from adata.util.path import check_output
+from adata.util.staging import staged_outputs
 
 
 def _read_names(path: Path) -> List[str]:
@@ -68,24 +70,25 @@ def create_store(
     Names come from `obs_names`/`var_names` when given, otherwise they are
     generated as `cell_0000`-style labels wide enough for the axis length.
     """
-    if output.exists() and not force:
+    output = Path(output)
+    if (output.exists() or output.is_symlink()) and not force:
         raise FileExistsError(
             f"'{output}' already exists. Pass --force to overwrite it."
         )
+    # --force replaces a store, never a folder of other files or a text file.
+    check_output(output, [p for p in (obs_names, var_names) if p is not None])
 
     obs_index = _resolve_axis("obs", n_obs, obs_names)
     var_index = _resolve_axis("var", n_var, var_names)
 
-    if output.exists() and force:
-        import shutil
-
-        shutil.rmtree(output) if output.is_dir() else output.unlink()
-
-    with open_store(output, "w", zarr_format=zarr_format) as store:
-        root = store.root
-        write_dataframe_header(root, "obs", obs_index, [])
-        write_dataframe_header(root, "var", var_index, [])
-        ensure_anndata_skeleton(root)
+    # Staged, so a write that fails (a name HDF5 cannot hold, a full disk)
+    # leaves the store --force was replacing as it was.
+    with staged_outputs([output]) as (temp,):
+        with open_store(temp, "w", zarr_format=zarr_format) as store:
+            root = store.root
+            write_dataframe_header(root, "obs", obs_index, [])
+            write_dataframe_header(root, "var", var_index, [])
+            ensure_anndata_skeleton(root)
 
     console.print(
         f"[green]Created[/] {output} "

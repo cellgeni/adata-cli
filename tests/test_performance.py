@@ -321,11 +321,13 @@ class _CountingStr(str):
 def _count_category_comparisons(monkeypatch, tmp_path, k: int) -> int:
     import adata.core.concat as concat_module
 
-    original = concat_module.read_categories
+    original = concat_module._categories
     monkeypatch.setattr(
         concat_module,
-        "read_categories",
-        lambda col: [_CountingStr(c) for c in original(col)],
+        "_categories",
+        lambda col, frame=None: np.asarray(
+            [_CountingStr(c) for c in original(col, frame)], dtype=object
+        ),
     )
 
     files = _inputs(tmp_path, f"cat{k}", n_obs=k, n_var=2, n_categories=k)
@@ -388,12 +390,19 @@ def test_obs_columns_cost_no_more_python_work_per_row_than_a_numeric_one(
     path still materialises Python `str` objects via `read_str_all`, which is
     inherent to how strings are read, not a per-row loop). Before the fix
     masked was above 1.2x.
+
+    Then CSR concatenation stopped looping over rows in Python, which took
+    about eight line events a row out of the numeric baseline (114k to 50k
+    here) while the string column's own cost stayed at 40k: five events a
+    row, all in decoding and encoding text. The same work is 1.79x the
+    smaller baseline, so the string limit moved from 1.45 to 1.9, which
+    allows fewer extra events per row than 1.45 did before.
     """
     n_obs = 4000
     numeric_lines, _ = _obs_column_cost(tmp_path, "numeric", n_obs)
     kind_lines, _ = _obs_column_cost(tmp_path, kind, n_obs)
 
-    limit = 1.10 if kind == "masked" else 1.45
+    limit = 1.10 if kind == "masked" else 1.9
     ratio = kind_lines / numeric_lines
     assert ratio <= limit, (
         f"a {kind} obs column executes {ratio:.2f}x the Python lines of a "
@@ -626,15 +635,19 @@ def test_10x_mtx_export_reads_each_block_once(tmp_path):
     assert_independent_of(measure, what="convert h5ad to 10x mtx read calls", axis="n_obs")
 
 
+# A budget of one chunk's width of cells (64 cells of 10 genes, 4 bytes)
+# reads slabs of cells; one of a byte, tiles sorted through buckets.
+@pytest.mark.parametrize("slab_bytes", [64 * 10 * 4, 1], ids=["slabs", "tiles"])
 @pytest.mark.parametrize("extra", [{}, {"dense": True}])
-def test_loom_import_work_grows_linearly(tmp_path, monkeypatch, extra):
-    """Slabs of cells: each chunk read once, whatever the cell count."""
+def test_loom_import_work_grows_linearly(tmp_path, monkeypatch, extra, slab_bytes):
+    """Slabs of cells, or tiles of chunks: each chunk read a fixed number of
+    times, whatever the cell count."""
     from adata.commands.convert import convert_store
     from adata.conversion import Options, loom
     from tests.conftest import write_loom
 
-    monkeypatch.setattr(loom, "SLAB_BYTES", 1)
-    tag = "".join(extra)
+    monkeypatch.setattr(loom, "SLAB_BYTES", slab_bytes)
+    tag = "".join(extra) + str(slab_bytes)
 
     def measure(n: int) -> int:
         source = write_loom(tmp_path / f"lm{tag}{n}.loom", n_cells=n, velocyto=True).path
@@ -821,15 +834,19 @@ def test_text_import_writes_in_blocks(tmp_path, transpose):
     assert_independent_of(measure, what=f"convert text ({tag}) write calls", axis="n_cells")
 
 
+# One chunk's width of cells (16 cells of 8 genes, 4 bytes) reads slabs of
+# whole chunks; a byte, tiles sorted through buckets.
+@pytest.mark.parametrize("slab_bytes", [16 * 8 * 4, 1], ids=["slabs", "tiles"])
 @pytest.mark.parametrize("transpose", [False, True], ids=["cells-as-rows", "transposed"])
-def test_hdf5_import_work_grows_linearly(tmp_path, monkeypatch, transpose):
-    """Slabs of whole chunks: each read once, whatever the cell count."""
+def test_hdf5_import_work_grows_linearly(tmp_path, monkeypatch, transpose, slab_bytes):
+    """Slabs of whole chunks, or tiles of them: each chunk read a fixed
+    number of times, whatever the cell count."""
     from adata.commands.convert import convert_store
     from adata.conversion import Options, hdf5
     from tests.conftest import write_hdf5_matrix
 
-    monkeypatch.setattr(hdf5, "SLAB_BYTES", 1)
-    tag = "t" if transpose else "c"
+    monkeypatch.setattr(hdf5, "SLAB_BYTES", slab_bytes)
+    tag = ("t" if transpose else "c") + str(slab_bytes)
     chunks = (8, 16) if transpose else (16, 8)
 
     def measure(n: int) -> int:

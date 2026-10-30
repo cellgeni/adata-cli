@@ -84,7 +84,47 @@ int64`.
 Reading a store and writing it at once would destroy it: a Zarr store opened
 for writing is emptied before a single element has been read. Use `--inplace`,
 which writes beside the source and swaps the result in at the end, or give
-another output path. `split` says `Choose another --output-dir`.
+another output path. `split` says `Choose another --output-dir`, and `export`
+says it of a file named after the input or inside a Zarr input.
+
+The output can be the input under another name: a symlink, a hard link, or,
+on macOS and Windows, the same name in another case (`Data.h5ad` and
+`data.h5ad` are one file there).
+
+### `Give --output/-o or --inplace, not both: --inplace replaces the input.`
+
+`--inplace` rewrites the source and `-o` names a new store; pick one. Before
+0.17.4 `-o` was silently ignored and the source rewritten.
+
+### `'results' is a directory, not a Zarr store: refusing to replace it.`
+
+A store output replaces an existing store, never a folder of other files.
+`subset -o` names the store to write, not a folder to write it into (that is
+`split -o`). Name a file such as `results/subset.h5ad`. A file that is not
+HDF5 is refused the same way (`... exists and is not an HDF5 file or a Zarr
+store`), and `export` refuses a folder or a store as its output file. An
+empty folder may be replaced.
+
+### `No obs selected: none of the names in 'barcodes.txt' is in the store's obs index. Nothing was written.`
+
+The name list matched no row. The usual cause is a suffix: Cell Ranger's
+barcodes end in `-1`, and a list without it matches nothing. Compare a few
+names with `adata export dataframe data.h5ad obs --columns _index --head 5`.
+
+### `Not enough free space for 'out.h5ad': it needs about 12.3 GB and /scratch has 4.1 GB free.`
+
+Checked before writing an HDF5 output, because a disk that fills part way
+through an HDF5 write can stop the process inside the HDF5 library
+(`Aborted`, or a segmentation fault after the `Error:` line), with no chance
+to clean up. Free some space, or write to another filesystem. A Zarr output
+is not checked: running out of space there is an ordinary error.
+
+The size is an estimate from the source's size on disk (see
+[Writing outputs](reference/commands.md#writing-outputs)). If it is wrong,
+for instance because the output compresses better than the source, pass
+`--no-space-check`. The check sees the filesystem's free space, not your
+quota: on a cluster's scratch space the quota can run out first, and `lfs
+quota` or `quota` shows how much of it is left.
 
 ### `'out.zarr' already exists. Pass --overwrite to replace it.`
 
@@ -128,6 +168,13 @@ The ordering operators compare numbers. For text, use `==`, `!=` or `in`. See
 `import` checks an array's length against the axis its path implies:
 `obsm/...` against obs, `varm/...` against var, `X` and layers against both.
 The input belongs to another store, or is transposed.
+
+### `'obs' must hold a dataframe; writing an array there would leave a store anndata cannot read.`
+
+`import` writes one element, and some paths fix what kind it must be: `obs`
+and `var` are dataframes, and `obsm`, `layers` or `uns` hold one element per
+key. Name the entry instead, such as `obsm/X_pca` or `uns/params`, or use
+`import dataframe` for a table. See [Commands](reference/commands.md#import).
 
 ### `Provide at least one of --obs, --var, --obs-query or --var-query.`
 
@@ -208,10 +255,13 @@ lack different rows warn apart.
 
 ### `'out.adata-tmp.h5ad' already exists, probably left by an interrupted run. Check what it holds, remove it, and try again.`
 
-A run was killed outright, by the out-of-memory killer or a scheduler's time
-limit, before it could clean up. Commands write to `out.adata-tmp.<ext>` and
-rename it into place at the end, moving an existing output aside to
-`out.adata-old.<ext>` first:
+A run was killed outright, by the out-of-memory killer (SIGKILL), before it
+could clean up, or the HDF5 library stopped it when the disk filled. A
+scheduler's time limit or `scancel` sends SIGTERM first, which cleans up and
+leaves nothing. Commands write to `out.adata-tmp.<ext>` and rename it into
+place at the end, moving an existing output aside to `out.adata-old.<ext>`
+first. When there are several, as after a `split`, the message lists them
+all:
 
 - **`*.adata-tmp.*`** is always incomplete. Delete it.
 - **`*.adata-old.*`** is the previous output, left because the run died
@@ -222,6 +272,25 @@ rename it into place at the end, moving an existing output aside to
 The command refuses rather than deleting either itself, since an `adata-old`
 store may be the only copy of your data. See
 [Pipelines and containers](guides/pipelines.md#outputs-appear-whole-or-not-at-all).
+
+### `'out.h5ad.adata-lock' exists: another adata run (process 4242 on node7) is writing 'out.h5ad', or was killed before it could clean up.`
+
+Each run claims its outputs with a lock file while it writes, so two runs
+cannot write the same output at once. If another run is writing it (a
+pipeline's retry while the first attempt still runs, a duplicated array
+task), wait for it or write elsewhere. A lock left by a run killed on the
+same host is taken over without asking; this message means the run is alive,
+or ran on another host, where it cannot be checked. If it is no longer
+running, delete the lock and run again: any `adata-tmp` or `adata-old` it
+left is then reported, as above.
+
+### `Could not finish writing 'out.adata-tmp.h5ad': ...`
+
+The last write, made as the store is closed, failed: usually a full disk or
+quota, sometimes a network filesystem dropping out. The incomplete store was
+removed and the existing output, or with `--inplace` the source, is
+untouched. Before 0.17.4 this error was swallowed and the unreadable store
+renamed into place with exit code 0.
 
 ## Zarr
 
@@ -251,9 +320,8 @@ store it wrote; for a store another tool changed, run
 ### The command was killed for running out of memory
 
 Lower `--chunk`: a dense block holds `--chunk` × n_var values, 1,024 rows by
-default. Three things are held whole by design: obs and var columns, an
-`export array` written to stdout (give `-o` instead), and a pycisTopic pickle,
-which cannot be read in part. See
+default. Two things are held whole by design: obs and var columns, and a
+pycisTopic pickle, which cannot be read in part. See
 [Pipelines and containers](guides/pipelines.md#memory-and---chunk).
 
 ### `A loom holds its matrices dense: 54.0 GB to compress and write. It is written, but may take a while`
@@ -318,6 +386,9 @@ Warnings go to stderr and do not change the exit code.
 | Warning | Meaning |
 |---|---|
 | `N obs names not found in file` | Names in a `--obs` list the store does not have were skipped |
+| `2 null values were left out, as anndata leaves out None: uns/params/x, ...` | `import dict` wrote every key but those holding `null`, which anndata 0.8 to 0.11 cannot read |
+| `'uns/m' has 3 missing values, written as NaN, so the array is float64.` | `export array` of a nullable array: a `.npy` has no mask |
+| `5 NaN or infinite values are written as null, since JSON has no number for them.` | `export dict`: JSON has no `NaN` or `Infinity` |
 | `obs names are not unique across inputs. Pass --index-unique to disambiguate them.` | `concat` inputs share barcodes; `--index-unique -` appends each input's key |
 | `'convert' with --dtype is deprecated and will be removed in 1.0.0; use 'recast' instead.` | The command ran as `recast`; change the script before 1.0.0 |
 | `the 'h5ad' command is deprecated and will be removed in 1.0.0; use 'adata' instead.` | The command was renamed in 0.5.0 |
