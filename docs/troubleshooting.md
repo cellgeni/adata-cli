@@ -368,6 +368,16 @@ and anndata read it with its legacy reader. The data is read correctly. If
 `adata` wrote the store from a current source and anndata still warns, that
 is a bug: please [report it](https://github.com/cellgeni/adata-cli/issues).
 
+### anndata 0.8 to 0.11 fail with `No read method registered for ... nullable-string-array` (or `null`)
+
+anndata reads a `nullable-string-array` from 0.11 and a `null` from 0.12.
+`adata` writes either only where its input held one: anndata 0.13 under
+pandas 3 writes every text column as a `nullable-string-array`, and anndata
+0.12 and later write a `None` in `uns` as a `null`. A store derived from such
+a file keeps them. To give it to an older anndata, write it again from
+anndata 0.13 with `anndata.settings.allow_write_nullable_strings = False`,
+and without the `None` values in `uns`.
+
 ### Genes are named by id, not by symbol
 
 10x, MTX, Parse and loom imports name features by gene id, which is unique,

@@ -28,7 +28,7 @@ runner = CliRunner()
 N_OBS, N_VAR = 6, 4
 
 
-def _build(tmp_path: Path, fmt: str, *, nullable_strings: bool) -> Path:
+def _build(tmp_path: Path, fmt: str, *, nullable_strings: bool, prefix: str = "") -> Path:
     """Write a reference store with anndata covering every common encoding.
 
     `nullable_strings` selects between the two on-disk shapes anndata can give
@@ -48,7 +48,7 @@ def _build(tmp_path: Path, fmt: str, *, nullable_strings: bool) -> Path:
             ),
             "free_text": ["a", "bb", "ccc", "d", "ee", "f"],
         },
-        index=[f"cell_{i}" for i in range(N_OBS)],
+        index=[f"{prefix}cell_{i}" for i in range(N_OBS)],
     )
     var = pd.DataFrame(
         {
@@ -438,3 +438,48 @@ def test_subset_of_a_consolidated_zarr_store_round_trips(tmp_path):
     got = ad.read_zarr(out)
     assert got.shape == (2, 2)
     assert list(got.obs_names) == ["c0", "c2"]
+
+
+@pytest.mark.parametrize(
+    "first,second",
+    [(False, False), (False, True), (True, False)],
+    ids=["string-arrays", "string-array-then-nullable", "nullable-then-string-array"],
+)
+def test_concat_of_plain_and_nullable_text_matches_anndata(tmp_path, fmt, first, second):
+    """F090: under pandas 3 anndata writes all text as nullable-string-array,
+    so the suite's concat never met a plain string-array -- what anndata
+    before 0.13, or any release under pandas before 3, wrote -- nor a mix of
+    the two, as when an old file is concatenated with a new one."""
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+    a = _build(tmp_path / "a", fmt, nullable_strings=first, prefix="a_")
+    b = _build(tmp_path / "b", fmt, nullable_strings=second, prefix="b_")
+    out = tmp_path / f"merged.{fmt}"
+    result = runner.invoke(app, ["concat", str(a), str(b), "-o", str(out), "--keys", "a,b"])
+    assert result.exit_code == 0, result.stdout + (result.stderr or "")
+
+    got = _read(out)
+    want = ad.concat([_read(a), _read(b)], join="inner")
+    assert list(got.obs_names) == list(want.obs_names)
+    for column in ("cell_type", "free_text", "n_counts"):
+        assert got.obs[column].astype(object).tolist() == want.obs[column].astype(object).tolist(), column
+    assert got.obs["cell_type"].cat.ordered
+    assert (got.X != want.X).nnz == 0
+
+
+def test_export_dataframe_writes_float32_as_pandas_does(tmp_path, fmt):
+    """F125: a float32 column (scanpy's pct_counts_*) exported as
+    0.10000000149011612 where pandas writes 0.1."""
+    obs = pd.DataFrame(
+        {"pct": np.array([0.1, 2.3, 33.7], dtype="float32"),
+         "half": np.array([0.1, 2.2, 7.0], dtype="float16")},
+        index=["c0", "c1", "c2"],
+    )
+    obj = ad.AnnData(np.ones((3, 1), dtype="float32"), obs=obs)
+    path = tmp_path / f"f.{fmt}"
+    obj.write_h5ad(path) if fmt == "h5ad" else obj.write_zarr(path)
+    result = runner.invoke(app, ["export", "dataframe", str(path), "obs"])
+    assert result.exit_code == 0, result.stdout
+    got = [line.split(",")[1:] for line in result.stdout.splitlines()[1:] if line]
+    want = [line.split(",")[1:] for line in _read(path).obs.to_csv().splitlines()[1:]]
+    assert got == want == [["0.1", "0.1"], ["2.3", "2.2"], ["33.7", "7.0"]]
