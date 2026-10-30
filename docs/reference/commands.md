@@ -277,16 +277,43 @@ adata concat a.h5ad b.h5ad -o m.h5ad --keys a,b --index-unique - --uns-merge sam
 | `--chunk`, `-C` | Row chunk size while streaming |
 | `--zarr-format` | Zarr version to write; defaults to the inputs' when they agree, otherwise v3 |
 
-obs columns keep their dtypes: categoricals union their category sets, nullable
-columns keep their masks, and a column missing from one input is padded rather
-than dropped.
+Inputs are matched by var name, so each input's var names must be unique.
+Repeated names are refused before anything is written, and the error names
+them; make them unique first (anndata's `var_names_make_unique()`).
+`anndata.concat` refuses them too. Inputs that have variables but share none
+are refused under `--join inner`; inputs with no variables at all
+concatenate to n_obs × 0.
 
-obsm entries present in every input are stacked: arrays as they are, and
-dataframes (a SCope import's `RegulonsAUC`) as obs is, their columns
-following `--join`. var's columns and varm (a SCope import's `Regulons`,
-pycisTopic's `topic_region`) follow `--merge`, compared on the output's
-genes: an input lacking some of them, as in an outer join, counts as not
-having the entry. Without `--merge`, varm is dropped with a note.
+obs columns keep their dtypes: categoricals union their category sets
+(numeric categories stay numeric, and anndata 0.7's categoricals are read by
+label), and nullable columns keep their masks. Under `--join outer` a column
+missing from one input is padded rather than dropped. Missing values stay
+missing:
+
+- Text with missing values (from a categorical, a nullable column, or an
+  input without the column) is written as a categorical whose missing rows
+  have code -1, as anndata writes it, which every anndata release reads. If
+  an input already used a `nullable-string-array`, the output does too.
+- Integers padded for an input without the column become float with NaN, as
+  pandas pads them; booleans become `nullable-boolean`.
+- A column plain in one input and nullable in another is nullable in the
+  output (int64 with Int64 is Int64, bool with boolean is boolean), and a
+  nullable integer with a nullable boolean promotes to a nullable integer.
+  A float column stays float, with NaN where a value is missing, since
+  there is no nullable float.
+- A column that is text in one input and numbers in another is written as
+  text if the numbers are nullable, and dropped with a warning if they are
+  plain.
+
+obsm entries present in every input are stacked: arrays as they are, sparse
+matrices as X is, and dataframes (a SCope import's `RegulonsAUC`) as obs is,
+their columns following `--join`. Like X, an entry must be stored the same
+way in every input (CSR, CSC or dense); concat refuses a mix before writing,
+and `adata recast` can convert one to match. var's columns and varm (a SCope
+import's `Regulons`, pycisTopic's `topic_region`) follow `--merge`, compared
+on the output's genes: an input lacking some of them, as in an outer join,
+counts as not having the entry. Without `--merge`, varm is dropped with a
+note.
 
 `obsp`, `varp` and `raw` are **not** carried over — a pairwise value has no
 meaning between cells from different inputs. anndata's own `concat_on_disk`
@@ -301,6 +328,11 @@ refuses these too.
 | `unique` | exactly one distinct value among the inputs that have it |
 | `first` | always; takes the earliest input that has it |
 | `only` | exactly one input has it at all |
+
+As in anndata, `--uns-merge` merges nested mappings key by key under every
+strategy, and drops a mapping that ends up with nothing in it. Text is
+compared by value, so the same string matches across an h5ad and a Zarr
+input.
 
 ## `create`
 

@@ -321,11 +321,13 @@ class _CountingStr(str):
 def _count_category_comparisons(monkeypatch, tmp_path, k: int) -> int:
     import adata.core.concat as concat_module
 
-    original = concat_module.read_categories
+    original = concat_module._categories
     monkeypatch.setattr(
         concat_module,
-        "read_categories",
-        lambda col: [_CountingStr(c) for c in original(col)],
+        "_categories",
+        lambda col, frame=None: np.asarray(
+            [_CountingStr(c) for c in original(col, frame)], dtype=object
+        ),
     )
 
     files = _inputs(tmp_path, f"cat{k}", n_obs=k, n_var=2, n_categories=k)
@@ -388,12 +390,19 @@ def test_obs_columns_cost_no_more_python_work_per_row_than_a_numeric_one(
     path still materialises Python `str` objects via `read_str_all`, which is
     inherent to how strings are read, not a per-row loop). Before the fix
     masked was above 1.2x.
+
+    Then CSR concatenation stopped looping over rows in Python, which took
+    about eight line events a row out of the numeric baseline (114k to 50k
+    here) while the string column's own cost stayed at 40k: five events a
+    row, all in decoding and encoding text. The same work is 1.79x the
+    smaller baseline, so the string limit moved from 1.45 to 1.9, which
+    allows fewer extra events per row than 1.45 did before.
     """
     n_obs = 4000
     numeric_lines, _ = _obs_column_cost(tmp_path, "numeric", n_obs)
     kind_lines, _ = _obs_column_cost(tmp_path, kind, n_obs)
 
-    limit = 1.10 if kind == "masked" else 1.45
+    limit = 1.10 if kind == "masked" else 1.9
     ratio = kind_lines / numeric_lines
     assert ratio <= limit, (
         f"a {kind} obs column executes {ratio:.2f}x the Python lines of a "
