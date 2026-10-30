@@ -57,8 +57,9 @@ and missing values of nullable columns as empty fields. Rows are read
 
 `export sparse` gzips when the name ends in `.gz`, writes whole numbers as
 integers and other floats with enough digits to read back exactly.
-`export array` streams to a file; to stdout it holds the array in memory,
-since a pipe cannot be seeked.
+`export array` streams, to a file or to stdout. A nullable integer or
+boolean array with missing values comes out as float64, NaN where they are
+missing, and text as fixed-width unicode.
 
 ## Metadata and images
 

@@ -21,8 +21,16 @@ from adata.conversion import (
     detect_format,
     output_format,
 )
-from adata.util.path import same_path
-from adata.util.staging import staged_outputs
+from adata.util.path import check_output, is_zarr_path, same_path
+from adata.util.staging import check_free_space, disk_size, staged_outputs
+
+#: What a Matrix Market folder written by `--to 10x-mtx` holds. A folder
+#: holding anything else is not replaced, even with --overwrite.
+MTX_FILES = frozenset(
+    f"{name}{ext}"
+    for name in ("matrix.mtx", "barcodes.tsv", "features.tsv", "genes.tsv")
+    for ext in ("", ".gz")
+)
 
 
 def convert_store(
@@ -33,6 +41,7 @@ def convert_store(
     src_format: Optional[str] = None,
     dst_format: Optional[str] = None,
     options: Options = Options(),
+    space_check: bool = True,
 ) -> List[Path]:
     """Convert `file` into `output`; return the paths written."""
     file, output = Path(file), Path(output)
@@ -51,14 +60,35 @@ def convert_store(
 
     plan = converter.plan(file, output, src_format, dst_format, options)
     for out in plan.outputs:
-        if same_path(file, out):
-            # Writing a Zarr store over its own source empties it before a
-            # single element has been read.
+        # Writing a Zarr store over its own source empties it before a
+        # single element has been read; and --overwrite replaces a store,
+        # never a folder of other files that -o named by mistake.
+        if dst_format != "10x-mtx":
+            check_output(out, [file])
+        elif same_path(file, out):
             raise ValueError(f"Output path is the input: {out}")
+        elif out.exists() and not out.is_dir():
+            raise ValueError(
+                f"'{out}' is a file: an MTX output is a folder. Name a new "
+                "folder to write."
+            )
+        elif out.is_dir() and any(p.name not in MTX_FILES for p in out.iterdir()):
+            raise ValueError(
+                f"'{out}' holds files other than a Matrix Market folder's: "
+                "refusing to replace it. Name a new folder to write."
+            )
         if out.exists() and not options.overwrite:
             raise FileExistsError(
                 f"'{out}' already exists. Pass --overwrite to replace it."
             )
+    # A full disk part way through an HDF5 copy can abort inside the
+    # library, past any cleanup. Guessed from a store or file source; a
+    # folder (Space Ranger's outs/, a Xenium bundle) holds images and BAMs
+    # the output never carries, so it is not measured.
+    if plan.outputs and dst_format != "10x-mtx" and (
+        file.is_file() or is_zarr_path(file)
+    ):
+        check_free_space(plan.outputs[0], lambda: disk_size(file), check=space_check)
 
     console.print(f"[cyan]Converting[/] {file}: {plan.summary}")
     for warning in plan.warnings:

@@ -10,6 +10,7 @@ from __future__ import annotations
 import gzip
 import re
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pytest
@@ -271,3 +272,154 @@ def test_lines_of_spaces_alone_are_blank(tmp_path):
     got = _read(out)
     assert list(got.var_names) == ["g1", "g2"] and list(got.obs_names) == ["c1", "c2"]
     assert np.array_equal(got.X.toarray(), [[1, 2], [3, 4]])
+
+
+# ---------------------------------------------------------------------------
+# Every value read as the text holds it, or the file refused (#90)
+
+
+def _anndata_reads(path: Path, delimiter: Optional[str], **kw):
+    reader = getattr(ad, "io", ad)
+    if delimiter is None:
+        return reader.read_text(path, **kw)
+    return reader.read_csv(path, delimiter=delimiter, **kw)
+
+
+@pytest.mark.parametrize(
+    "suffix,content,where",
+    [
+        # pandas `to_csv` writes NaN as an empty field.
+        (".tsv", "\ta\tb\tc\nc1\t1.5\t\t3.0\nc2\t4.0\t5.0\t6.0\n", "line 2, column 3"),
+        (".csv", ",a,b,c\nc1,1.0,2.0,3.0\nc2,4.0,5.0,\n", "line 3, column 4"),
+        (".tsv", "\ta\tb\tc\nc1\t1\t\t2\nc2\t3\t4\t5\n", "line 2, column 3"),
+        # GEO tables often end every line with a tab.
+        (".tsv", "gene\tS1\tS2\t\nG1\t1\t2\t\nG2\t3\t4\t\n", "line 2, column 4"),
+        # A field of spaces alone is as empty, to anndata and here.
+        (".tsv", "\ta\tb\tc\nc1\t1\t \t2\nc2\t3\t4\t5\n", "line 2, column 3"),
+        (".csv", "a,b\n1,\n2,3\n", "line 2, column 2"),
+    ],
+    ids=[
+        "pandas-nan-tsv", "pandas-nan-last-csv", "integers", "trailing-tabs", "spaces",
+        "unnamed",
+    ],
+)
+def test_an_empty_field_is_refused_with_its_line_and_column(tmp_path, suffix, content, where):
+    """F001: numpy took two delimiters in a row for one, so an empty field
+    moved every later value of its block a column left, and the block's last
+    values were read from uninitialised memory. The command exited 0."""
+    path = tmp_path / f"empty{suffix}"
+    path.write_text(content)
+    # Rows without names: an empty first field would be taken for one.
+    unnamed = content.startswith("a,b")
+    with pytest.raises(ValueError):
+        _anndata_reads(
+            path, "\t" if suffix == ".tsv" else ",",
+            **({"first_column_names": False} if unnamed else {}),
+        )
+    out = tmp_path / "out.h5ad"
+    result = _convert(path, "-o", out, *(["--no-first-column-names"] if unnamed else []))
+    assert result.exit_code == 1
+    assert f"{where} is empty" in _out(result)
+    assert not out.exists()
+
+
+def test_an_empty_last_field_of_any_block_is_refused(tmp_path, monkeypatch):
+    """F001: numpy stops quietly at the end of its text, so a block whose
+    last field was empty was padded with whatever memory held, wherever the
+    block fell in the file."""
+    from adata.conversion import text
+
+    monkeypatch.setattr(text, "BLOCK_BYTES", 16)
+    path = tmp_path / "m.csv"
+    path.write_text(",a,b\nc1,1.5,2\nc2,3,\nc3,5,6\nc4,7,8\n")
+    with pytest.raises(ValueError):
+        _anndata_reads(path, ",")
+    result = _convert(path, "-o", tmp_path / "out.h5ad")
+    assert result.exit_code == 1
+    assert "line 3, column 3 is empty" in _out(result)
+
+
+def test_a_field_holding_two_numbers_is_refused(tmp_path):
+    """numpy splits on any whitespace when the delimiter is a tab, so a
+    field '1 2' read as two values, which an empty field elsewhere in the
+    block could balance."""
+    path = tmp_path / "m.tsv"
+    path.write_text("\ta\tb\nc1\t1 2\t3\nc2\t4\t0\n")
+    with pytest.raises(ValueError):
+        _anndata_reads(path, "\t")
+    result = _convert(path, "-o", tmp_path / "out.h5ad")
+    assert result.exit_code == 1
+    assert "line 2, column 2: '1 2' is not a number" in _out(result)
+
+
+@pytest.mark.parametrize("cut", [False, True], ids=["file", "block"])
+def test_a_fraction_at_the_end_of_a_block_keeps_its_fraction(tmp_path, monkeypatch, cut):
+    """F050: integers are tried first, and numpy stopped at the count it was
+    given, so 4.5 as the last value of a block read as 4, and the matrix as
+    int32."""
+    from adata.conversion import text
+
+    head = ",a,b\nc1,1,2\nc2,3,4.5\n"
+    path = tmp_path / "m.csv"
+    path.write_text(head + ("c3,5,6\n" if cut else ""))
+    if cut:
+        monkeypatch.setattr(text, "BLOCK_BYTES", len(head))  # 4.5 ends the first block
+    out = tmp_path / "out.h5ad"
+    _ok(path, "-o", out)
+    got = _read(out).X
+    assert got.dtype == np.float64
+    assert np.array_equal(got.toarray(), _anndata_reads(path, ",").X)
+
+
+@pytest.mark.parametrize(
+    "suffix,content",
+    [
+        (".csv", "1,2\n3,4\n"),
+        (".csv", "a,b\n1,2\n3,4\n"),
+        (".csv", ",a,b\nc1,1,2\nc2,3,4\n"),
+        (".txt", "# a b\n1 2\n3 4\n"),
+    ],
+    ids=["numbers", "header", "corner", "comment"],
+)
+def test_a_byte_order_mark_is_dropped(tmp_path, suffix, content):
+    """F111: a UTF-8 byte order mark stayed in the first name, and before a
+    number it hid that the first value was one, so the first column was
+    taken for row names."""
+    plain, marked = tmp_path / f"plain{suffix}", tmp_path / f"marked{suffix}"
+    plain.write_text(content)
+    marked.write_text(content, encoding="utf-8-sig")
+    out = tmp_path / "out.h5ad"
+    _ok(marked, "-o", out)
+    got = _read(out)
+    # anndata keeps the mark, as `open` does; the file without it is the reference.
+    expected = _anndata_reads(plain, "," if suffix == ".csv" else None)
+    assert np.array_equal(got.X.toarray(), expected.X)
+    assert list(got.obs_names) == list(expected.obs_names)
+    assert list(got.var_names) == list(expected.var_names)
+    if content == "1,2\n3,4\n":
+        pd = pytest.importorskip("pandas")  # which drops the mark itself
+        assert np.array_equal(got.X.toarray(), pd.read_csv(marked, header=None).to_numpy())
+
+
+@pytest.mark.parametrize("delimiter", [".", "e", "-", "7", "(", ")", "_"])
+def test_a_delimiter_that_numbers_hold_is_refused(tmp_path, delimiter):
+    """numpy reads '1.5' as one number whatever the delimiter, and 'nan(1(2'
+    as one NaN, so with '.' or '(' a line held fewer values than it has
+    fields, and the rest were padded."""
+    path = tmp_path / "m.txt"
+    path.write_text(f"a{delimiter}b\n1{delimiter}2\n")
+    result = _convert(path, "-o", tmp_path / "out.h5ad", "--delimiter", delimiter)
+    assert result.exit_code == 1
+    assert "a number can hold it" in _out(result)
+
+
+def test_nan_with_parentheses_is_refused_as_anndata_refuses_it(tmp_path):
+    """numpy reads 'nan(...)' as NaN, whatever the parentheses hold, where
+    Python's float and anndata refuse it."""
+    path = tmp_path / "m.csv"
+    path.write_text(",a,b\nc1,nan(1),2\nc2,3,4\n")
+    with pytest.raises(ValueError):
+        _anndata_reads(path, ",")
+    result = _convert(path, "-o", tmp_path / "out.h5ad")
+    assert result.exit_code == 1
+    assert "line 2, column 2: 'nan(1)' is not a number" in _out(result)
