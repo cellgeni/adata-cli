@@ -7,6 +7,7 @@ moves; the plan of record for the current item is in the section below.
 
 | Version | What | Issues |
 |---|---|---|
+| 0.17.4 | Audit fixes, wave 1 (data safety): every writer staged and checked, close errors fail the command, `--chunk` at least 1, a free-space check; text/MTX/dense imports refuse what they cannot read; concat refuses repeated var names and keeps missing values and dtypes; import/export type values as pandas does; Pillow 13 | #89, #90, #91, #92, #98 |
 | 0.17.3 | Space Ranger's analysis (clusters, UMAP, PCA) for Visium spots and HD bins; `convert` works on fresh installs (broken since 0.7.0) | #85, #88 |
 | 0.17.2 | Visium HD segmented cells (Space Ranger 4): centroids, areas and Space Ranger's analysis | #83 |
 | 0.17.1 | Visium HD, one bin size at a time, with the new `spatial` extra (pyarrow) | #81 |
@@ -49,12 +50,25 @@ Decisions:
 
 Steps:
 - [x] B0: `convert` on fresh installs (#88), in 0.17.3
-- [ ] Wave 1, then 0.17.4
+- [x] Wave 1, then 0.17.4
 - [ ] Wave 2, then 0.17.5
 - [ ] Waves 3 and 4, then 0.17.6
 
 ## Follow-ups noticed
 
+- From wave 1 of the audit fixes:
+  - `core/csr_build.py`'s on-disk sort makes many small appends, slow for
+    a Zarr scratch at small budgets; buffer bucket writes in
+    `BucketSorter` (B2a).
+  - The dense tile path's temporaries run to about 10-17x the budget, a
+    constant factor rather than growth with the input (B2a).
+  - `import array obs/<new>` doesn't add the column to `column-order`, so
+    anndata doesn't show it (pre-existing, B2b).
+  - The free-space estimate runs low for a var-only subset, a dense loom
+    output and the transpose's scratch: no false refusals, a weaker check
+    (B1).
+  - The floors job lets indirect dependencies float, so a new upstream
+    release can turn it red, and publish.yml reuses tests.yml (B7).
 - `cell_id` (with `in_cell`, `in_nucleus`) on 2 µm bins, from Space Ranger
   4's `barcode_mappings.parquet` (a 0.17.x after the audit fixes).
 - Dropped: spatial bundles whose matrix is a MEX folder only. 10x always
