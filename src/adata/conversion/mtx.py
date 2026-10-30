@@ -17,9 +17,10 @@ plain or gzipped -- in one of the shapes these tools write:
   (`GSM123_matrix.mtx.gz`, `GSM123_barcodes.tsv.gz`, ...).
 
 The matrix is stored genes x cells, so each file column is read as a row of
-X. The result matches `scanpy.read_10x_mtx(gex_only=False)` column for
-column, except that integer counts stay integers -- as in the 10x HDF5
-import -- where scanpy gives float32.
+X. With `--var-names gene_symbols`, the result has the names and columns
+`scanpy.read_10x_mtx(gex_only=False)` gives, except that integer counts stay
+integers -- as in the 10x HDF5 import -- where scanpy gives float32; by
+default features are named by gene id instead.
 
 Export writes a Cell Ranger 3 folder: gzipped files, three feature columns,
 entries in barcode order.
@@ -28,10 +29,11 @@ entries in barcode order.
 from __future__ import annotations
 
 import json
+import re
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from rich.console import Console
@@ -182,15 +184,32 @@ def _read_folder(folder: Path) -> Optional[_Folder]:
     return found
 
 
-def _genome_folders(path: Path) -> Dict[str, _Folder]:
-    """Cell Ranger 2's layout: one matrix folder per genome, by genome."""
-    found = {}
+#: A run's matrix folder by what it holds, not by genome: STARsolo's
+#: `filtered/` and `raw/`, Cell Ranger's `filtered_feature_bc_matrix/`,
+#: Cell Ranger multi's `sample_filtered_feature_bc_matrix/` and so on.
+_RUN_FOLDER = re.compile(r"(sample_)?(filtered|raw)(_\w+_bc_matri(x|ces))?")
+
+
+def _subfolders(path: Path) -> Tuple[Dict[str, _Folder], List[str]]:
+    """The matrix folders in `path`: Cell Ranger 2's, one per genome, by
+    genome; and the names of any others, which are no genome.
+
+    A genome's folder holds `genes.tsv` and is named after its reference.
+    Anything else -- STARsolo's `filtered/` and `raw/`, Cell Ranger's
+    `filtered_feature_bc_matrix/`, a run written in Cell Ranger 2's file
+    names by DropletUtils -- is a matrix of its own.
+    """
+    genomes, others = {}, []
     for child in sorted(path.iterdir()) if path.is_dir() else []:
         folder = _read_folder(child)
-        if folder is not None:
+        if folder is None:
+            continue
+        if folder.legacy and not _RUN_FOLDER.fullmatch(child.name):
             folder.genome = child.name
-            found[child.name] = folder
-    return found
+            genomes[child.name] = folder
+        else:
+            others.append(child.name)
+    return genomes, others
 
 
 def sniff(path: Path) -> bool:
@@ -198,7 +217,7 @@ def sniff(path: Path) -> bool:
     if not path.is_dir() or is_zarr_path(path):
         return False
     try:
-        return _read_folder(path) is not None or bool(_genome_folders(path))
+        return _read_folder(path) is not None or any(_subfolders(path))
     except ValueError:
         # An ambiguous folder is still a matrix folder; `locate` says why.
         return True
@@ -213,7 +232,15 @@ def locate(path: Path, genome: Optional[str]) -> _Folder:
             )
         return folder
 
-    genomes = _genome_folders(path)
+    genomes, others = _subfolders(path)
+    if not genomes and others:
+        raise ValueError(
+            f"{path.name} holds the matrix "
+            f"{'folders' if len(others) > 1 else 'folder'} "
+            f"{', '.join(f'{name}/' for name in others)}, not Cell Ranger 2's "
+            "one folder per genome. Give the folder to convert, such as "
+            f"{path.name}/{others[0]}."
+        )
     if not genomes:
         raise ValueError(
             f"{path} is not a 10x or STARsolo matrix folder: it needs "
@@ -479,11 +506,40 @@ def _write_uns(root: Any, folder: _Folder, metadata: Dict[str, Any]) -> None:
 
 
 def _check_text(values: Sequence[str], what: str) -> None:
+    """Refuse what the TSV readers would not read back as written.
+
+    A tab or a line break splits the field. pandas (and so scanpy) and R
+    take a field that starts with a double quote for a quoted one, and read
+    on to the next quote, across tabs and lines. pandas reads an empty field
+    as missing, and both skip the blank line an empty barcode makes. scanpy
+    reads barcodes.tsv as comma-separated, so a comma cuts a barcode short.
+    A name may be empty: pandas reads it as missing, as it would read the
+    gap in the table it came from.
+    """
     for value in values:
         if "\t" in value or "\n" in value or "\r" in value:
             raise ValueError(
                 f"A {what} contains a tab or a line break, which would break "
                 f"the TSV file: {value!r}."
+            )
+        if value.startswith('"'):
+            raise ValueError(
+                f"A {what} starts with a double quote, which pandas and R read "
+                f"as the start of a quoted field: {value!r}."
+            )
+        if not value and what != "feature name":
+            raise ValueError(
+                f"A {what} is empty, which pandas reads as missing"
+                + (
+                    ", and a blank line, which pandas and R skip, so every "
+                    "barcode after it would move up a row."
+                    if what == "barcode" else "."
+                )
+            )
+        if "," in value and what == "barcode":
+            raise ValueError(
+                f"A barcode contains a comma, where scanpy, which reads "
+                f"barcodes.tsv as comma-separated, would cut it: {value!r}."
             )
 
 
@@ -514,6 +570,13 @@ class MtxExport(Converter):
         _check_text(features.names, "feature name")
         _check_text(features.types, "feature type")
         mtx_field(matrix.dtype)
+        # The barcodes too, before the folder exists: a block at a time.
+        with open_store(source, "r", require_anndata=False) as store:
+            obs = store.root["obs"]
+            obs_index, _ = resolve_index(obs, "obs")
+            n, cache = element_len(obs_index), {}
+            for lo in range(0, n, STRING_STEP):
+                _check_text(read_str_chunk(obs_index, lo, min(lo + STRING_STEP, n), cache, obs), "barcode")
 
         return ConversionPlan(
             source=source,
@@ -560,7 +623,6 @@ class MtxExport(Converter):
             with create_binary(folder / f"barcodes.tsv{ext}", gzipped=gzipped, level=GZIP_LEVEL) as fh:
                 for lo in range(0, n, STRING_STEP):
                     block = read_str_chunk(obs_index, lo, min(lo + STRING_STEP, n), cache, obs)
-                    _check_text(block, "barcode")
                     fh.write(("\n".join(block) + "\n").encode("utf-8"))
 
             matrix = describe(resolve(root, source.path))

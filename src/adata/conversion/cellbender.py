@@ -62,7 +62,7 @@ from adata.elements.write import (
     write_string_array,
 )
 from adata.formats.mtx import EntryMap, iter_matrix_entries
-from adata.storage import create_dataset, is_zarr_group, open_store
+from adata.storage import create_dataset, open_store
 
 #: Datasets of a 0.2 matrix group that are the matrix, not a latent.
 _MATRIX_KEYS = frozenset({
@@ -74,6 +74,10 @@ _INDEX = "barcode_indices_for_latents"
 
 #: The cell-probability column, by CellBender version.
 _PROBABILITY = ("cell_probability", "latent_cell_probability")
+
+#: The one per-feature array of a 0.2 matrix group. Its other arrays are
+#: global -- the loss per epoch, fitted constants -- whatever their length.
+_PER_FEATURE_02 = frozenset({"ambient_expression"})
 
 #: Rows of obsm written per block.
 _ROW_STEP = 1 << 16
@@ -140,8 +144,13 @@ def _read_latents(handle: h5py.File, group: str, n_barcodes: int, n_features: in
     lengths: Dict[str, int] = {}
     index_path: Optional[str] = None
 
-    def place_global(key: str, path: str, item: h5py.Dataset) -> None:
-        if item.ndim == 1 and item.shape[0] == n_features and item.dtype.kind in "iuf":
+    def place_global(key: str, path: str, item: h5py.Dataset, named: bool = False) -> None:
+        """A global value into var if it has one value per feature; with
+        `named`, only if it is one CellBender writes per feature."""
+        if (
+            item.ndim == 1 and item.shape[0] == n_features and item.dtype.kind in "iuf"
+            and (not named or key in _PER_FEATURE_02)
+        ):
             per_feature[key] = path
         else:
             other[key] = path
@@ -182,7 +191,9 @@ def _read_latents(handle: h5py.File, group: str, n_barcodes: int, n_features: in
                 per_droplet[key] = path
                 lengths[key] = item.shape[0]
             else:
-                place_global(key, path, item)
+                # 0.2 keeps the loss per epoch here too: as long as the
+                # features only by chance, it is no property of each one.
+                place_global(key, path, item, named=True)
 
     sizes = set(lengths.values())
     if len(sizes) > 1:
@@ -259,20 +270,25 @@ def _barcode_blocks(
     for lo in range(0, n, STRING_STEP):
         hi = min(lo + STRING_STEP, n)
         if rows is None:
-            yield decode_str_array(np.asarray(dataset[lo:hi]))
+            yield tenx.decode_text(np.asarray(dataset[lo:hi]))
             continue
         first, last = np.searchsorted(rows, (lo, hi))
         if first < last:
-            yield decode_str_array(np.asarray(dataset[lo:hi])[rows[first:last] - lo])
+            yield tenx.decode_text(np.asarray(dataset[lo:hi])[rows[first:last] - lo])
 
 
 def _plan_raw(
     path: Path, options: Options, matrix: Any, barcodes: h5py.Dataset, out_rows: Optional[np.ndarray]
 ) -> _Raw:
     """Check the raw file against the output, and map its barcodes to output rows."""
+    # Before opening it: h5py's own refusal of a file that is not HDF5 at
+    # all says only that a signature was not found.
+    if not tenx.sniff(path):
+        raise ValueError(
+            f"--raw {path.name} is not a 10x HDF5 matrix; it must be the "
+            "raw_feature_bc_matrix.h5 CellBender was run on."
+        )
     with h5py.File(path, "r") as handle:
-        if not tenx.sniff(path):
-            raise ValueError(f"--raw {path.name} is not a 10x HDF5 matrix.")
         raw = tenx._read_matrix(handle, options.genome)
         same = (
             raw.n_features == matrix.n_features
@@ -323,7 +339,7 @@ def _plan_raw(
             path=path,
             group=raw.group,
             n_barcodes=raw.n_barcodes,
-            dtype=handle[raw.group]["data"].dtype,
+            dtype=tenx._data_dtype(handle[raw.group]["data"].dtype),
             to_output=to_output,
             in_order=bool(np.all(np.diff(mapped) > 0)),
         )
@@ -331,14 +347,20 @@ def _plan_raw(
 
 def _write_raw(
     raw: _Raw, roots: Sequence[Any], targets: Sequence[Target], n_out: int,
-    n_features: int, compression: Optional[str],
+    n_features: int, layout: h5py.Group,
 ) -> None:
-    """layers["cellranger"]: the raw counts of each output's barcodes and features."""
+    """layers["cellranger"]: the raw counts of each output's barcodes and features.
+
+    Laid out as X is -- the index dtypes, chunks and compression of the
+    CellBender matrix `layout` -- so the layers of one output match.
+    """
     emap = _entry_map(n_out, n_features, targets)
+    templates = (layout["data"], layout["indices"], layout["indptr"])
     destinations = [
         [CsrAppender(
             root["layers"], "cellranger", shape=(n_out, emap.target_cols[t]),
-            data_dtype=raw.dtype, compression=compression,
+            data_dtype=raw.dtype, index_dtype=layout["indices"].dtype,
+            templates=templates,
         )]
         for t, root in enumerate(roots)
     ]
@@ -432,6 +454,14 @@ class CellbenderImport(Converter):
         options: Options,
     ) -> ConversionPlan:
         with h5py.File(source, "r") as handle:
+            if not _has_latents(handle):
+                # Named with --from: without latents it is a plain 10x
+                # matrix, and calling it CellBender's would invent a result.
+                raise ValueError(
+                    f"{Path(source).name} holds no CellBender latents, so it is not "
+                    "CellBender output"
+                    + ("; read it with --from 10x-h5." if tenx.sniff(source) else ".")
+                )
             matrix, outputs, targets, warnings = tenx.plan_matrix_import(
                 handle, output, options
             )
@@ -452,6 +482,13 @@ class CellbenderImport(Converter):
                 probability = _spread(values, latents.rows, matrix.n_barcodes)
                 with np.errstate(invalid="ignore"):
                     out_rows = np.flatnonzero(probability >= options.min_cell_probability)
+                if out_rows.size == 0:
+                    highest = np.nanmax(probability) if np.isfinite(probability).any() else None
+                    raise ValueError(
+                        f"No droplet has a cell probability of at least "
+                        f"{options.min_cell_probability:g}"
+                        + (f"; the highest is {highest:.4g}." if highest is not None else ".")
+                    )
 
             raw = None
             if options.raw is not None:
@@ -544,8 +581,7 @@ class CellbenderImport(Converter):
             if detail.raw is not None:
                 with console.status(f"[cyan]Reading the raw counts of {detail.raw.path.name}...[/]"):
                     _write_raw(
-                        detail.raw, roots, detail.targets, n_out, matrix.n_features,
-                        None if is_zarr_group(roots[0]) else "gzip",
+                        detail.raw, roots, detail.targets, n_out, matrix.n_features, group,
                     )
 
 
@@ -602,7 +638,8 @@ def _write_embeddings(
         dtype = source.dtype if source.dtype.kind == "f" else np.float64
         out = create_dataset(
             root["obsm"], key, shape=(n_out, width), dtype=dtype,
-            chunks=(min(max(n_out, 1), _ROW_STEP), width),
+            # HDF5 refuses a chunk larger than the data, an empty one too.
+            **({"chunks": (min(n_out, _ROW_STEP), width)} if n_out and width else {}),
         )
         spec.set_encoding(out, spec.ARRAY)
         sources.append(source)

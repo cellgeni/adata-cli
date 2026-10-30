@@ -107,6 +107,32 @@ def test_a_gzipped_matrix_is_read(tmp_path):
     _check(_read(out), run.dge(), run)
 
 
+def test_gzipped_tables_are_read(tmp_path):
+    """F108: a gzipped count_matrix.mtx was found, but gzipped
+    all_genes.csv and cell_metadata.csv were not, so the folder was not
+    recognised."""
+    import gzip
+
+    pd = pytest.importorskip("pandas")
+    run = write_parse_run(tmp_path / "run", gz=True)
+    dge = run.dge()
+    for name in ("all_genes.csv", "cell_metadata.csv"):
+        plain = dge.path / name
+        (dge.path / f"{name}.gz").write_bytes(gzip.compress(plain.read_bytes()))
+        plain.unlink()
+    out = tmp_path / "parse.h5ad"
+    _ok(dge.path, "-o", out)
+
+    got = _read(out)
+    assert np.array_equal(got.X.toarray(), dge.counts)
+    # As Parse's recipe reads the tables: pandas, which inflates them itself.
+    cells = pd.read_csv(dge.path / "cell_metadata.csv.gz").set_index("bc_wells")
+    genes = pd.read_csv(dge.path / "all_genes.csv.gz")
+    assert list(got.obs_names) == list(cells.index)
+    assert list(got.obs["tscp_count"]) == list(cells["tscp_count"])
+    assert list(got.var_names) == list(genes["gene_id"])
+
+
 def test_a_run_without_samples_has_only_the_combined_folder(tmp_path):
     run = write_parse_run(tmp_path / "run", samples=())
     out = tmp_path / "out.h5ad"
