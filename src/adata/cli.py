@@ -9,6 +9,7 @@ from rich.markup import escape
 
 from adata.conversion import FORMATS, Options
 from adata.core.recast import LAYOUTS
+from adata.formats.array import IMPORT_CHUNK_ELEMENTS
 from adata.commands import (
     MERGE_CHOICES,
     concat_stores,
@@ -51,6 +52,27 @@ export_app = typer.Typer(help="Export objects from an AnnData store.")
 import_app = typer.Typer(help="Import objects into an AnnData store.")
 app.add_typer(export_app, name="export")
 app.add_typer(import_app, name="import")
+
+
+def _chunk_option(default: int, help: str, *aliases: str, hidden: bool = False):
+    """`--chunk`, as every command that takes one spells and bounds it.
+
+    Defined once so no command can forget the bound: a zero or negative
+    chunk used to skip the copy loop and write an all-zero dense matrix
+    with exit 0, or fail with range()'s own message.
+    """
+    return typer.Option(
+        default, "--chunk", "-C", *aliases, min=1, help=help, hidden=hidden
+    )
+
+
+def _space_check_option():
+    """`--no-space-check`, for the commands that check free space first."""
+    return typer.Option(
+        False,
+        "--no-space-check",
+        help="Write even if the disk looks too small for the estimated output",
+    )
 
 
 @app.callback()
@@ -321,19 +343,15 @@ def subset(
         "--var-query",
         help="Keep var matching an expression, e.g. \"highly_variable == True\"",
     ),
-    chunk_rows: int = typer.Option(
-        1024,
-        "--chunk",
-        "-C",
-        "--chunk-rows",
-        "-r",
-        help="Row chunk size for dense matrices",
+    chunk_rows: int = _chunk_option(
+        1024, "Row chunk size for dense matrices", "--chunk-rows", "-r"
     ),
     zarr_format: Optional[int] = typer.Option(
         None,
         "--zarr-format",
         help="Zarr spec version to write (defaults to the source store's)",
     ),
+    no_space_check: bool = _space_check_option(),
 ) -> None:
     """
     Subset an AnnData store by obs and/or var.
@@ -359,13 +377,6 @@ def subset(
         )
         raise typer.Exit(code=1)
 
-    if not inplace and output is None:
-        console.print(
-            "[bold red]Error:[/] Output file is required. "
-            "Use --output/-o or --inplace.",
-        )
-        raise typer.Exit(code=1)
-
     try:
         subset_h5ad(
             file=file,
@@ -378,6 +389,7 @@ def subset(
             obs_query=obs_query,
             var_query=var_query,
             zarr_format=zarr_format,
+            space_check=not no_space_check,
         )
     except Exception as e:
         console.print(f"[bold red]Error:[/] {escape(str(e))}")
@@ -434,14 +446,13 @@ def concat(
     fill_value: float = typer.Option(
         0.0, "--fill-value", help="Value for dense cells introduced by an outer join"
     ),
-    chunk_rows: int = typer.Option(
-        1024, "--chunk", "-C", help="Row chunk size while streaming"
-    ),
+    chunk_rows: int = _chunk_option(1024, "Row chunk size while streaming"),
     zarr_format: Optional[int] = typer.Option(
         None,
         "--zarr-format",
         help="Zarr spec version to write (defaults to the inputs' when they agree)",
     ),
+    no_space_check: bool = _space_check_option(),
 ) -> None:
     """
     Concatenate stores along the obs axis.
@@ -485,6 +496,7 @@ def concat(
             fill_value=fill_value,
             chunk_rows=chunk_rows,
             zarr_format=zarr_format,
+            space_check=not no_space_check,
         )
     except Exception as e:
         console.print(f"[bold red]Error:[/] {escape(str(e))}")
@@ -815,7 +827,8 @@ def convert(
     indices_dtype: Optional[str] = typer.Option(None, "--indices-dtype", hidden=True),
     layout: Optional[str] = typer.Option(None, "--layout", hidden=True),
     in_memory: bool = typer.Option(False, "--in-memory", hidden=True),
-    chunk_rows: int = typer.Option(1024, "--chunk", "-C", hidden=True),
+    chunk_rows: int = _chunk_option(1024, "Row chunk size", hidden=True),
+    no_space_check: bool = _space_check_option(),
 ) -> None:
     """
     Convert a store to another format.
@@ -898,8 +911,6 @@ def convert(
                 f"{', '.join(recast_flags)} is deprecated and will be removed "
                 "in 1.0.0; use 'recast' instead.",
             )
-            if not inplace and output is None:
-                raise ValueError("Output file is required. Use --output/-o or --inplace.")
             if layout is not None and layout not in LAYOUTS:
                 raise ValueError(f"--layout must be one of: {', '.join(LAYOUTS)}.")
             if zarr_format is not None and zarr_format not in (2, 3):
@@ -918,6 +929,7 @@ def convert(
                 in_memory=in_memory,
                 force=force,
                 zarr_format=zarr_format,
+                space_check=not no_space_check,
             )
             return
 
@@ -985,6 +997,7 @@ def convert(
                 default_embedding=default_embedding,
                 mod=mod,
             ),
+            space_check=not no_space_check,
         )
     except Exception as e:
         console.print(f"[bold red]Error:[/] {escape(str(e))}")
@@ -1051,17 +1064,13 @@ def recast(
         "--in-memory",
         help="Transpose in memory instead of streaming (faster if it fits)",
     ),
-    chunk_rows: int = typer.Option(
-        1024,
-        "--chunk",
-        "-C",
-        help="Row chunk size for dense matrices",
-    ),
+    chunk_rows: int = _chunk_option(1024, "Row chunk size for dense matrices"),
     zarr_format: Optional[int] = typer.Option(
         None,
         "--zarr-format",
         help="Zarr spec version to write (defaults to the source store's)",
     ),
+    no_space_check: bool = _space_check_option(),
 ) -> None:
     """
     Change a matrix's dtype, layout or density.
@@ -1083,13 +1092,6 @@ def recast(
         adata recast data.h5ad X --inplace --dtype float32 --indices-dtype int32
         adata recast data.h5ad --all -o out.h5ad --dtype float32
     """
-    if not inplace and output is None:
-        console.print(
-            "[bold red]Error:[/] Output file is required. "
-            "Use --output/-o or --inplace.",
-        )
-        raise typer.Exit(code=1)
-
     if layout is not None and layout not in LAYOUTS:
         console.print(
             f"[bold red]Error:[/] --layout must be one of: {', '.join(LAYOUTS)}."
@@ -1115,6 +1117,7 @@ def recast(
             in_memory=in_memory,
             force=force,
             zarr_format=zarr_format,
+            space_check=not no_space_check,
         )
     except Exception as e:
         console.print(f"[bold red]Error:[/] {escape(str(e))}")
@@ -1157,14 +1160,13 @@ def split(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Show what would be written without writing it"
     ),
-    chunk_rows: int = typer.Option(
-        1024, "--chunk", "-C", help="Row chunk size for dense matrices"
-    ),
+    chunk_rows: int = _chunk_option(1024, "Row chunk size for dense matrices"),
     zarr_format: Optional[int] = typer.Option(
         None,
         "--zarr-format",
         help="Zarr spec version to write (defaults to the source store's)",
     ),
+    no_space_check: bool = _space_check_option(),
 ) -> None:
     """
     Split a store into one file per distinct value of a column.
@@ -1197,6 +1199,7 @@ def split(
             min_size=min_size,
             chunk_rows=chunk_rows,
             zarr_format=zarr_format,
+            space_check=not no_space_check,
         )
     except Exception as e:
         console.print(f"[bold red]Error:[/] {escape(str(e))}")
@@ -1228,13 +1231,8 @@ def export_dataframe(
         "-c",
         help="Comma separated column names to include",
     ),
-    chunk_rows: int = typer.Option(
-        10_000,
-        "--chunk",
-        "-C",
-        "--chunk-rows",
-        "-r",
-        help="Number of rows to read per chunk",
+    chunk_rows: int = _chunk_option(
+        10_000, "Number of rows to read per chunk", "--chunk-rows", "-r"
     ),
     head: Optional[int] = typer.Option(
         None, "--head", "-n", help="Output only the first n entries"
@@ -1291,18 +1289,15 @@ def export_array(
         help="Output .npy file path (defaults to stdout)",
         writable=True,
     ),
-    chunk_elements: int = typer.Option(
-        100_000,
-        "--chunk",
-        "-C",
-        help="Number of elements to read per chunk",
+    chunk_elements: int = _chunk_option(
+        100_000, "Number of elements to read per chunk"
     ),
 ) -> None:
     """
     Export a dense array or matrix to NumPy .npy format.
 
-    Writes to stdout when no --output is given. Writing to a file streams in
-    chunks; stdout is not seekable, so that path holds the array in memory.
+    Writes to stdout when no --output is given. Either way the array is read
+    and written a chunk at a time.
 
     Examples:
         adata export array data.h5ad obsm/X_pca -o pca.npy
@@ -1346,11 +1341,9 @@ def export_sparse(
     head: Optional[int] = typer.Option(
         None, "--head", "-n", help="Output only the first n entries of mtx file"
     ),
-    chunk_elements: int = typer.Option(
+    chunk_elements: int = _chunk_option(
         1_000,
-        "--chunk",
-        "-C",
-        help="Number of rows/columns (depends on compression format) to process per chunk",
+        "Number of rows/columns (depends on compression format) to process per chunk",
     ),
     in_memory: bool = typer.Option(
         False,
@@ -1472,13 +1465,6 @@ def export_image(
 # ============================================================================
 # IMPORT subcommands
 # ============================================================================
-def _get_target_file(file: Path, output: Optional[Path], inplace: bool) -> Path:
-    """Determine target path and copy/convert if needed."""
-    from adata.commands.import_data import _prepare_target_path
-
-    return _prepare_target_path(file, output, inplace, console)
-
-
 @import_app.command("dataframe")
 def import_dataframe(
     file: Path = typer.Argument(
@@ -1508,6 +1494,7 @@ def import_dataframe(
         "--inplace",
         help="Modify source file directly.",
     ),
+    no_space_check: bool = _space_check_option(),
     index_column: Optional[str] = typer.Option(
         None,
         "--index-column",
@@ -1537,30 +1524,30 @@ def import_dataframe(
         adata import dataframe data.h5ad var genes.csv --inplace -i gene_id
         adata import dataframe data.h5ad obs cells.csv --inplace --categorical batch
     """
-    from adata.commands.import_data import _import_csv
-
-    if not inplace and output is None:
-        console.print(
-            "[bold red]Error:[/] Output file is required. "
-            "Use --output/-o or --inplace.",
-        )
-        raise typer.Exit(code=1)
+    from adata.commands.import_data import _import_csv, import_into
 
     try:
-        target = _get_target_file(file, output, inplace)
         cat_list = (
             [c.strip() for c in categorical.split(",") if c.strip()]
             if categorical
             else None
         )
-        _import_csv(
-            target,
-            entry,
-            input_file,
-            index_column,
+        import_into(
+            file,
+            output,
+            inplace,
+            lambda target: _import_csv(
+                target,
+                entry,
+                input_file,
+                index_column,
+                console,
+                categorical=cat_list,
+                auto_categorical=auto_categorical,
+            ),
             console,
-            categorical=cat_list,
-            auto_categorical=auto_categorical,
+            input_file=input_file,
+            space_check=not no_space_check,
         )
     except Exception as e:
         console.print(f"[bold red]Error:[/] {escape(str(e))}")
@@ -1596,6 +1583,10 @@ def import_array(
         "--inplace",
         help="Modify source file directly.",
     ),
+    chunk_elements: int = _chunk_option(
+        IMPORT_CHUNK_ELEMENTS, "Number of elements to copy per chunk"
+    ),
+    no_space_check: bool = _space_check_option(),
 ) -> None:
     """
     Import a NumPy .npy file as a dense array.
@@ -1606,18 +1597,22 @@ def import_array(
         adata import array data.h5ad obsm/X_pca pca.npy -o output.h5ad
         adata import array data.h5ad X matrix.npy --inplace
     """
-    from adata.commands.import_data import _import_npy
-
-    if not inplace and output is None:
-        console.print(
-            "[bold red]Error:[/] Output file is required. "
-            "Use --output/-o or --inplace.",
-        )
-        raise typer.Exit(code=1)
+    from adata.commands.import_data import _import_npy, import_into
 
     try:
-        target = _get_target_file(file, output, inplace)
-        _import_npy(target, entry, input_file, console)
+        import_into(
+            file,
+            output,
+            inplace,
+            lambda target: _import_npy(
+                target, entry, input_file, console, chunk_elements=chunk_elements
+            ),
+            console,
+            input_file=input_file,
+            obj=entry,
+            kind="array",
+            space_check=not no_space_check,
+        )
     except Exception as e:
         console.print(f"[bold red]Error:[/] {escape(str(e))}")
         raise typer.Exit(code=1)
@@ -1652,6 +1647,7 @@ def import_sparse(
         "--inplace",
         help="Modify source file directly.",
     ),
+    no_space_check: bool = _space_check_option(),
 ) -> None:
     """
     Import a Matrix Market (.mtx) file as a CSR sparse matrix.
@@ -1662,18 +1658,20 @@ def import_sparse(
         adata import sparse data.h5ad X matrix.mtx -o output.h5ad
         adata import sparse data.h5ad layers/counts counts.mtx --inplace
     """
-    from adata.commands.import_data import _import_mtx
-
-    if not inplace and output is None:
-        console.print(
-            "[bold red]Error:[/] Output file is required. "
-            "Use --output/-o or --inplace.",
-        )
-        raise typer.Exit(code=1)
+    from adata.commands.import_data import _import_mtx, import_into
 
     try:
-        target = _get_target_file(file, output, inplace)
-        _import_mtx(target, obj, input_file, console)
+        import_into(
+            file,
+            output,
+            inplace,
+            lambda target: _import_mtx(target, obj, input_file, console),
+            console,
+            input_file=input_file,
+            obj=obj,
+            kind="sparse",
+            space_check=not no_space_check,
+        )
     except Exception as e:
         console.print(f"[bold red]Error:[/] {escape(str(e))}")
         raise typer.Exit(code=1)
@@ -1708,6 +1706,7 @@ def import_dict(
         "--inplace",
         help="Modify source file directly.",
     ),
+    no_space_check: bool = _space_check_option(),
 ) -> None:
     """
     Import a JSON file into uns or other dict-like groups.
@@ -1716,18 +1715,18 @@ def import_dict(
         adata import dict data.h5ad uns/metadata config.json -o output.h5ad
         adata import dict data.h5ad uns settings.json --inplace
     """
-    from adata.commands.import_data import _import_json
-
-    if not inplace and output is None:
-        console.print(
-            "[bold red]Error:[/] Output file is required. "
-            "Use --output/-o or --inplace.",
-        )
-        raise typer.Exit(code=1)
+    from adata.commands.import_data import _import_json, import_into
 
     try:
-        target = _get_target_file(file, output, inplace)
-        _import_json(target, obj, input_file, console)
+        import_into(
+            file,
+            output,
+            inplace,
+            lambda target: _import_json(target, obj, input_file, console),
+            console,
+            input_file=input_file,
+            space_check=not no_space_check,
+        )
     except Exception as e:
         console.print(f"[bold red]Error:[/] {escape(str(e))}")
         raise typer.Exit(code=1)
@@ -1760,6 +1759,7 @@ def import_image_cmd(
     inplace: bool = typer.Option(
         False, "--inplace", help="Modify source file directly."
     ),
+    no_space_check: bool = _space_check_option(),
 ) -> None:
     """
     Import an image file as a dense array.
@@ -1767,25 +1767,49 @@ def import_image_cmd(
     Examples:
         adata import image data.h5ad uns/spatial/hires tissue.png --inplace
     """
-    from adata.commands.import_data import _import_image
-
-    if not inplace and output is None:
-        console.print(
-            "[bold red]Error:[/] Output file is required. "
-            "Use --output/-o or --inplace.",
-        )
-        raise typer.Exit(code=1)
+    from adata.commands.import_data import _import_image, import_into
 
     try:
-        target = _get_target_file(file, output, inplace)
-        _import_image(target, entry, input_file, console)
+        import_into(
+            file,
+            output,
+            inplace,
+            lambda target: _import_image(target, entry, input_file, console),
+            console,
+            input_file=input_file,
+            space_check=not no_space_check,
+        )
     except Exception as e:
         console.print(f"[bold red]Error:[/] {escape(str(e))}")
         raise typer.Exit(code=1)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
-    app(standalone_mode=True)
+    try:
+        app(standalone_mode=True)
+    except SystemExit as done:
+        if isinstance(done.code, int) and done.code != 0:
+            _leave(done.code)
+        raise
+
+
+def _leave(code: int) -> None:
+    """Exit now, skipping the interpreter's teardown.
+
+    After a failed HDF5 write (a full disk, a quota), h5py can crash while
+    its objects are torn down at exit, turning the exit 1 that follows the
+    Error line into a segfault's 139. By now every store has been closed
+    and every staged output removed, so there is nothing left to tear down.
+    """
+    import os
+    import sys
+
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:  # pragma: no cover - a closed pipe
+            pass
+    os._exit(code)
 
 
 def main_deprecated(argv: Optional[Sequence[str]] = None) -> None:

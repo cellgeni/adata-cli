@@ -101,8 +101,6 @@ def export_mtx(
             max_majors=None if in_memory else max(1, int(chunk_elements)),
         )
         write_entries(fh, entries, limit=nnz)
-    if not to_stdout:
-        console.print(f"[green]Wrote[/] {out}")
 
 
 def import_mtx(

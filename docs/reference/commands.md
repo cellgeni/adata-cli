@@ -33,6 +33,7 @@ Run `adata <command> --help` for the authoritative flag list. Each format
 - [export](#export)
 - [import](#import)
 - [Query expressions](query.md), on their own page
+- [Writing outputs](#writing-outputs): what every command that writes checks
 - [Zarr format selection](#zarr-format-selection)
 
 ---
@@ -86,8 +87,9 @@ adata subset data.h5ad --inplace --obs barcodes.txt
 | `--inplace` | Replace the source (written to a temporary path first) |
 | `--obs` / `--var` | File of names to keep, one per line |
 | `--obs-query`, `-q` / `--var-query` | Keep rows matching an [expression](query.md) |
-| `--chunk`, `-C` | Row chunk size for dense matrices |
+| `--chunk`, `-C` | Row chunk size for dense matrices (at least 1) |
 | `--zarr-format` | Zarr version to write; defaults to the source's |
+| `--no-space-check` | Write even if the disk looks too small; see [Writing outputs](#writing-outputs) |
 
 `raw/` is carried over and matched against its **own** var axis, which usually
 holds more genes than the main object.
@@ -103,6 +105,10 @@ only once complete. A query that fails therefore leaves nothing behind, and an
 existing output (or, with `--inplace`, the source) is replaced only once its
 successor is finished. The output path may not name the input; use
 `--inplace`.
+
+A selection that keeps no rows is refused, whether a query or a name list
+that matches nothing (barcodes without the `-1` the index carries, say).
+Nothing is written, and `--inplace` leaves the source as it was.
 
 ## `convert`
 
@@ -142,6 +148,7 @@ adata convert multiome.h5ad -o multiome.h5mu
 | `--compression` | `none`, `gzip` or `lzf` for h5ad; `none`, `gzip`, `zstd` or `blosc` for Zarr; `gzip` (default) or `none` for an MTX folder |
 | `--overwrite` | Replace an existing output |
 | `--force` | Convert despite a lossy, inflating or placeholder result |
+| `--no-space-check` | Write even if the disk looks too small; see [Writing outputs](#writing-outputs) |
 
 | Format | Extension | Read | Write |
 |---|---|---|---|
@@ -175,7 +182,8 @@ Every check runs before anything is written. The output is written beside
 its destination (`out.adata-tmp.zarr`) and moved into place only once
 complete, so a failed conversion leaves nothing behind. An existing output is
 refused unless `--overwrite` is given, and is replaced only once its
-successor is finished.
+successor is finished. `--overwrite` replaces a store, or a Matrix Market
+folder holding only its own files, never a folder holding anything else.
 
 To change a matrix's dtype, layout or density instead, use
 [`recast`](#recast).
@@ -204,8 +212,9 @@ adata recast data.h5ad layers/counts -o out.h5ad --layout dense --force
 | `--layout` | `csr`, `csc`, `dense` or `sparse` |
 | `--force` | Recast despite a lossy cast or a large size increase |
 | `--in-memory` | Transpose in memory rather than streaming |
-| `--chunk`, `-C` | Row chunk size for dense matrices |
+| `--chunk`, `-C` | Row chunk size for dense matrices (at least 1) |
 | `--zarr-format` | Zarr version to write; defaults to the source's |
+| `--no-space-check` | Write even if the disk looks too small; see [Writing outputs](#writing-outputs) |
 
 Two things are refused before anything is written. A cast that would not
 round-trip -- checked by casting every value and casting it back, not by
@@ -249,12 +258,17 @@ adata split data.h5ad --by cluster -o out/ --min-size 50
 | `--min-size` | Skip groups smaller than this |
 | `--dry-run` | Print the plan without writing |
 | `--manifest / --no-manifest` | Write a CSV listing the outputs (default on) |
+| `--chunk`, `-C` | Row chunk size for dense matrices (at least 1) |
+| `--zarr-format` | Zarr version to write; defaults to the source's |
+| `--no-space-check` | Write even if the disk looks too small; see [Writing outputs](#writing-outputs) |
 
-Labels are sanitised for use as filenames; collisions get a numeric suffix.
+Labels are sanitised for use as filenames; collisions get a numeric suffix,
+and so do labels that differ only in case (`B`, `b_1`), which would be one
+file on macOS and Windows.
 Every store is written beside its destination and moved into place only once
 all of them are complete, and the manifest is written last, so a split that
 fails leaves no partial stores. An output that would land on the input is
-refused.
+refused, on a case-insensitive filesystem too (a label `A` beside `a.h5ad`).
 
 ## `concat`
 
@@ -274,8 +288,9 @@ adata concat a.h5ad b.h5ad -o m.h5ad --keys a,b --index-unique - --uns-merge sam
 | `--index-unique` | Delimiter for suffixing obs names with their key |
 | `--merge` / `--uns-merge` | `drop` (default), `same`, `unique`, `first`, `only` |
 | `--fill-value` | Value for dense cells introduced by an outer join |
-| `--chunk`, `-C` | Row chunk size while streaming |
+| `--chunk`, `-C` | Row chunk size while streaming (at least 1) |
 | `--zarr-format` | Zarr version to write; defaults to the inputs' when they agree, otherwise v3 |
+| `--no-space-check` | Write even if the disk looks too small; see [Writing outputs](#writing-outputs) |
 
 Inputs are matched by var name, so each input's var names must be unique.
 Repeated names are refused before anything is written, and the error names
@@ -344,7 +359,10 @@ adata create out.zarr --obs-names cells.txt --var-names genes.txt
 ```
 
 Give each axis either a size (names are generated as `cell_0000`, `gene_0000`)
-or a file of names. `--force` overwrites an existing store.
+or a file of names. `--force` overwrites an existing store, and only a store:
+a folder that is not a Zarr store, or a file that is not HDF5, is refused.
+The new store is written beside the old one and swapped in once complete, so
+a failed `create --force` leaves the old store as it was.
 
 ## `export`
 
@@ -383,6 +401,11 @@ with `export dataframe`, which writes them as empty fields.
 `export dict` writes NaN and infinite values as `null`, since JSON has no
 number for them, and says how many it wrote.
 
+A file output is written beside its destination and renamed into place once
+complete, so an export that fails or is refused leaves an existing file as it
+was. An output that names the input store, lies inside a Zarr input, or names
+a folder is refused before anything is read.
+
 `export sparse` gzips its output when the name ends in `.gz`. Whole-number
 values are written as integers, and other floats with enough digits to read
 back exactly.
@@ -390,7 +413,15 @@ back exactly.
 ## `import`
 
 Write data into a store at any path. All subcommands need `--output`/`-o` or
-`--inplace`.
+`--inplace`, and refuse both at once.
+
+An import never edits a store in place. The source is copied beside the
+destination (beside itself with `--inplace`), the element is written into
+the copy, and the copy is moved into place once that has worked, so an
+import that is refused or fails part way leaves the source and any existing
+output as they were. The copy needs room for the whole store: each
+subcommand checks the free space first and takes `--no-space-check` to skip
+that (see [Writing outputs](#writing-outputs)).
 
 ```bash
 adata import dataframe data.h5ad obs cells.csv --inplace -i cell_id
@@ -401,7 +432,9 @@ adata import image     data.h5ad uns/spatial/hires tissue.png --inplace
 ```
 
 Dimensions are validated against the existing obs/var where the path implies
-an axis.
+an axis. For `array` and `sparse` that is done from the file's header,
+before the store is copied, so a matrix of the wrong shape is refused at
+once rather than after a copy of a large store.
 
 An element of a kind the AnnData layout does not allow where it would go is
 refused before anything is written, since anndata could not then read the
@@ -412,11 +445,14 @@ array that is not 1-D as a column of a dataframe. Name the entry to write,
 such as `obsm/X_pca` or `uns/params`: an entry is replaced whatever it held.
 
 For `array`: the `.npy` is read a block of rows at a time, so its size is not
-a limit. Text (`<U` or `S`) becomes a string array.
+a limit; `--chunk`, `-C` sets how many elements a block holds (1,048,576 by
+default, at least 1). Into a Zarr store a block is also a chunk of the new
+array, so it is never less than 128 KiB: a smaller one would mean a file per
+row. Text (`<U` or `S`) becomes a string array.
 
 For `sparse`: the file is read in two streaming passes, so its size is not a
 limit, and it may be gzipped (`counts.mtx.gz`). The first pass checks the
-whole file before the store is touched. `integer` values stay integers
+whole file before the element is written. `integer` values stay integers
 (int32, or int64 when a value needs it), `real` ones become float64, and
 `pattern` entries become ones. Duplicate entries are summed, as scipy does.
 Only `coordinate general` files are read: `symmetric`, `skew-symmetric`,
@@ -452,6 +488,65 @@ Names, of a CSV's columns or a JSON object's keys, may not be empty, `.` or
 
 Giving `-o out.zarr` for an `.h5ad` source (or the reverse) converts the store
 as it writes.
+
+## Writing outputs
+
+What every command that writes a store or file checks, and how it writes.
+
+**The output is checked before anything is opened.** It may not be the
+input, under any name that reaches it: a symlink, `..`, a hard link, or a
+change of case on a case-insensitive filesystem (macOS, Windows). A store
+output (`-o` on `subset`, `recast`, `concat`, `import`, and `create`'s path)
+may replace an existing store (or an empty folder), but not a folder that is
+not a Zarr store or a file that is not HDF5: `-o results/`, as if it were
+`split`'s folder, used to delete `results/` and everything in it. An
+`export` output may not be a folder or a store. `--inplace` and `-o`
+together are refused, rather than `-o` being ignored.
+
+**It is written beside its destination** (`out.adata-tmp.h5ad`) and renamed
+into place only once complete; an existing output is renamed aside to
+`out.adata-old.h5ad` and deleted once the new one is in place. A failure at
+any point, including the last flush to disk when the store is closed, leaves
+the existing output (or, with `--inplace`, the source) as it was. Before an
+existing output is replaced, its successor is synced to disk, so a power cut
+just after cannot lose both, and it takes over the old one's permissions and
+group: a private `0640` store stays private. An output that is a symlink,
+or a symlinked source with `--inplace`, is followed: the store or file it
+points at is replaced, and the link kept. An `export` to a device or a pipe
+(`/dev/null`, a FIFO, `>(gzip > out.gz)`) is written as it is.
+
+**One run at a time per output.** A run claims each output with a lock file
+beside it (`out.h5ad.adata-lock`, naming its host and process) for as long
+as it writes, so a second run writing the same output, a pipeline's retry
+while the first attempt still runs, is refused instead of mixing its data
+into the first's. A lock left by a run that was killed on the same host is
+taken over; one from another host is refused, since that run may still be
+writing.
+
+**A scheduler's SIGTERM** (a time limit, `scancel`, `bkill`), or SIGHUP from
+a closed terminal, gets the same cleanup as a failure: the partial output is
+removed and the command exits with code 143 (129 for SIGHUP). Only SIGKILL
+leaves anything behind; see
+[Leftovers](../troubleshooting.md#leftovers-from-an-interrupted-run).
+
+**Free space is checked first, for an HDF5 output.** A disk that fills part
+way through an HDF5 write can stop the process inside the HDF5 library,
+where nothing can clean up. So `subset`, `recast`, `split`, `concat`,
+`convert` and each `import` subcommand, writing an HDF5 store (`.h5ad`,
+`.loom`, `.h5`, `.h5mu`), estimate its size and refuse to start when the
+output's filesystem has less free than that. A Zarr store that runs out of
+space fails with an ordinary error and is removed, so it is not checked. The
+estimate follows the source's size on disk: the fraction a `subset` or
+`split` keeps, the whole store for `recast` plus what the converted matrices
+gain (a wider dtype, a densified matrix), the inputs together for `concat`,
+the store plus the file for `import`, the input file or store for `convert`
+(a folder input, such as Space Ranger's `outs/`, holds images and BAMs the
+output never carries, so it is not measured). It is an estimate, and a
+quota can be smaller than the free space it sees, so `--no-space-check`
+skips it.
+
+**`--chunk` is at least 1** wherever it appears. A zero or negative value is
+a usage error (exit 2), where it used to write an all-zero dense matrix.
 
 ## Zarr format selection
 

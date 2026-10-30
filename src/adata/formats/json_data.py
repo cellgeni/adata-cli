@@ -59,8 +59,6 @@ def export_json(
     finally:
         if out_fh is not sys.stdout:
             out_fh.close()
-    if out_fh is not sys.stdout:
-        console.print(f"[green]Wrote[/] {out}")
 
 
 def _finite(value: Any, count: List[int]) -> Any:

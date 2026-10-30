@@ -22,10 +22,11 @@ from rich.console import Console
 
 from adata.core.select import group_indices
 from adata.core.subset import split_h5ad
+from adata.elements.read import element_len, resolve_index
 from adata.storage import detect_backend, open_store
 from adata.util.names import unique_names
-from adata.util.path import same_path
-from adata.util.staging import staged_outputs
+from adata.util.path import check_output
+from adata.util.staging import check_free_space, disk_size, staged_outputs
 
 
 def split_store(
@@ -40,6 +41,7 @@ def split_store(
     min_size: int = 1,
     chunk_rows: int = 1024,
     zarr_format: Optional[int] = None,
+    space_check: bool = True,
 ) -> List[Tuple[str, Path, int]]:
     """Split `file` into one store per distinct value of `column`.
 
@@ -52,6 +54,8 @@ def split_store(
     """
     if axis not in ("obs", "var"):
         raise ValueError("--axis must be 'obs' or 'var'.")
+    if chunk_rows < 1:
+        raise ValueError("--chunk must be at least 1.")
 
     if suffix is None:
         suffix = ".zarr" if detect_backend(file) == "zarr" else ".h5ad"
@@ -60,11 +64,12 @@ def split_store(
         groups, order = group_indices(store.root, axis, column)
         if zarr_format is None:
             zarr_format = store.zarr_format
+        n_rows = element_len(resolve_index(store.root[axis], axis)[0])
 
     if not groups:
         raise ValueError(f"Column {column!r} produced no groups.")
 
-    names = unique_names(order)
+    names = _distinct(unique_names(order), order)
     console.print(
         f"[cyan]Splitting on {axis}[{column}]: "
         f"{len(order)} group{'s' if len(order) != 1 else ''}[/]"
@@ -86,17 +91,26 @@ def split_store(
         console.print(f"  {label!r} -> {out_path} ({count} {axis})")
 
     for _, out_path, _ in planned:
-        if same_path(file, out_path):
-            raise ValueError(
-                f"Output path is the input: {out_path}. Choose another "
-                "--output-dir."
-            )
+        try:
+            check_output(out_path, [file])
+        except ValueError as error:
+            raise ValueError(f"{error} Choose another --output-dir.") from None
+    if manifest:
+        # Checked with the stores, so it cannot be refused once they exist.
+        check_output(_manifest_path(file, output_dir), [file], store=False)
 
     if dry_run:
         console.print("[yellow]Dry run: nothing written.[/]")
         return planned
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    if planned:
+        kept = sum(count for _, _, count in planned)
+        check_free_space(
+            planned[0][1],
+            lambda: disk_size(file) * (kept / n_rows if n_rows else 1.0),
+            check=space_check,
+        )
 
     # One call for every group, so each matrix is read once rather than once
     # per group.
@@ -123,6 +137,30 @@ def split_store(
     return planned
 
 
+def _distinct(names: Dict[str, str], order: List[str]) -> Dict[str, str]:
+    """Stems no two of which name one file, whatever the filesystem.
+
+    `B` and `b` are one file on macOS and Windows, and `unique_names` can
+    give `a_1` to a label `a ` beside one that is `a_1` already: either way
+    two groups were written to one path.
+    """
+    taken: set = set()
+    distinct: Dict[str, str] = {}
+    for label in order:
+        stem = candidate = names[label]
+        count = 0
+        while candidate.casefold() in taken:
+            count += 1
+            candidate = f"{stem}_{count}"
+        taken.add(candidate.casefold())
+        distinct[label] = candidate
+    return distinct
+
+
+def _manifest_path(file: Path, output_dir: Path) -> Path:
+    return output_dir / f"{file.stem if file.suffix else file.name}_manifest.csv"
+
+
 def _write_manifest(
     file: Path,
     output_dir: Path,
@@ -132,11 +170,12 @@ def _write_manifest(
 ) -> Path:
     """Record what was written, for downstream pipelines to consume."""
     source_id = file.stem if file.suffix else file.name
-    path = output_dir / f"{source_id}_manifest.csv"
-    with open(path, "w", newline="", encoding="utf-8") as fh:
-        writer = csv.writer(fh)
-        writer.writerow(["id", "column", "value", "anndatas", "n"])
-        for label, out_path, count in planned:
-            writer.writerow([source_id, column, label, str(out_path), count])
+    path = _manifest_path(file, output_dir)
+    with staged_outputs([path]) as (temp,):
+        with open(temp, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["id", "column", "value", "anndatas", "n"])
+            for label, out_path, count in planned:
+                writer.writerow([source_id, column, label, str(out_path), count])
     console.print(f"[dim]Manifest written to {path}[/]")
     return path

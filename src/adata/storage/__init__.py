@@ -31,35 +31,45 @@ class Store:
     #: Whether to rewrite the Zarr consolidated metadata index on close.
     consolidate: bool = False
 
-    def close(self) -> None:
-        if self.backend == "hdf5":
-            try:
-                self.root.close()
-            except Exception:
-                return
-            return
+    def close(self, suppress: bool = False) -> None:
+        """Finish the store: HDF5 flushes and closes, Zarr rewrites its index.
 
-        if self.consolidate and zarr is not None:
-            # anndata writes a consolidated metadata index at the root. New
-            # members land on disk regardless, but every reader that honours
-            # the index -- anndata included -- keeps using the stale copy and
-            # cannot see them, so the write looks like a silent no-op.
-            try:
+        Either can fail -- a full disk, a quota, a lost mount -- and then the
+        store on disk is incomplete. That is raised, so a staged write is
+        thrown away rather than renamed into place as if it were whole.
+        `suppress` is for a close made while another exception is already
+        propagating: that one says what went wrong first, and is kept.
+        """
+        writing = self.consolidate
+        try:
+            if self.backend == "hdf5":
+                writing = bool(self.root) and self.root.mode != "r"
+                self.root.close()
+            elif self.consolidate and zarr is not None:
+                # anndata writes a consolidated metadata index at the root.
+                # New members land on disk regardless, but every reader that
+                # honours the index -- anndata included -- keeps using the
+                # stale copy and cannot see them, so the write looks like a
+                # silent no-op.
                 with warnings.catch_warnings():
-                    # zarr notes that consolidated metadata is not part of the
-                    # v3 spec. We write it deliberately, because anndata does
-                    # and because without it our writes are invisible to
-                    # readers that trust the index.
+                    # zarr notes that consolidated metadata is not part of
+                    # the v3 spec. We write it deliberately, because anndata
+                    # does and because without it our writes are invisible
+                    # to readers that trust the index.
                     warnings.simplefilter("ignore")
                     zarr.consolidate_metadata(self.root.store, path=self.root.path)
-            except Exception:
+                self.consolidate = False
+        except Exception as error:
+            if suppress:
                 return
+            what = "finish writing" if writing else "close"
+            raise OSError(f"Could not {what} '{self.path}': {error}") from error
 
     def __enter__(self) -> "Store":
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        self.close()
+        self.close(suppress=exc_type is not None)
 
 
 def _require_zarr() -> None:

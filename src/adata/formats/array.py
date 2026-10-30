@@ -188,8 +188,6 @@ def export_npy(
                 if progress:
                     progress.update(f"[magenta]Exporting {obj}: {start}-{end} of {n}...[/]")
                 fh.write(convert(start, end).tobytes())
-    if not to_stdout:
-        console.print(f"[green]Wrote[/] {out}")
 
 
 def import_npy(
@@ -230,11 +228,18 @@ def import_npy(
         else:
             write_dense(parent, name, np.asarray(value))
     else:
+        zarr_out = is_zarr_group(parent)
+        if zarr_out:
+            # A block is also a chunk of the new array (below), so a small
+            # --chunk would otherwise mean a file per row: a floor of 128 KiB.
+            chunk_elements = max(
+                chunk_elements, (1 << 17) // max(1, arr.dtype.itemsize)
+            )
         blocks = list(_row_blocks(arr.shape, chunk_elements))
         rows = max(1, blocks[0][1] - blocks[0][0]) if blocks else 1
         # Zarr's own guess at chunks can span far more rows than a block,
         # and each block would then rewrite whole chunks: a chunk is a block.
-        kwargs = {"chunks": (rows, *arr.shape[1:])} if is_zarr_group(parent) else {}
+        kwargs = {"chunks": (rows, *arr.shape[1:])} if zarr_out else {}
         dtype = str if text else arr.dtype
         target = create_dataset(parent, name, shape=arr.shape, dtype=dtype, **kwargs)
         spec.set_encoding(target, spec.STRING_ARRAY if text else spec.ARRAY)

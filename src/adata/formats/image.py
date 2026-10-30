@@ -56,7 +56,6 @@ def export_image(root: Any, obj: str, out: Optional[Path], console: Console) -> 
         return
     out.parent.mkdir(parents=True, exist_ok=True)
     img.save(out)
-    console.print(f"[green]Wrote[/] {out}")
 
 
 def import_image(root: Any, obj: str, input_file: Path, console: Console) -> None:
