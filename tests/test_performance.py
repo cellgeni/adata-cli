@@ -2240,17 +2240,32 @@ def test_csc_densify_and_sparsify_read_blocks_set_by_the_chunk(tmp_path, fmt, la
     through a CSR in scratch now, in --chunk rows and chunk-sized reads."""
     from tests.perf_fixtures import matrix_store
 
+    rows = 256  # --chunk
+
     def measure(n: int) -> int:
         store = matrix_store(tmp_path, n_obs=n, n_var=64, layout=source, fmt=fmt)
-        with count_allocations() as peak, count_io() as io:
-            _recast(store, tmp_path / f"o{n}{store.suffix}", layout=layout, force=True,
-                    chunk_rows=GRID_ROWS, chunk=4096)
-        assert _largest_matrix_read(io) <= 4096 * 8 + GRID_ROWS * 64 * 8, io
-        return peak[0]
+        peaks = []
+        # Twice, keeping the smaller: once in a full run, a one-time growth
+        # of the process's own structures landed in one measurement (4 MB).
+        for attempt in range(2):
+            with count_allocations() as peak, count_io() as io:
+                _recast(store, tmp_path / f"o{n}-{attempt}{store.suffix}", layout=layout,
+                        force=True, chunk_rows=rows, chunk=GRID_ENTRIES)
+            peaks.append(peak[0])
+            # No read larger than a chunk of entries or a block of rows.
+            bound = GRID_ENTRIES * 8 + rows * 64 * 8
+            assert io.read_bytes > 0 and _largest_matrix_read(io) <= bound, io
+        return min(peaks)
 
-    assert_grows_slower_than_input(
-        measure, what=f"recast {source} -> {layout} ({fmt})", axis="n_obs",
-        sizes=(512, 8192), at_least=4.0,
+    # Per row added, so the fixed cost of the store cancels. A block of
+    # --chunk columns over every row holds `rows` float32 values a row; what
+    # is left is the per-row index arrays (an indptr, a count), a few int64.
+    small, large = 1024, 8192
+    per_row = (measure(large) - measure(small)) / (large - small)
+    assert per_row <= rows * 4 / 4, (
+        f"recast {source} -> {layout} ({fmt}) held {per_row:.0f} bytes more per "
+        f"row of input; a block of {rows} columns over every row is "
+        f"{rows * 4} a row, and per-row index arrays a few times 8"
     )
 
 
