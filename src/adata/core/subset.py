@@ -36,6 +36,7 @@ from adata.storage import (
     dataset_create_kwargs,
     detect_backend,
     fit_chunks,
+    fit_fill,
     is_dataset,
     is_group,
     is_legacy_categorical,
@@ -736,7 +737,7 @@ def _growable_like(
     if is_zarr_group(group):
         return group.create_array(name, shape=(0,), dtype=dtype, chunks=(step,), **kw)
     return group.create_dataset(
-        name, shape=(0,), maxshape=(None,), dtype=dtype, chunks=(step,), **kw
+        name, shape=(0,), maxshape=(None,), dtype=dtype, chunks=(step,), **fit_fill(kw, dtype)
     )
 
 

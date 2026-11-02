@@ -1208,6 +1208,10 @@ def _hashable(value: Any) -> Any:
         except ValueError:
             return tuple(_hashable(v) for v in value)
     if isinstance(value, np.ndarray):
+        if value.dtype.names is not None:
+            # A record array (scanpy's rank_genes_groups): its bytes hold
+            # h5py's text as heap pointers, so two equal ones never matched.
+            return ("records", value.shape, tuple((f, _hashable(value[f])) for f in value.dtype.names))
         if value.dtype.kind in "OSUT":
             return ("text", value.shape, tuple(decode_str_array(value).reshape(-1).tolist()))
         return (value.shape, value.dtype.kind, value.tobytes())

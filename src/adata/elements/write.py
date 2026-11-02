@@ -17,10 +17,6 @@ from adata.elements import spec
 from adata.storage import create_dataset, is_zarr_group
 
 
-def _backend_of(parent: Any) -> str:
-    return "zarr" if is_zarr_group(parent) else "hdf5"
-
-
 def _replace(parent: Any, name: str) -> None:
     """Remove an existing member so it can be rewritten."""
     if name in parent:

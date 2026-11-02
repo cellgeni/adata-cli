@@ -132,3 +132,48 @@ def test_compression_applies_to_legacy_codes_taken_onto_a_modality(tmp_path):
         # Its labels are HDF5 strings, which are never compressed: only
         # their heap pointers would be.
         assert f["obs/leiden/codes"].compression == "gzip"
+
+
+def test_a_modality_with_a_legacy_raw_var_converts_to_h5ad(tmp_path):
+    """F006: a modality's raw, copied whole by h5py, kept raw/var's 0.1.0
+    categoricals with null references, and anndata could not open the
+    output: 'Invalid HDF5 object reference'."""
+    from tests.conftest import write_h5mu
+
+    truth = write_h5mu(tmp_path / "in.h5mu")
+    rna = truth.mods["rna"]
+    kinds = ["x" if i % 2 else "y" for i in range(rna.n_vars)]
+    with h5py.File(truth.path, "a") as f:
+        mod = f["mod/rna"]
+        if "raw" in mod:
+            del mod["raw"]
+        raw = mod.create_group("raw")
+        raw.attrs.update({"encoding-type": "raw", "encoding-version": "0.1.0"})
+        raw.create_dataset("X", data=np.ones((rna.n_obs, rna.n_vars), dtype=np.float32))
+        _legacy_frame(raw, "var", list(rna.var_names), {"kind": kinds})
+    out = tmp_path / "out.h5ad"
+    _ok("convert", truth.path, "-o", out, "--mod", "rna")
+    got = _read(out)
+    assert list(got.raw.var["kind"]) == kinds
+    assert list(got.raw.var_names) == list(rna.var_names)
+
+
+def test_a_nested_legacy_column_named_before_its_labels_leaves_no_stray_link(tmp_path):
+    """F006: HDF5 copies in name order, so a column sorting before
+    `__categories` ("Phase") had its labels copied ahead of their place in
+    the tree, under a second name at the output's root,
+    `~obj_pointed_by_<n>`."""
+    path = tmp_path / "legacy.h5ad"
+    with h5py.File(path, "w") as f:
+        _legacy_frame(f, "obs", CELLS, {"Phase": ["G1", "S", "G1", "G2M"]})
+        _legacy_frame(f, "var", ["g1", "g2"], {"kind": ["x", "y"]})
+        f.create_dataset("X", data=np.arange(8, dtype=np.float32).reshape(4, 2))
+        raw = f.create_group("raw")
+        raw.attrs.update({"encoding-type": "raw", "encoding-version": "0.1.0"})
+        raw.create_dataset("X", data=np.ones((4, 2), dtype=np.float32))
+        _legacy_frame(raw, "var", ["g1", "g2"], {"Kind": ["x", "y"]})
+    out = tmp_path / "out.h5ad"
+    _ok("convert", path, "-o", out)
+    with h5py.File(out) as f:
+        assert not [k for k in f if k.startswith("~")]
+    assert list(_read(out).raw.var["Kind"]) == ["x", "y"]
