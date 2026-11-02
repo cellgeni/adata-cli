@@ -7,6 +7,7 @@ moves; the plan of record for the current item is in the section below.
 
 | Version | What | Issues |
 |---|---|---|
+| 0.17.5 | Audit fixes, wave 2 (fidelity): scanpy's marker genes and anndata 0.7 files survive every copy, data held outside an h5ad refused; subset/split keep every named row and subset every element as anndata; concat takes any number of inputs in anndata's order; 10x, MTX, Parse, CellBender, loom, SCope and MuData fixes; release pipeline hardened, image non-root; zarr >= 3.2 | #93, #94, #95, #99, #100, #102 |
 | 0.17.4 | Audit fixes, wave 1 (data safety): every writer staged and checked, close errors fail the command, `--chunk` at least 1, a free-space check; text/MTX/dense imports refuse what they cannot read; concat refuses repeated var names and keeps missing values and dtypes; import/export type values as pandas does; Pillow 13 | #89, #90, #91, #92, #98 |
 | 0.17.3 | Space Ranger's analysis (clusters, UMAP, PCA) for Visium spots and HD bins; `convert` works on fresh installs (broken since 0.7.0) | #85, #88 |
 | 0.17.2 | Visium HD segmented cells (Space Ranger 4): centroids, areas and Space Ranger's analysis | #83 |
@@ -51,11 +52,22 @@ Decisions:
 Steps:
 - [x] B0: `convert` on fresh installs (#88), in 0.17.3
 - [x] Wave 1, then 0.17.4
-- [ ] Wave 2, then 0.17.5
+- [x] Wave 2, then 0.17.5
 - [ ] Waves 3 and 4, then 0.17.6
 
 ## Follow-ups noticed
 
+- From wave 2 of the audit fixes:
+  - CI: a Python 3.14 leg; Dependabot for the pinned actions, uv and base
+    image (the pinned actions run on Node 20, which GitHub is retiring); the
+    base image to Debian trixie; a Codecov token (B9).
+  - Repository settings: the default workflow token can write, and the
+    `pypi` environment has no protection rules (B9).
+  - Zarr stores need a counterpart to the HDF5 hardening in 0.17.5, outside
+    that fix's scope (B5).
+  - Flex's `target_sets` group is not carried, and `--make-unique` names
+    export with their suffixes (B8a).
+  - A numeric `in` list with thousands of values is slow (B4).
 - From wave 1 of the audit fixes:
   - `core/csr_build.py`'s on-disk sort makes many small appends, slow for
     a Zarr scratch at small budgets; buffer bucket writes in
