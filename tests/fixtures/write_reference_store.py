@@ -1,9 +1,9 @@
 """Write a reference AnnData store, run inside a pinned anndata environment.
 
 Invoked by tests/reference_stores.py through `uv run --with anndata==<v>`, so
-this file must stay compatible with every anndata release under test (0.8
+this file must stay compatible with every anndata release under test (0.7.8
 onward) and must not import anything from `adata`. Features that only exist in
-later versions are attempted and skipped rather than assumed.
+later versions are left out for the releases without them.
 
 Usage: write_reference_store.py <out_dir> <h5ad|zarr>
 """
@@ -23,6 +23,12 @@ from scipy import sparse  # noqa: E402
 N_OBS, N_VAR = 6, 4
 
 
+def _release() -> tuple:
+    from importlib.metadata import version
+
+    return tuple(int(part) for part in version("anndata").split(".")[:2])
+
+
 def build():
     """An object exercising the encodings this tool has to understand."""
     obs = pd.DataFrame(
@@ -40,19 +46,22 @@ def build():
         index=[f"cell_{i}" for i in range(N_OBS)],
     )
 
-    # Nullable dtypes have been supported since 0.8, but guard anyway.
-    try:
+    # Nullable dtypes are written from 0.8; 0.7 fails on them part way.
+    if _release() >= (0, 8):
         obs["nullable_int"] = pd.array([1, 2, None, 4, 5, None], dtype="Int32")
         obs["nullable_bool"] = pd.array(
             [True, False, None, True, False, None], dtype="boolean"
         )
-    except Exception:
-        pass
 
     var = pd.DataFrame(
         {
             "gene_ids": [f"ENSG{i}" for i in range(N_VAR)],
             "highly_variable": [True, False, True, False],
+            # Categorical in raw/var too, as scanpy leaves feature_types:
+            # anndata 0.7 wrote it as codes with an object reference.
+            "feature_types": pd.Categorical(
+                ["Gene Expression"] * 3 + ["Antibody Capture"]
+            ),
         },
         index=[f"gene_{i}" for i in range(N_VAR)],
     )
@@ -76,6 +85,17 @@ def build():
     obj.uns["a_list"] = ["x", "y", "z"]
     obj.uns["numbers"] = np.arange(5)
     obj.uns["nested"] = {"deep": {"value": 1.5}}
+    # scanpy's marker genes: record arrays, one field per group.
+    obj.uns["rank_genes_groups"] = {
+        "names": np.rec.fromarrays(
+            [np.array(["gene_0", "gene_2"]), np.array(["gene_1", "gene_3"])],
+            names=["A", "B"],
+        ),
+        "scores": np.rec.fromarrays(
+            [np.array([2.5, 1.0], dtype="float32"), np.array([3.0, 0.5], dtype="float32")],
+            names=["A", "B"],
+        ),
+    }
 
     obj.raw = obj
     return obj

@@ -79,3 +79,23 @@ def test_obs_text_with_repeats_is_categorical(new_store):
     got = _read(path).obs
     assert got["kind"].dtype == "category" and got["kind"].tolist() == ["a", "b", "a"]
     assert any("obs['mixed'] holds mixed" in w for w in warnings)
+
+
+def test_text_with_a_missing_value_in_a_table_is_a_categorical_every_release_reads(new_store):
+    """F133: written as a nullable-string-array, a model table's text column
+    holding a None (random_state=None) made a converted file that anndata
+    0.8 to 0.10 refused whole. A categorical with code -1 is what every
+    release reads, and pandas reads the gap back as missing."""
+    from adata.elements import spec
+    from adata.storage import open_store
+
+    path, opener = new_store()
+    frame = pd.DataFrame({"Parameter": ["lda", None, "15"]}, index=["algorithm", "random_state", "n_iter"])
+    with opener("a") as root:
+        write_frame(root["uns"], "parameters", frame)
+    with open_store(path, "r") as store:
+        column = store.root["uns/parameters/Parameter"]
+        assert spec.encoding_type(column) == spec.CATEGORICAL
+        assert column["codes"][1] == -1
+    got = _read(path).uns["parameters"]["Parameter"]
+    assert got.tolist()[0] == "lda" and pd.isna(got.iloc[1]) and got.iloc[2] == "15"

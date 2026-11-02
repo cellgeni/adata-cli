@@ -100,6 +100,9 @@ def _pyify(value: Any, max_elements: int) -> Any:
             raise ValueError(
                 f"Refusing to convert array of size {value.size} (> {max_elements}) to JSON."
             )
+        if value.dtype.names is not None:
+            # A record array (scanpy's rank_genes_groups): one list per field.
+            return {f: _pyify(value[f], max_elements) for f in value.dtype.names}
         if np.issubdtype(value.dtype, np.bytes_) or value.dtype.kind == "O":
             value = decode_str_array(value)
         return value.tolist()

@@ -444,7 +444,9 @@ def concat(
         "(default: drop)",
     ),
     fill_value: float = typer.Option(
-        0.0, "--fill-value", help="Value for dense cells introduced by an outer join"
+        0.0, "--fill-value",
+        help="Value for dense cells introduced by an outer join; an integer "
+        "matrix that cannot hold it becomes float64",
     ),
     chunk_rows: int = _chunk_option(1024, "Row chunk size while streaming"),
     zarr_format: Optional[int] = typer.Option(
@@ -458,7 +460,8 @@ def concat(
     Concatenate stores along the obs axis.
 
     Streams each input in turn, so memory use is set by --chunk rather than by
-    the size of the inputs. obsp, varp and raw are not carried over.
+    the size of the inputs. obsp and raw are not carried over; var's columns,
+    varm and varp follow --merge.
 
     Examples:
         adata concat a.h5ad b.h5ad -o merged.h5ad

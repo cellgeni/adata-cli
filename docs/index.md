@@ -66,8 +66,9 @@ Status goes to stderr and data to stdout, so every command pipes cleanly.
 
 - **Every AnnData on-disk layout**, from anndata 0.7 to the current spec, in
   HDF5 and in Zarr v2 and v3; everything written is in the current spec. CI
-  checks this against stores written by anndata 0.8 to 0.13, and checks that
-  each of those releases reads what `adata` writes.
+  checks this against stores written by anndata 0.7.8 to 0.13, and checks
+  that each release from 0.8 reads the output of `subset`, `convert`,
+  `split` and `concat` on the store it wrote.
 - **Other formats, through `convert`**: 10x Genomics HDF5 and MTX folders
   (Cell Ranger, STARsolo, velocyto), Visium and Xenium spatial outputs with
   their coordinates and images, CellBender output, Parse Biosciences runs,

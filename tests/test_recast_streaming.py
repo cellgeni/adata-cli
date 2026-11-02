@@ -373,17 +373,10 @@ def test_float16_is_refused_for_every_sparse_matrix_all_selects(new_store):
 
 @pytest.mark.parametrize("layout", ["csr", "csc", "dense"])
 @pytest.mark.parametrize("dtype", [d for d in core.DTYPES if d != "float16"] + ["float16"])
-def test_anndata_reads_back_every_dtype_and_layout_recast_writes(
-    request, new_store, backend, dtype, layout
-):
+def test_anndata_reads_back_every_dtype_and_layout_recast_writes(new_store, dtype, layout):
     """F058's general rule: every dtype `--dtype` accepts, in every layout it
     can be written in, gives a store anndata reads back with the values
     scipy gives. float16 only dense, the one layout scipy can hold it in."""
-    if (dtype, backend) == ("bool", "h5ad") and layout != "dense":
-        request.applymarker(pytest.mark.xfail(
-            reason="F071: the float source's fill value cannot become h5py's "
-                   "bool (B5, #95)", strict=False,
-        ))
     matrix = _matrix(n_obs=6, n_var=5)
     matrix.data = np.minimum(matrix.data, 1) if dtype == "bool" else matrix.data
     source_path = _put(new_store, matrix)

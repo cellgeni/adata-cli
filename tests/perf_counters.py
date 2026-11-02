@@ -349,7 +349,7 @@ class _ChunkCache:
 def count_io() -> Iterator[IOCounts]:
     """Count backend reads and writes for the duration of the block.
 
-    Patches these seams, verified against h5py 3.16.0 and zarr 3.1.5:
+    Patches these seams, verified against h5py 3.16.0 and zarr 3.4.1:
 
     ======================================  =================================
     ``h5py.Dataset.__getitem__``            HDF5 reads

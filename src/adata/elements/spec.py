@@ -28,6 +28,8 @@ NUMERIC_SCALAR = "numeric-scalar"
 STRING = "string"
 AWKWARD_ARRAY = "awkward-array"
 NULL = "null"
+#: A numpy record array, as scanpy's `rank_genes_groups` keeps its results.
+REC_ARRAY = "rec-array"
 
 #: Encoding type -> the version this tool writes.
 CURRENT_VERSION = {
@@ -47,7 +49,13 @@ CURRENT_VERSION = {
     STRING: "0.2.0",
     AWKWARD_ARRAY: "0.1.0",
     NULL: "0.1.0",
+    REC_ARRAY: "0.2.0",
 }
+
+#: The dataframe version anndata 0.7 wrote: each categorical a dataset of
+#: codes whose `categories` attribute is an object reference into
+#: `__categories`, and no encoding attributes at the root.
+LEGACY_DATAFRAME_VERSION = "0.1.0"
 
 SPARSE_TYPES = frozenset({CSR_MATRIX, CSC_MATRIX})
 NULLABLE_TYPES = frozenset(
