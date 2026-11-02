@@ -366,7 +366,8 @@ should scale with, scale only that, and hold everything else fixed.
 | `convert` CellBender (plain, `--min-cell-probability`, `--raw` full and filtered) | n_barcodes | linear; **flat** write calls |
 | `recast --dtype`, `--layout csc`, `--layout dense` | nnz, n_obs | linear; the streaming transpose's **peak memory** is bounded |
 | `recast` (every dtype and layout change), `subset`, `concat` | n_obs, n_var; CSR, CSC, dense | **peak memory** a small share of the input |
-| `recast --dtype` (dense), CSC `--layout dense`, dense `--layout csc`, a skewed transpose | n_obs; h5ad, sharded Zarr v3 | the **largest read** set by the chunk |
+| `recast --dtype` (dense), a skewed transpose | n_obs; h5ad, sharded Zarr v3 | the **largest read** set by the chunk |
+| CSC `--layout dense`, dense `--layout csc` | n_obs; h5ad | the **largest read** set by the chunk, and memory per row |
 
 The `slow` marker is on the guards that build a 65,536-row store or run `peak_rss`;
 they still gate merges, and `-m "not slow"` skips them locally. `perf` is on the

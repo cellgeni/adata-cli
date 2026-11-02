@@ -2520,7 +2520,9 @@ def test_a_dense_cast_check_reads_a_block_of_rows_not_the_matrix(tmp_path, fmt):
     )
 
 
-@pytest.mark.parametrize("fmt", STORE_FORMATS)
+# h5ad only: what a row costs is the algorithm's, and Zarr v3's reads are
+# the dense-cast and skewed guards' to check. On Zarr this took 38 s of CI.
+@pytest.mark.parametrize("fmt", ["h5ad"])
 @pytest.mark.parametrize("layout,source", [("dense", "csc"), ("csc", "dense")])
 def test_csc_densify_and_sparsify_read_blocks_set_by_the_chunk(tmp_path, fmt, layout, source):
     """F030: densifying a CSC matrix allocated n_rows x --chunk per block,
@@ -2559,8 +2561,11 @@ def test_csc_densify_and_sparsify_read_blocks_set_by_the_chunk(tmp_path, fmt, la
     )
 
 
-@pytest.mark.parametrize("fmt", STORE_FORMATS)
-@pytest.mark.parametrize("source", ["csc", "csr"])
+# CSC's pass 2 reads the source, so it runs on sharded Zarr v3 too; CSR's
+# pass 3 reads the transpose's own scratch, the same on either.
+@pytest.mark.parametrize(
+    "fmt,source", [("h5ad", "csc"), ("zarr3", "csc"), ("h5ad", "csr")]
+)
 def test_a_transpose_reads_about_a_chunk_on_a_skewed_matrix(tmp_path, fmt, source):
     """F077: pass 2 of the streaming transpose stepped by the average nnz per
     major. Eight adjacent genes in every cell made one step many times the
