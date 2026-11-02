@@ -119,6 +119,13 @@ def detect_backend(path: Path) -> str:
     return "hdf5"
 
 
+#: Bytes of chunk cache HDF5 keeps for each dataset of a store. HDF5 2.0
+#: (h5py 3.16) raised its default from 1 MiB to 8 MiB, and a writer holds one
+#: per dataset it fills: `split` holds many outputs open at once, so memory
+#: followed the number of outputs, eight times faster. 1 MiB, as before.
+HDF5_CHUNK_CACHE = 1 << 20
+
+
 def open_store(
     path: Path,
     mode: str,
@@ -163,7 +170,7 @@ def open_store(
             zarr_format=zarr_format_of(root),
             consolidate=writable,
         )
-    root = h5py.File(path, mode)
+    root = h5py.File(path, mode, rdcc_nbytes=HDF5_CHUNK_CACHE)
     if mode not in ("w", "w-", "x"):
         # Anything opened for its contents, read or appended to (--inplace).
         try:

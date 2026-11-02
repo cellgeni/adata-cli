@@ -60,6 +60,7 @@ every release before PyPI has it.
 | `test_commands_phase2.py`, `test_commands_coverage.py`, `test_cli.py` | Command surfaces and error paths |
 | `test_convert.py` | `convert` between every backend pair, read back by anndata; its refusals, staging, and the forwarding of recast's old flags |
 | `test_recast.py` | `recast` against scipy: casts, transposes, density changes and every refusal |
+| `test_recast_streaming.py` | `recast` on HDF5, Zarr v2 and Zarr v3 in blocks of a few rows and entries: every layout to every other, every dtype in every layout, matrices at any depth, index ranges with and without `--force`; against scipy and read back by anndata |
 | `test_tenx.py` | 10x HDF5 import and export against Cell Ranger-shaped fixtures (v2, v3, multimodal, probe-based): mapping, filters, round trips, refusals |
 | `test_mtx.py` | 10x / STARsolo MTX folders against hand-written fixtures (Cell Ranger 2 and 3, STARsolo, velocyto, GEO prefixes): mapping, entry orders, refusals that leave nothing, round trips |
 | `test_cellbender.py` | CellBender 0.2 and 0.3+ output, full and filtered: each latent at its barcode, `--min-cell-probability`, `--raw` alignment, refusals |
@@ -77,7 +78,7 @@ every release before PyPI has it.
 | `test_table.py` | The streaming CSV reader against pandas: column types, quoting, row subsets, blocks, refusals |
 | `test_mtx_codec.py`, `test_csr_build.py` | The streaming Matrix Market reader and writer against scipy, and the bucket sort they and `recast` share |
 | `test_external_readers.py` | 10x conversions, HDF5 and MTX, Parse runs and looms, checked by scanpy (Parse's own recipe for Parse), anndata with loompy (the pySCENIC tutorial's recipe for SCope looms), anndata's `read_csv`, `read_text` and `read_hdf`, a pandas 1.5 pycisTopic pickle read back there, mudata (a file it writes read as it reads it; ours read by it), and PyTables in their own uv environments (`integration`) |
-| `test_performance.py` | Complexity guards -- what an operation costs, not how long it takes (see below) |
+| `test_performance.py` | Complexity guards -- what an operation costs, not how long it takes (see below); its fixtures are in `perf_fixtures.py` |
 | `test_benchmark_harness.py` | That the benchmark's measurement is trustworthy, and that each run compares with the release before it |
 | `test_release_pipeline.py` | The workflows and the Dockerfile: which jobs publish in each kind of run, which hold a write token and what they run, pinned actions and base image, no untrusted value pasted into a script, each Python leg on its own Python |
 | `test_subset_oracle.py` | `subset` and `split` against anndata's `adata[obs, var]`, element by element: X, every layer layout, obsm and varm of any rank and as dataframes, obsp, varp, raw; on HDF5, Zarr v2 and Zarr v3 |
@@ -129,15 +130,16 @@ be rather than only that it did not grow.
 
 ### What is counted
 
-`tests/perf_counters.py` patches four seams, all verified against the pinned
-h5py 3.15.1 and zarr 3.4.1:
+`tests/perf_counters.py` patches these seams, all verified against the pinned
+h5py 3.16.0 and zarr 3.4.1:
 
 | Hook | Sees |
 |---|---|
 | `h5py.Dataset.__getitem__` | HDF5 reads |
 | `h5py.Dataset.__setitem__` | HDF5 writes |
 | `h5py.Group.create_dataset` | HDF5 writes made at creation |
-| `zarr.Array.__getitem__` | Zarr reads, v2 and v3 alike |
+| `zarr.Array.__getitem__`, `.oindex[...]` | Zarr reads, v2 and v3 alike |
+| `zarr.Array.__setitem__`, `zarr.Group.create_array` | Zarr writes (bytes only) |
 | `zarr.storage.LocalStore.get` | chunk and metadata fetches |
 | `LocalStore.set` / `.delete` | write storms |
 
@@ -158,9 +160,44 @@ Elements are counted, not just calls: the `--merge` bug was n calls each
 reading n elements, and counting calls alone would miss a vectorised variant
 that reads n elements n times in one call.
 
+**Bytes, three ways.** Elements alone hid a 70x read amplification and a
+shard rewritten on every block, so `IOCounts` also counts bytes:
+
+| Field | Counts | Catches |
+|---|---|---|
+| `read_bytes`, `largest_read`, `largest_by_name` | bytes the reads returned; the largest one read | a block that `--chunk` does not bound, with no allocator involved |
+| `decoded_bytes` | bytes of every whole chunk the reads touched | reads that decode a chunk to use a row of it |
+| `written_bytes`, `largest_write` | bytes handed to writes | |
+| `encoded_bytes` | bytes of every whole chunk the writes touched, and every whole shard of a sharded Zarr array | writes smaller than the unit, each rewriting all of it |
+| `store_get_bytes`, `store_set_bytes` | bytes Zarr's store fetched and stored | |
+
+Decoded and encoded bytes are a model worked out from the selection, the chunk
+grid and the codecs, not a measurement of the library, which is what keeps them
+deterministic. It follows HDF5's chunk cache (per dataset, least recently used,
+at the dataset's own size: 1 MiB in the stores `open_store` opens, 8 MiB by
+default since HDF5 2.0), so appending a block at a time to a growing dataset
+costs each chunk once. A chunk is read into the cache whole, filtered or not;
+only an unfiltered chunk too big for the cache is read and written in place,
+just the bytes asked for. Zarr caches nothing, and writing part of a shard
+rewrites the shard.
+`test_the_byte_counters_see_whole_chunks_decoded_and_rewritten` checks the
+model against numbers worked out by hand.
+
+**Resident memory.** `count_allocations` uses tracemalloc, which sees numpy's
+buffers but not what HDF5, blosc or zarr's codecs allocate in C.
+`peak_rss(argv)` runs `adata <argv>` in a fresh interpreter and returns how far
+the command raised the operating system's high-water mark (`ru_maxrss`, read
+once the CLI is imported and again when the command ends; on Linux `VmHWM`,
+since `ru_maxrss` there starts at the parent's peak). A subprocess, because
+the high-water mark only rises. It has a few megabytes of noise, so
+guard it with generous ratios against inputs of tens of megabytes, as
+`test_a_dense_cast_adds_a_block_of_resident_memory_not_the_matrix` does;
+`test_peak_rss_sees_a_command_that_holds_the_matrix` checks that it sees
+`--in-memory` hold the matrix.
+
 **Known bypasses.** `Dataset.read_direct`, `np.asarray(dataset)` (it goes via
-`__array__`), `dataset.asstr()[...]` and `.fields()` reach the file without
-passing any hook. None are used today. If you add one, the counters will
+`__array__`), `dataset.asstr()[...]`, `.fields()` and Zarr's `vindex` reach
+the file without passing any hook. None are used today. If you add one, the counters will
 quietly report less work than happened -- which is why every guard also
 asserts a lower bound, and why there are two canary tests with known absolute
 counts. If a canary fails, fix the hooks before trusting anything else here.
@@ -204,7 +241,8 @@ accept a 64x increase in a command that is supposed to read nothing.
 |---|---|---|
 | `assert_grows_linearly` | no worse than linear in one axis | most commands |
 | `assert_grows_slower_than_input` | grows at least N times slower than the input | streaming at a fixed chunk |
-| `assert_independent_of` | does not grow at all | inspection, and grouping work per row |
+| `assert_memory_is_a_fraction_of_the_input` | adds at most a share (half) of what the input adds, in bytes | memory, along either axis |
+| `assert_independent_of` | does not grow at all | inspection, grouping work per row, the largest read |
 
 **Inspection is free, and that is an exact number.** `view` and `ls` reach only
 `.shape`, `.dtype` and `.attrs`: `axis_len` goes through `element_len`, which reads a
@@ -230,6 +268,36 @@ materialised one at a time — a known gap that `benchmarks/` reports rather tha
 guards conceal. Streamed `export sparse` is separately asserted to stay under a
 quarter of what `--in-memory` costs, both measured in the same run so the factor holds
 on any machine.
+
+### Memory along every axis and layout
+
+The guards above grow n_obs of an eight-column CSR store, the one shape every
+path handles well. A CSC densify holding n_obs x `--chunk` values, a dense cast
+check reading the whole matrix and a transpose stepping by the average major
+all passed them. `tests/perf_fixtures.py` builds stores the way users have
+them -- every layout, written by anndata as h5ad, Zarr v2 and anndata 0.13's
+default sharded Zarr v3 (inner chunks of a few hundred bytes in shards of the
+whole array) -- and `test_peak_memory_is_a_small_share_of_the_input` runs
+`recast` (each dtype and layout change), `subset` and `concat` over each
+layout, growing n_obs and then n_var.
+
+A growth ratio cannot be the claim along n_var: widen a matrix and a block of
+`--chunk` rows widens with it, as fast as the input, so a ratio cannot tell it
+from the whole matrix. Peak memory added per byte of input added can: a block
+of 32 rows of a matrix thousands of rows tall adds a few hundredths, and a path
+holding the matrix adds a whole byte and more for each copy. The limit is half;
+bounded paths came to at most 0.21. Growing n_obs, `--chunk` is 256 rows, so a
+block of `--chunk` columns over every row (CSC densify before F030) is plain.
+Each fixture is built once and shared by the commands.
+
+The known gap is marked `xfail` with its owner: sparse `subset` (F032, B6b),
+strict, so the fix has to flip it.
+
+The recast guards beside it pin each block in bytes, on h5ad and sharded Zarr
+v3 (Zarr v2 is covered by the correctness tests): the cast
+check reads `--chunk` rows of a dense matrix, CSC densify and sparsify read
+blocks set by the chunk, and a skewed transpose never reads more than about two
+buckets of entries at once.
 
 ### Where counting is not enough
 
@@ -297,9 +365,20 @@ should scale with, scale only that, and hold everything else fixed.
 | `convert` to 10x MTX | n_obs | **flat** read calls |
 | `convert` CellBender (plain, `--min-cell-probability`, `--raw` full and filtered) | n_barcodes | linear; **flat** write calls |
 | `recast --dtype`, `--layout csc`, `--layout dense` | nnz, n_obs | linear; the streaming transpose's **peak memory** is bounded |
+| `recast` (every dtype and layout change), `subset`, `concat` | n_obs, n_var; CSR, CSC, dense | **peak memory** a small share of the input |
+| `recast --dtype` (dense), a skewed transpose | n_obs; h5ad, sharded Zarr v3 | the **largest read** set by the chunk |
+| CSC `--layout dense`, dense `--layout csc` | n_obs; h5ad | the **largest read** set by the chunk, and memory per row |
 
-The `slow` marker is on the three guards that build a 65,536-row store; they still gate
-merges, and `-m "not slow"` skips them locally. `perf` is on the tracing guards.
+The `slow` marker is on the guards that build a 65,536-row store or run `peak_rss`;
+they still gate merges, and `-m "not slow"` skips them locally. `perf` is on the
+tracing guards.
+
+h5py 3.15 kept 32 to 160 bytes of every dataset read, write and `.shape` for good, so
+any long streaming loop grew with its block count;
+`test_h5py_calls_keep_no_memory_once_they_return` keeps the floor at 3.16.0, which
+does not. 3.16.0 brings HDF5 2.0, whose chunk cache is 8 MiB a dataset rather than 1;
+`open_store` keeps 1 MiB, which
+`test_stores_give_each_hdf5_dataset_a_one_mebibyte_chunk_cache` checks.
 
 ### Reading a failure
 

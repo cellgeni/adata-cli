@@ -3,7 +3,7 @@
 # so the distribution is published as `pyadata-cli`. The import package
 # and the command are both still `adata`.
 name = "pyadata-cli"
-version = "0.17.4"
+version = "0.17.5"
 description = "Streaming CLI for exploring and editing large AnnData .h5ad and .zarr stores"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -43,7 +43,10 @@ classifiers = [
 # and can break in a minor (0.26 stopped installing click), but a cap at the
 # next minor would turn away each new typer until we release, so it is 1.0.
 dependencies = [
-    "h5py>=3.15.1,<4",
+    # 3.15 leaks 32 to 160 bytes of memory on every dataset read, write and
+    # `.shape`, so streaming used memory in proportion to its blocks. 3.16
+    # brings HDF5 2.0, whose 8 MiB chunk cache `open_store` sets back to 1 MiB.
+    "h5py>=3.16.0,<4",
     # Zarr v2 compressors (storage/__init__.py).
     "numcodecs>=0.14",
     "numpy>=2.3.5,<3",

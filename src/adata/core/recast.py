@@ -24,7 +24,7 @@ store is worse than a refusal:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, Optional, Tuple
 
 import numpy as np
 from rich.console import Console
@@ -32,12 +32,13 @@ from rich.console import Console
 from adata.elements import spec
 from adata.elements.write import set_shape_attr
 from adata.core.csr_build import (
+    MIN_BUCKET_ENTRIES,
     BucketSorter,
     bucket_bounds,
     count_keys,
     scratch_group,
 )
-from adata.core.subset import _growable_like, _sparse_dataset
+from adata.core.subset import _sparse_dataset
 from adata.storage import (
     copy_attrs,
     create_dataset,
@@ -74,6 +75,9 @@ MAX_GROWTH_FACTOR = 4.0
 #: Values per read while streaming `data`/`indices`.
 DEFAULT_CHUNK = 1 << 20
 
+#: Elements per chunk of a `data` or `indices` built from a dense matrix,
+#: whose own chunks are a grid of rows and columns, not of elements.
+ELEMENT_CHUNK = 1 << 16
 
 
 def parse_dtype(text: str, *, allowed: Tuple[str, ...] = DTYPES) -> np.dtype:
@@ -84,6 +88,11 @@ def parse_dtype(text: str, *, allowed: Tuple[str, ...] = DTYPES) -> np.dtype:
             f"Unknown dtype {text!r}. Choose from: {', '.join(allowed)}."
         )
     return np.dtype(name)
+
+
+def parse_index_dtype(text: str) -> np.dtype:
+    """Resolve `--indices-dtype`, against `INDEX_DTYPES` as it stands."""
+    return parse_dtype(text, allowed=INDEX_DTYPES)
 
 
 # ---------------------------------------------------------------------------
@@ -118,24 +127,43 @@ class CastReport:
         )
 
 
-def check_cast(dataset: Any, target: np.dtype, *, chunk: int = DEFAULT_CHUNK) -> CastReport:
+def check_cast(
+    dataset: Any,
+    target: np.dtype,
+    *,
+    chunk: int = DEFAULT_CHUNK,
+    rows: Optional[int] = None,
+) -> CastReport:
     """Would casting `dataset` to `target` lose anything?
 
     Streams the values, casts each block and casts it back. An exact
     round-trip is the only honest test: whether float64 counts survive
     float32 depends on the counts, not on the dtypes, and that is precisely
     the question issue #13 is asking.
+
+    A block is `chunk` elements of a 1-D array (a sparse matrix's `data`),
+    or `rows` rows of a 2-D one -- `--chunk`'s rows, the block the cast then
+    writes. It was `chunk` rows of a dense matrix too, which is every row of
+    any real one: the whole matrix read at once, and two more copies of it
+    made, whatever `--chunk` said (F029). Without `rows`, as many rows as
+    hold `chunk` elements.
     """
     report = CastReport()
     source = np.dtype(getattr(dataset, "dtype", "float64"))
-    n = int(dataset.shape[0]) if getattr(dataset, "shape", None) else 0
+    shape = tuple(getattr(dataset, "shape", None) or ())
+    n = int(shape[0]) if shape else 0
+    step = int(chunk)
+    if len(shape) > 1:
+        width = int(np.prod(shape[1:], dtype=np.int64))
+        step = int(rows) if rows is not None else chunk // max(1, width)
+    step = max(1, step)
 
     info = np.finfo(target) if target.kind == "f" else (
         np.iinfo(target) if target.kind in "iu" else None
     )
 
-    for start in range(0, n, chunk):
-        block = np.asarray(dataset[start : min(start + chunk, n)])
+    for start in range(0, n, step):
+        block = np.asarray(dataset[start : min(start + step, n)])
         report.total += block.size
         if block.size == 0:
             continue
@@ -178,6 +206,8 @@ def check_index_dtype(
     index_dtype: np.dtype,
     pointer_dtype: np.dtype,
     shape: Tuple[int, int],
+    *,
+    minor: Optional[int] = None,
 ) -> None:
     """Refuse index dtypes that cannot address this matrix.
 
@@ -186,20 +216,36 @@ def check_index_dtype(
     data is needed. `indices` holds coordinates, bounded by the larger
     dimension; `indptr` holds offsets, bounded by nnz. They are checked
     separately because they can legitimately need different widths.
+
+    A dense source has no nnz to read: pass `group=None` and only the
+    coordinates are checked here, and `sparsify` checks the offsets as it
+    counts them. `minor`, the extent of the output's minor axis, is what the
+    coordinates reach (columns for CSR); without it, the larger dimension.
     """
-    nnz = int(group["indices"].shape[0])
-    for name, dtype, largest, what in (
-        ("indices", index_dtype, max(int(shape[0]), int(shape[1])), "coordinates"),
-        ("indptr", pointer_dtype, nnz, "offsets"),
-    ):
-        limit = int(np.iinfo(dtype).max)
-        if largest > limit:
-            raise ValueError(
-                f"{dtype} cannot hold this matrix's {what}: {name} must reach "
-                f"{largest:,} for a {shape[0]:,} x {shape[1]:,} matrix with "
-                f"{nnz:,} nonzeros, and {dtype} tops out at {limit:,}. "
-                "Use int64."
-            )
+    nnz = None if group is None else int(group["indices"].shape[0])
+    reach = int(minor) if minor is not None else max(int(shape[0]), int(shape[1]))
+    check_index_range("indices", index_dtype, reach, shape, nnz)
+    if nnz is not None:
+        check_index_range("indptr", pointer_dtype, nnz, shape, nnz)
+
+
+def check_index_range(
+    name: str, dtype: np.dtype, largest: int, shape: Tuple[int, int], nnz: Optional[int]
+) -> None:
+    """Refuse `dtype` for `indices` or `indptr` if `largest` is past its range."""
+    limit = int(np.iinfo(dtype).max)
+    if largest <= limit:
+        return
+    what = "offsets" if name == "indptr" else "coordinates"
+    nonzeros = (
+        f" with {nnz:,} nonzeros" if nnz is not None
+        else f" with at least {largest:,} nonzeros" if name == "indptr" else ""
+    )
+    raise ValueError(
+        f"{dtype} cannot hold this matrix's {what}: {name} must reach "
+        f"{largest:,} for a {shape[0]:,} x {shape[1]:,} matrix{nonzeros}, "
+        f"and {dtype} tops out at {limit:,}. Use int64."
+    )
 
 
 def _stored_bytes(obj: Any) -> int:
@@ -315,6 +361,7 @@ def _write_sparse_arrays(
     index_dtype: np.dtype,
     pointer_dtype: np.dtype,
     source: Any,
+    codecs_from: Any = None,
 ) -> None:
     for name, values, dtype, template in (
         ("data", data, data_dtype, source["data"]),
@@ -322,7 +369,7 @@ def _write_sparse_arrays(
         ("indptr", indptr, pointer_dtype, source["indptr"]),
     ):
         cast = values.astype(dtype, copy=False)
-        dataset = _sparse_dataset(group, name, dtype, cast.size, template)
+        dataset = _output_array(group, name, dtype, cast.size, template, codecs_from)
         if cast.size:
             dataset[:] = cast
 
@@ -374,11 +421,13 @@ def transpose_sparse_in_memory(
     data_dtype: np.dtype,
     index_dtype: np.dtype,
     pointer_dtype: np.dtype = np.dtype("int64"),
+    codecs_from: Any = None,
 ) -> None:
     """Swap CSR<->CSC by loading the matrix and sorting it once.
 
     Faster than streaming whenever the matrix fits, and the whole matrix is
-    what it needs -- so it is opt-in, never the default.
+    what it needs -- so it is opt-in, never the default. `codecs_from` as for
+    `transpose_sparse_streaming`.
     """
     target = (
         spec.CSC_MATRIX if src.kind == spec.CSR_MATRIX else spec.CSR_MATRIX
@@ -408,6 +457,7 @@ def transpose_sparse_in_memory(
         index_dtype=index_dtype,
         pointer_dtype=pointer_dtype,
         source=src.obj,
+        codecs_from=codecs_from,
     )
 
 
@@ -427,27 +477,32 @@ def transpose_sparse_streaming(
     bucket_entries: Optional[int] = None,
     console: Optional[Console] = None,
     compression: Optional[str] = None,
+    keep_layout: bool = True,
+    codecs_from: Any = None,
 ) -> None:
     """Swap CSR<->CSC without loading the matrix.
 
     A transpose cannot be done in one pass: the first entry of the output
     may come from the last row of the input. Three passes instead, with
-    memory set by `bucket_entries` rather than by nnz:
+    memory set by `chunk` and `bucket_entries` rather than by nnz:
 
     1. count nonzeros per output major, by streaming `indices` alone. That
        gives the output `indptr` by cumulative sum.
-    2. stream the input again, splitting each block's entries into buckets by
-       which slice of the output they land in, and append each bucket to
-       scratch datasets.
+    2. stream the input again, `chunk` entries at a time, splitting each
+       block's entries into buckets by which slice of the output they land
+       in, and append each bucket to scratch datasets.
     3. read one bucket at a time, sort it, and append to the output in order.
 
     Costs about two extra passes over nnz, which is the price of not holding
     the matrix. `--in-memory` is there for when you would rather pay in RAM.
+    `keep_layout=False` writes plain arrays rather than the source's chunks
+    and codecs, for a transpose into scratch. `codecs_from`, a dense matrix,
+    gives the output that matrix's codecs and element-sized chunks instead,
+    for a transpose out of a scratch built from it.
     """
     target = (
         spec.CSC_MATRIX if src.kind == spec.CSR_MATRIX else spec.CSR_MATRIX
     )
-    n_major_in = src.shape[0] if src.kind == spec.CSR_MATRIX else src.shape[1]
     n_major_out = src.shape[1] if src.kind == spec.CSR_MATRIX else src.shape[0]
 
     indptr = np.asarray(src.obj["indptr"][...], dtype=np.int64)
@@ -461,7 +516,7 @@ def transpose_sparse_streaming(
         count_keys(counts, block)
     out_indptr = np.concatenate(([0], np.cumsum(counts)))
 
-    bounds = bucket_bounds(out_indptr, chunk=chunk, bucket_entries=bucket_entries)
+    bounds = _transpose_bounds(out_indptr, chunk=chunk, bucket_entries=bucket_entries)
     n_buckets = len(bounds) - 1
     if console is not None and n_buckets > 1:
         console.print(
@@ -471,38 +526,34 @@ def transpose_sparse_streaming(
     # nnz is invariant under a transpose, so the output can be sized now and
     # written by slice rather than grown block by block.
     group = _new_sparse_group(src, dst_parent, name, target, src.shape)
-    out_data = _sparse_dataset(
-        group, "data", data_dtype, nnz, source_data, compression=compression
+    templates = (source_data, source_indices, src.obj["indptr"]) if keep_layout else (None,) * 3
+    out_data = _output_array(
+        group, "data", data_dtype, nnz, templates[0], codecs_from, compression=compression
     )
-    out_indices = _sparse_dataset(
-        group, "indices", index_dtype, nnz, source_indices, compression=compression
+    out_indices = _output_array(
+        group, "indices", index_dtype, nnz, templates[1], codecs_from,
+        compression=compression,
     )
     written = 0
 
     with scratch_group(dst_parent, f"__{name}_transpose_scratch__") as scratch:
         sorter = BucketSorter(scratch, bounds, src.dtype)
 
-        # Pass 2: scatter the input into buckets, one input block at a time.
-        # Step over the major axis in blocks holding about `chunk` nonzeros,
-        # so the read size is set by the data rather than by how many rows
-        # happen to be empty.
-        average = max(1, nnz // max(1, n_major_in))
-        major_step = max(1, chunk // average)
-        for lo in range(0, n_major_in, major_step):
-            hi = min(lo + major_step, n_major_in)
-            start, end = int(indptr[lo]), int(indptr[hi])
-            if end <= start:
-                continue
+        # Pass 2: scatter the input into buckets, `chunk` entries at a time.
+        # It stepped by majors of average size, so on a skewed matrix a step
+        # covered several majors far above the average -- adjacent genes
+        # expressed in every cell -- and read many times the chunk at once,
+        # more as n_obs grew (F077). A major holding more than the chunk is
+        # split across blocks.
+        for start in range(0, nnz, chunk):
+            end = min(start + chunk, nnz)
             minor = np.asarray(source_indices[start:end], dtype=np.int64)
             values = np.asarray(source_data[start:end])
-            major = np.repeat(
-                np.arange(lo, hi, dtype=np.int64), np.diff(indptr[lo : hi + 1])
-            )
             # The input's minor axis is the output's major one.
-            sorter.add(minor, major, values)
+            sorter.add(minor, _majors_of(indptr, start, end), values)
 
-        # Pass 3: each bucket in turn, sorted into output order.
-        for _, new_minor, values in sorter.runs():
+        # Pass 3: each bucket in turn, in output order.
+        for new_minor, values in _bucket_runs(sorter, chunk):
             count = new_minor.size
             out_indices[written : written + count] = new_minor.astype(
                 index_dtype, copy=False
@@ -513,11 +564,77 @@ def transpose_sparse_streaming(
             written += count
 
     cast_indptr = out_indptr.astype(pointer_dtype, copy=False)
-    dataset = _sparse_dataset(
-        group, "indptr", pointer_dtype, cast_indptr.size, src.obj["indptr"],
+    dataset = _output_array(
+        group, "indptr", pointer_dtype, cast_indptr.size, templates[2], codecs_from,
         compression=compression,
     )
     dataset[:] = cast_indptr
+
+
+def _majors_of(indptr: np.ndarray, start: int, end: int) -> np.ndarray:
+    """The major each entry in `[start, end)` belongs to, by `indptr`."""
+    first = int(np.searchsorted(indptr, start, side="right")) - 1
+    last = int(np.searchsorted(indptr, end - 1, side="right")) - 1
+    spans = np.diff(np.clip(indptr[first : last + 2], start, end))
+    return np.repeat(np.arange(first, last + 1, dtype=np.int64), spans)
+
+
+def _transpose_bounds(
+    out_indptr: np.ndarray, *, chunk: int, bucket_entries: Optional[int]
+) -> np.ndarray:
+    """Buckets of about one read each, and a bucket of its own for any
+    output major holding more than that, so `_bucket_runs` can stream it.
+
+    `bucket_bounds` balances by entries, but a bound can only fall between
+    majors, so a gene in every cell shared a bucket with its neighbours and
+    the bucket held n_obs entries or more. Concat's CSC buckets do the same
+    (`core/concat.py`).
+    """
+    per_bucket = (
+        max(1, int(bucket_entries)) if bucket_entries
+        else max(MIN_BUCKET_ENTRIES, int(chunk))
+    )
+    bounds = bucket_bounds(out_indptr, chunk=chunk, bucket_entries=bucket_entries)
+    big = np.flatnonzero(np.diff(out_indptr) > per_bucket)
+    return np.unique(np.concatenate((bounds, big, big + 1)))
+
+
+def _bucket_runs(sorter: BucketSorter, chunk: int) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
+    """Every bucket's `(new_minor, values)`, in output order.
+
+    A bucket of several majors holds about a read's worth: it is read whole
+    and sorted. A bucket of one major can hold far more -- n_obs entries for
+    a gene in every cell -- and is streamed a chunk at a time instead. It
+    needs no sort: pass 2 adds entries in input order, so one output major's
+    entries arrive in the order of the input majors they came from, which is
+    their new minor order.
+    """
+    for b, (majors, minors, values) in enumerate(sorter.buckets):
+        n = int(majors.shape[0])
+        if n == 0:
+            continue
+        if int(sorter.bounds[b + 1] - sorter.bounds[b]) == 1 and n > chunk:
+            for lo in range(0, n, chunk):
+                yield (
+                    np.asarray(minors[lo : lo + chunk], dtype=np.int64),
+                    np.asarray(values[lo : lo + chunk]),
+                )
+            continue
+        major = np.asarray(majors[...], dtype=np.int64)
+        minor = np.asarray(minors[...], dtype=np.int64)
+        order = np.lexsort((minor, major))
+        yield minor[order], np.asarray(values[...])[order]
+
+
+def _transpose(src: Matrix, dst_parent: Any, name: str, *, in_memory: bool,
+               chunk: int, **kwargs: Any) -> None:
+    """`transpose_sparse_in_memory` or `_streaming`, as asked."""
+    if in_memory:
+        kwargs.pop("keep_layout", None)
+        kwargs.pop("compression", None)
+        transpose_sparse_in_memory(src, dst_parent, name, **kwargs)
+    else:
+        transpose_sparse_streaming(src, dst_parent, name, chunk=chunk, **kwargs)
 
 
 def densify(
@@ -527,6 +644,8 @@ def densify(
     *,
     data_dtype: np.dtype,
     chunk_rows: int = 1024,
+    chunk: int = DEFAULT_CHUNK,
+    in_memory: bool = False,
 ) -> None:
     """Write a sparse matrix out as a dense array, a block of rows at a time.
 
@@ -534,13 +653,38 @@ def densify(
     matrix too large to densify in memory still converts -- it just produces
     a file that is honestly much larger, which `check_growth` warns about
     before any of it is written.
+
+    A block is `chunk_rows` rows whatever the layout. A CSC matrix is first
+    transposed to CSR in scratch: its blocks were `chunk_rows` columns of
+    every row, n_obs x --chunk values, so memory followed n_obs and not
+    --chunk (F030). Writing narrow column slabs instead would rewrite every
+    chunk of the dense output once per slab.
     """
+    if src.kind != spec.CSC_MATRIX:
+        _densify_rows(src, dst_parent, name, src.obj.attrs,
+                      data_dtype=data_dtype, chunk_rows=chunk_rows)
+        return
+    with scratch_group(dst_parent, f"__{name}_densify_scratch__") as scratch:
+        _transpose(
+            src, scratch, "csr", in_memory=in_memory, chunk=chunk,
+            data_dtype=src.dtype, index_dtype=np.dtype("int64"),
+            pointer_dtype=np.dtype("int64"), keep_layout=False,
+        )
+        _densify_rows(describe(scratch["csr"]), dst_parent, name, src.obj.attrs,
+                      data_dtype=data_dtype, chunk_rows=chunk_rows)
+
+
+def _densify_rows(
+    src: Matrix, dst_parent: Any, name: str, attrs: Any, *,
+    data_dtype: np.dtype, chunk_rows: int,
+) -> None:
+    """Densify a CSR matrix `chunk_rows` rows at a time, with `attrs`."""
     n_rows, n_cols = src.shape
     backend = "zarr" if is_zarr_group(dst_parent) else "hdf5"
     dst = create_dataset(
         dst_parent, name, shape=(n_rows, n_cols), dtype=data_dtype
     )
-    copy_attrs(src.obj.attrs, dst.attrs, target_backend=backend)
+    copy_attrs(attrs, dst.attrs, target_backend=backend)
     spec.set_encoding(dst, spec.ARRAY)
     # `shape` belongs to the sparse encoding and would contradict the array's
     # own shape if it were carried over.
@@ -549,15 +693,11 @@ def densify(
 
     indptr = np.asarray(src.obj["indptr"][...], dtype=np.int64)
     indices, values = src.obj["indices"], src.obj["data"]
-    csr = src.kind == spec.CSR_MATRIX
-    n_major = n_rows if csr else n_cols
 
-    for lo in range(0, n_major, chunk_rows):
-        hi = min(lo + chunk_rows, n_major)
+    for lo in range(0, n_rows, chunk_rows):
+        hi = min(lo + chunk_rows, n_rows)
         start, end = int(indptr[lo]), int(indptr[hi])
-        block = np.zeros(
-            (hi - lo, n_cols) if csr else (n_rows, hi - lo), dtype=data_dtype
-        )
+        block = np.zeros((hi - lo, n_cols), dtype=data_dtype)
         if end > start:
             minor = np.asarray(indices[start:end], dtype=np.int64)
             data = np.asarray(values[start:end])
@@ -568,14 +708,8 @@ def densify(
             # their sum, which is what scipy's own `toarray` produces.
             # Plain assignment keeps whichever came last, so a
             # non-canonical input silently changed value on densifying.
-            if csr:
-                np.add.at(block, (major, minor), data)
-            else:
-                np.add.at(block, (minor, major), data)
-        if csr:
-            dst[lo:hi, :] = block
-        else:
-            dst[:, lo:hi] = block
+            np.add.at(block, (major, minor), data)
+        dst[lo:hi, :] = block
 
 
 def sparsify(
@@ -588,48 +722,120 @@ def sparsify(
     index_dtype: np.dtype,
     pointer_dtype: np.dtype = np.dtype("int64"),
     chunk_rows: int = 1024,
+    chunk: int = DEFAULT_CHUNK,
+    in_memory: bool = False,
     console: Optional[Console] = None,
     compression: Optional[str] = None,
+    room: Optional[Callable[[int], None]] = None,
 ) -> Tuple[int, float]:
-    """Write a dense array out as CSR or CSC, a block at a time.
+    """Write a dense array out as CSR or CSC, `chunk_rows` rows at a time.
 
     Returns `(nnz, density)` so the caller can say whether it was worth it --
     a matrix that is half nonzero gets bigger, not smaller, and the user
     should hear that from us rather than from `du`.
+
+    CSC goes through a CSR in scratch and the streaming transpose. It read
+    `chunk_rows` columns of every row at a time, n_obs x --chunk values
+    (F030), and each of those reads decoded every chunk of a row-chunked
+    source, once per block of columns. `room(nbytes)` is called before the
+    transpose with what it will write, nnz being known only then, so that a
+    free-space check can refuse first.
     """
-    from adata.core.subset import _append, _growable
+    n_rows, n_cols = src.shape
+    if enc == spec.CSC_MATRIX:
+        with scratch_group(dst_parent, f"__{name}_sparsify_scratch__") as scratch:
+            # Plain arrays: scratch has no chunk cache, so a compressed one
+            # decoded and re-encoded a chunk on every append, 30 to 100
+            # times slower. The output takes the source's codecs instead.
+            nnz = _sparsify_rows(
+                src, scratch, "csr", data_dtype=data_dtype,
+                index_dtype=np.dtype("int64"), pointer_dtype=np.dtype("int64"),
+                chunk_rows=chunk_rows, compression=None, template=None,
+                offsets_within=pointer_dtype,
+            )
+            if room is not None:
+                # nnz is known only now: the buckets and the output next.
+                room(nnz * (16 + 2 * np.dtype(data_dtype).itemsize
+                            + np.dtype(index_dtype).itemsize))
+            _transpose(
+                describe(scratch["csr"]), dst_parent, name, in_memory=in_memory,
+                chunk=chunk, data_dtype=data_dtype, index_dtype=index_dtype,
+                pointer_dtype=pointer_dtype, compression=compression,
+                codecs_from=src.obj,
+            )
+    else:
+        nnz = _sparsify_rows(
+            src, dst_parent, name, data_dtype=data_dtype, index_dtype=index_dtype,
+            pointer_dtype=pointer_dtype, chunk_rows=chunk_rows,
+            compression=compression, template=src.obj,
+        )
+
+    density = nnz / max(1, n_rows * n_cols)
+    if console is not None and density > 0.5:
+        console.print(
+            f"[yellow]{name} is {density:.0%} nonzero; the sparse form is "
+            f"larger than the dense one below about 33%.[/]"
+        )
+    return nnz, density
+
+
+def _sparsify_rows(
+    src: Matrix,
+    dst_parent: Any,
+    name: str,
+    *,
+    data_dtype: np.dtype,
+    index_dtype: np.dtype,
+    pointer_dtype: np.dtype,
+    chunk_rows: int,
+    compression: Optional[str],
+    template: Any,
+    offsets_within: Optional[np.dtype] = None,
+) -> int:
+    """Write a dense matrix out as CSR, `chunk_rows` rows at a time; its nnz.
+
+    `template` gives the arrays its codecs (None for plain ones). nnz is
+    refused as soon as it passes `offsets_within` (by default
+    `pointer_dtype`), so a CSR written to scratch on its way to narrower
+    offsets is not finished first.
+    """
+    from adata.core.subset import _append
 
     n_rows, n_cols = src.shape
-    csr = enc == spec.CSR_MATRIX
-    n_major = n_rows if csr else n_cols
-
     group = dst_parent.create_group(name)
     backend = "zarr" if is_zarr_group(dst_parent) else "hdf5"
     copy_attrs(src.obj.attrs, group.attrs, target_backend=backend)
-    spec.set_encoding(group, enc)
+    spec.set_encoding(group, spec.CSR_MATRIX)
     set_shape_attr(group, src.shape)
 
-    out_data = _growable_like(
-        group, "data", data_dtype, src.obj, compression=compression
+    out_data = _growable_from(
+        group, "data", data_dtype, template, compression=compression
     )
-    out_indices = _growable_like(
-        group, "indices", index_dtype, src.obj, compression=compression
+    out_indices = _growable_from(
+        group, "indices", index_dtype, template, compression=compression
     )
-    # Per-major counts in one int64 array: a Python list of int objects
-    # took 36 to 40 bytes a row against 8.
-    counts = np.zeros(n_major, dtype=np.int64)
+    # Per-row counts in one int64 array: a Python list of int objects took
+    # 36 to 40 bytes a row against 8.
+    counts = np.zeros(n_rows, dtype=np.int64)
+    offsets_within = np.dtype(offsets_within or pointer_dtype)
+    pointer_limit = int(np.iinfo(offsets_within).max)
+    nnz = 0
 
-    for lo in range(0, n_major, chunk_rows):
-        hi = min(lo + chunk_rows, n_major)
-        block = np.asarray(src.obj[lo:hi, :] if csr else src.obj[:, lo:hi])
-        if not csr:
-            block = block.T  # iterate majors as rows either way
-        nonzero_major, nonzero_minor = np.nonzero(block)
-        counts[lo:hi] = np.bincount(nonzero_major, minlength=hi - lo)
-        _append(out_indices, nonzero_minor.astype(index_dtype, copy=False))
-        _append(out_data, block[nonzero_major, nonzero_minor].astype(
-            data_dtype, copy=False
-        ))
+    for lo in range(0, n_rows, chunk_rows):
+        hi = min(lo + chunk_rows, n_rows)
+        # Cast before looking for nonzeros: a lossy cast turns 0.3 into 0,
+        # and finding the nonzeros first stored those as explicit zeros
+        # (F121), 616 entries where scipy has 194.
+        with np.errstate(invalid="ignore", over="ignore"):
+            block = np.asarray(src.obj[lo:hi, :]).astype(data_dtype, copy=False)
+        rows, cols = np.nonzero(block)
+        nnz += int(rows.size)
+        if nnz > pointer_limit:
+            # Offsets cast with a plain astype wrapped negative (F013).
+            check_index_range("indptr", offsets_within, nnz, src.shape, None)
+        counts[lo:hi] = np.bincount(rows, minlength=hi - lo)
+        _append(out_indices, cols.astype(index_dtype, copy=False))
+        _append(out_data, block[rows, cols])
 
     indptr = np.concatenate(([0], np.cumsum(counts)))
     kw = {}
@@ -641,16 +847,72 @@ def sparsify(
     create_dataset(
         group, "indptr", data=indptr.astype(pointer_dtype, copy=False), **kw
     )
+    return nnz
 
 
-    nnz = int(indptr[-1])
-    density = nnz / max(1, n_rows * n_cols)
-    if console is not None and density > 0.5:
-        console.print(
-            f"[yellow]{name} is {density:.0%} nonzero; the sparse form is "
-            f"larger than the dense one below about 33%.[/]"
+def _growable_from(
+    group: Any,
+    name: str,
+    dtype: np.dtype,
+    template: Any,
+    *,
+    compression: Optional[str] = None,
+) -> Any:
+    """A growable 1-D array with `template`'s codecs and never its chunks.
+
+    `_growable_like` takes a template's first chunk dimension as the element
+    chunk, which for a dense matrix is a row height: a source chunked 16
+    rows tall gave `data` 16-element chunks, 281,188 of them for 4.5M
+    nonzeros and a file three times the size (F078). With no template, a
+    plain array.
+    """
+    kw = _codecs(group, dtype, template, compression)
+    if is_zarr_group(group):
+        return group.create_array(name, shape=(0,), dtype=dtype, chunks=(ELEMENT_CHUNK,), **kw)
+    return group.create_dataset(
+        name, shape=(0,), maxshape=(None,), dtype=dtype, chunks=(ELEMENT_CHUNK,), **kw
+    )
+
+
+def _output_array(
+    group: Any,
+    name: str,
+    dtype: np.dtype,
+    n: int,
+    template: Any,
+    codecs_from: Any,
+    *,
+    compression: Optional[str] = None,
+) -> Any:
+    """A 1-D array of `n` elements: laid out like `template`, or, given
+    `codecs_from` (a dense matrix), with its codecs and element chunks."""
+    if codecs_from is None:
+        return _sparse_dataset(group, name, dtype, n, template, compression=compression)
+    backend = "zarr" if is_zarr_group(group) else "hdf5"
+    kw = _codecs(group, dtype, codecs_from, compression)
+    kw = fit_chunks({**kw, "chunks": (ELEMENT_CHUNK,)}, (n,), backend=backend)
+    return create_dataset(group, name, shape=(n,), dtype=dtype, **kw)
+
+
+def _codecs(group: Any, dtype: np.dtype, template: Any, compression: Optional[str]) -> dict:
+    """Creation kwargs for a 1-D array: `template`'s codecs, not its layout.
+
+    Its chunks and shards are a grid of the template's own shape, and its
+    fill value and scale-offset filter belong to the template's dtype.
+    """
+    backend = "zarr" if is_zarr_group(group) else "hdf5"
+    kw = (
+        dataset_create_kwargs(template, target_backend=backend, dst_parent=group)
+        if template is not None else {}
+    )
+    for key in ("chunks", "shards", "fillvalue", "scaleoffset"):
+        kw.pop(key, None)
+    if compression is not None:
+        kw = with_compression(
+            kw, compression, shape=(0,), dtype=dtype, backend=backend,
+            zarr_format=zarr_format_of(group),
         )
-    return nnz, density
+    return kw
 
 
 def cast_dense(
@@ -718,10 +980,15 @@ def plan_conversion(
     index_dtype: Optional[np.dtype] = None,
     layout: Optional[str] = None,
     chunk: int = DEFAULT_CHUNK,
+    chunk_rows: int = 1024,
     force: bool = False,
     console: Optional[Console] = None,
 ) -> Plan:
-    """Decide what to do, and refuse here if it should not be done."""
+    """Decide what to do, and refuse here if it should not be done.
+
+    `chunk_rows` is the block of a dense matrix the cast check reads, as the
+    conversion will.
+    """
     src = describe(obj)
     target_layout = resolve_layout(src, layout)
     data_dtype = np.dtype(dtype) if dtype is not None else src.dtype
@@ -738,27 +1005,45 @@ def plan_conversion(
     else:
         idx_dtype = ptr_dtype = np.dtype("int64")
 
-    report: Optional[CastReport] = None
-    if dtype is not None and data_dtype != src.dtype:
-        values = src.obj["data"] if src.sparse else src.obj
-        report = check_cast(values, data_dtype, chunk=chunk)
-        message = report.describe(src.dtype, data_dtype)
-        if not report.lossless and not force:
-            raise ValueError(f"{name}: {message}. Pass --force to convert anyway.")
-        if console is not None:
-            colour = "dim" if report.lossless else "yellow"
-            console.print(f"[{colour}]{name}: {message}[/]")
+    # The refusals that need no pass over the values come first, so that a
+    # range or growth refusal does not wait for the whole matrix to be read.
+    if target_layout in spec.SPARSE_TYPES and data_dtype == np.dtype("float16"):
+        # scipy has no float16 sparse matrix, so anndata, scanpy and this
+        # tool's own readers fail on one. It was written, with a message
+        # that every value round-tripped (F058).
+        raise ValueError(
+            f"{name}: a sparse matrix cannot hold float16 -- scipy, and so "
+            "anndata and scanpy, cannot read one. Use --dtype float32, or "
+            "--layout dense."
+        )
 
     # Always, not only when asked: an inferred dtype can be too narrow too,
     # and a silently overflowed offset is indistinguishable from corruption.
-    if src.sparse and not force:
-        check_index_dtype(src.obj, idx_dtype, ptr_dtype, src.shape)
+    # Nor does --force waive it: it accepts lossy values and a large store,
+    # and it let indptr wrap negative (F013). A dense source's coordinates
+    # are checked here and its offsets as `sparsify` counts them.
+    if target_layout in spec.SPARSE_TYPES:
+        check_index_dtype(
+            src.obj if src.sparse else None, idx_dtype, ptr_dtype, src.shape,
+            minor=src.shape[1] if target_layout == spec.CSR_MATRIX else src.shape[0],
+        )
 
     if target_layout == "dense" and src.sparse:
         projected = src.shape[0] * src.shape[1] * data_dtype.itemsize
         check_growth(
             _stored_bytes(src.obj), projected, force=force, what=f"{name} as dense"
         )
+
+    report: Optional[CastReport] = None
+    if dtype is not None and data_dtype != src.dtype:
+        values = src.obj["data"] if src.sparse else src.obj
+        report = check_cast(values, data_dtype, chunk=chunk, rows=chunk_rows)
+        message = report.describe(src.dtype, data_dtype)
+        if not report.lossless and not force:
+            raise ValueError(f"{name}: {message}. Pass --force to convert anyway.")
+        if console is not None:
+            colour = "dim" if report.lossless else "yellow"
+            console.print(f"[{colour}]{name}: {message}[/]")
 
     return Plan(src, target_layout, data_dtype, idx_dtype, ptr_dtype, report)
 
@@ -777,6 +1062,7 @@ def convert_matrix(
     in_memory: bool = False,
     force: bool = False,
     console: Optional[Console] = None,
+    room: Optional[Callable[[int], None]] = None,
 ) -> None:
     """Write `obj` into `dst_parent` under `name`, converted.
 
@@ -787,7 +1073,7 @@ def convert_matrix(
     if plan is None:
         plan = plan_conversion(
             obj, name, dtype=dtype, index_dtype=index_dtype, layout=layout,
-            chunk=chunk, force=force, console=console,
+            chunk=chunk, chunk_rows=chunk_rows, force=force, console=console,
         )
     src = plan.source
     target_layout = plan.layout
@@ -798,7 +1084,10 @@ def convert_matrix(
     # --- then write -------------------------------------------------------
     if target_layout == "dense":
         if src.sparse:
-            densify(src, dst_parent, name, data_dtype=data_dtype, chunk_rows=chunk_rows)
+            densify(
+                src, dst_parent, name, data_dtype=data_dtype,
+                chunk_rows=chunk_rows, chunk=chunk, in_memory=in_memory,
+            )
         else:
             cast_dense(src, dst_parent, name, data_dtype=data_dtype, chunk_rows=chunk_rows)
         return
@@ -813,7 +1102,10 @@ def convert_matrix(
             index_dtype=idx_dtype,
             pointer_dtype=ptr_dtype,
             chunk_rows=chunk_rows,
+            chunk=chunk,
+            in_memory=in_memory,
             console=console,
+            room=room,
         )
         return
 
