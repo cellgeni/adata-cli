@@ -191,7 +191,14 @@ These are easy to break without any test noticing straight away:
   - Commands read the source's version from `Store.zarr_format`.
   - `concat` uses the version its Zarr inputs share.
 - **Outputs keep the source's index dtypes, chunking and compression.**
-  Changing them is `recast`'s job, or that of an explicit flag.
+  Changing them is `recast`'s job, or that of an explicit flag. Zarr v3
+  shards are kept too: `fit_chunks` clamps them with the chunk, and given
+  `itemsize` cuts a unit too large to hold along its rows.
+- **Write a streamed output through `storage.RowWriter`**, and `flush()` it
+  after the last block. A write to part of a Zarr shard rewrites the whole
+  shard, and to part of a chunk Zarr keeps no cache, so writing a `--chunk`
+  block at a time straight into the array costs a unit per block.
+  `_growable_like` returns one for a sparse matrix's `data` and `indices`.
 
 ## Tests
 

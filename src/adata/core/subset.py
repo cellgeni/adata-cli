@@ -6,7 +6,7 @@ from collections import Counter
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Set, Tuple, List, Dict, Any
+from typing import Optional, Set, Tuple, List, Dict, Any, Iterator
 
 import numpy as np
 from rich.console import Console
@@ -30,13 +30,21 @@ from adata.elements.read import (
     resolve_index,
 )
 from adata.storage import (
+    TARGET_READ_BYTES,
+    WRITE_UNIT_BYTES,
+    RowWriter,
     create_dataset,
     copy_attrs,
     copy_tree,
+    cut_unit,
     dataset_create_kwargs,
+    decode_chunks,
     detect_backend,
     fit_chunks,
     fit_fill,
+    read_blocks,
+    tile_shards,
+    write_share,
     is_dataset,
     is_group,
     is_legacy_categorical,
@@ -390,25 +398,13 @@ def _check_sorted(indices: Optional[np.ndarray], what: str) -> None:
         raise ValueError(f"{what} indices must be sorted and unique.")
 
 
-class _Cursor:
-    """Hand out, block by block, the rows of one target's major selection.
-
-    The blocks arrive in increasing order and the selection is sorted, so
-    each block's rows are the next slice of it: finding them is one
-    `searchsorted`, not a scan.
-    """
-
-    def __init__(self, selection: Optional[np.ndarray]) -> None:
-        self.selection = selection
-        self.pos = 0
-
-    def rows(self, lo: int, hi: int) -> np.ndarray:
-        if self.selection is None:
-            return np.arange(lo, hi, dtype=np.int64)
-        end = int(np.searchsorted(self.selection, hi, side="left"))
-        rows = self.selection[self.pos : end]
-        self.pos = end
-        return rows
+def _selected(selection: Optional[np.ndarray], lo: int, hi: int) -> Tuple[int, np.ndarray]:
+    """The rows of a sorted selection in `[lo, hi)`, and where the first of
+    them lands in the output: two `searchsorted`s, not a scan."""
+    if selection is None:
+        return lo, np.arange(lo, hi, dtype=np.int64)
+    a, b = np.searchsorted(selection, [lo, hi], side="left")
+    return int(a), selection[int(a) : int(b)]
 
 
 def subset_dense_matrix(
@@ -423,12 +419,21 @@ def subset_dense_matrix(
     fan_out_dense_matrix(src, name, [(dst_parent, obs_idx, var_idx)], chunk_rows=chunk_rows)
 
 
+def _itemsize(dtype: Any) -> int:
+    """Bytes an element holds in memory, a guess for text."""
+    from adata.storage import VLEN_ELEMENT_BYTES
+
+    size = int(getattr(dtype, "itemsize", 0) or 0)
+    return size if size and getattr(dtype, "kind", "") not in ("O", "T") else VLEN_ELEMENT_BYTES
+
+
 def fan_out_dense_matrix(
     src: Any,
     name: str,
     targets: List[MatrixTarget],
     *,
     chunk_rows: int = 1024,
+    share: Optional[int] = None,
 ) -> None:
     """Write one row/column subset of a dense array per target, in one pass.
 
@@ -437,9 +442,20 @@ def fan_out_dense_matrix(
     axes whole, as anndata's subsetting keeps them. Only a 0-d value has no
     rows, and is copied as it is.
 
-    The source is read a block of `chunk_rows` rows at a time, each block
-    once whatever the number of targets, and only the span between the
-    first and last row any target keeps in it.
+    The source is read in bands of `chunk_rows` rows rounded to whole
+    chunks of it (`read_blocks`), each once whatever the number of targets,
+    and only the span between the first and last row any target keeps in
+    it. A band of --chunk rows split a chunk 50,000 rows tall across fifty
+    reads, each decoding all of it (F061). Where one chunk height across
+    the array is over the read budget -- a chunk of (n_obs, 8) -- a band is
+    read a tile of whole chunks at a time.
+
+    Each output keeps the source's chunks and shards, and is written a
+    whole unit at a time (`RowWriter`): a block of rows wrote part of a
+    shard, which zarr rewrites whole, once a block (F031), and `split`'s
+    outputs, given a few rows each a block, decoded and encoded each chunk
+    tens of times (F060). A unit's rows are cut to `share` bytes (by
+    default `WRITE_UNIT_BYTES`), the most each output may hold.
     """
     if src.ndim == 0:
         for dst_parent, _, _ in targets:
@@ -447,6 +463,17 @@ def fan_out_dense_matrix(
         return
 
     n_obs = src.shape[0]
+    itemsize = _itemsize(src.dtype)
+    row_bytes = itemsize * int(np.prod(src.shape[1:], dtype=np.int64))
+    band, width = read_blocks(
+        src.shape, decode_chunks(src), itemsize, rows=chunk_rows,
+        budget=max(chunk_rows * row_bytes, TARGET_READ_BYTES),
+    )
+    tiles = (
+        [(0, src.shape[1] if src.ndim > 1 else 0)] if width is None
+        else [(left, min(left + width, src.shape[1])) for left in range(0, src.shape[1], width)]
+    )
+
     outputs = []
     for dst_parent, obs_idx, var_idx in targets:
         _check_sorted(obs_idx, "obs")
@@ -462,32 +489,59 @@ def fan_out_dense_matrix(
         kw = dataset_create_kwargs(
             src, target_backend=target_backend, dst_parent=dst_parent
         )
-        kw = fit_chunks(kw, shape, backend=target_backend)
+        budget = share if share is not None else WRITE_UNIT_BYTES
+        kw = fit_chunks(kw, shape, backend=target_backend, itemsize=itemsize, unit_bytes=budget)
+        if width is not None and kw.get("shards"):
+            kw["shards"] = tile_shards(kw["chunks"], kw["shards"], width, rows=False)
         dst = create_dataset(
             dst_parent, name, shape=tuple(shape), dtype=src.dtype, **kw
         )
         copy_attrs(src.attrs, dst.attrs, target_backend=target_backend)
-        outputs.append([dst, _Cursor(obs_idx), var_idx, 0])
+        # A writer per tile of columns, each buffering its columns' rows to
+        # whole units: together they hold one unit of rows across the output.
+        writers = []
+        for left, right in tiles:
+            if width is None:
+                writers.append(((None, var_idx), RowWriter(dst, budget=budget)))
+                continue
+            p0, p1 = (
+                (left, right) if var_idx is None
+                else np.searchsorted(var_idx, [left, right], side="left")
+            )
+            if p1 > p0:
+                picked = None if var_idx is None else var_idx[int(p0):int(p1)] - left
+                writers.append(((left, picked), RowWriter(dst, cols=(p0, p1), budget=budget)))
+            else:
+                writers.append(None)
+        outputs.append((obs_idx, writers))
 
-    for start in range(0, n_obs, chunk_rows):
-        end = min(start + chunk_rows, n_obs)
-        wanted = [out[1].rows(start, end) for out in outputs]
+    for start in range(0, n_obs, band):
+        end = min(start + band, n_obs)
+        wanted = [_selected(obs_idx, start, end)[1] for obs_idx, _ in outputs]
         nonempty = [rows for rows in wanted if rows.size]
         if not nonempty:
             continue
         first = min(int(rows[0]) for rows in nonempty)
         last = max(int(rows[-1]) for rows in nonempty)
-        block = np.asarray(src[first : last + 1, ...])
 
-        for out, rows in zip(outputs, wanted):
-            if not rows.size:
-                continue
-            dst, _, var_idx, written = out
-            part = block[rows - first]
-            if var_idx is not None:
-                part = part[:, var_idx]
-            dst[written : written + len(rows), ...] = part
-            out[3] = written + len(rows)
+        for t, (left, right) in enumerate(tiles):
+            block = np.asarray(
+                src[first : last + 1, ...] if width is None
+                else src[first : last + 1, left:right, ...]
+            )
+            for (_, writers), rows in zip(outputs, wanted):
+                if not rows.size or writers[t] is None:
+                    continue
+                (_, picked), writer = writers[t]
+                part = block[rows - first]
+                if picked is not None:
+                    part = part[:, picked]
+                writer.write(part)
+
+    for _, writers in outputs:
+        for entry in writers:
+            if entry is not None:
+                entry[1].flush()
 
 
 class _SparseOutput:
@@ -502,6 +556,8 @@ class _SparseOutput:
         out_shape: Tuple[int, int],
         major_idx: Optional[np.ndarray],
         remap: Optional[np.ndarray],
+        n_major: int,
+        share: Optional[int] = None,
     ) -> None:
         self.group = dst_parent.create_group(name)
         copy_attrs(src.attrs, self.group.attrs, target_backend=_target_backend(dst_parent))
@@ -513,29 +569,43 @@ class _SparseOutput:
         # so whatever held the source holds the subset. Widening them made
         # every output about half as large again as it needed to be.
         self.indptr_template = src["indptr"]
-        self.data = _growable_like(self.group, "data", src["data"].dtype, src["data"])
-        self.indices = _growable_like(
-            self.group, "indices", src["indices"].dtype, src["indices"]
+        data_dtype, index_dtype = np.dtype(src["data"].dtype), np.dtype(src["indices"].dtype)
+        share = WRITE_UNIT_BYTES if share is None else share
+        # The two arrays share the output's budget in proportion to their
+        # widths: whole units of both, at once, are what it holds.
+        width = data_dtype.itemsize + index_dtype.itemsize
+        self.data = _growable_like(
+            self.group, "data", data_dtype, src["data"],
+            share=max(1, share * data_dtype.itemsize // width),
         )
-        self.cursor = _Cursor(major_idx)
+        self.indices = _growable_like(
+            self.group, "indices", index_dtype, src["indices"],
+            share=max(1, share * index_dtype.itemsize // width),
+        )
+        self.selection = major_idx
         self.remap = remap
-        self.counts: List[np.ndarray] = []
+        # Entries per output major, added to as blocks arrive: a major split
+        # across blocks adds to its count twice.
+        self.counts = np.zeros(len(major_idx) if major_idx is not None else n_major, np.int64)
 
     def take(
         self,
+        at: int,
         rows: np.ndarray,
         indptr: np.ndarray,
         lo: int,
+        hi: int,
         block_indices: np.ndarray,
         block_data: np.ndarray,
     ) -> None:
-        """Append the entries of `rows`, whose data starts at offset `lo`."""
-        starts = indptr[rows] - lo
-        lengths = indptr[rows + 1] - indptr[rows]
+        """Append the entries of `rows` in `[lo, hi)`, the span the block
+        holds from `lo`; `at` is the first row's position in the output."""
+        starts = np.maximum(indptr[rows], lo) - lo
+        lengths = np.minimum(indptr[rows + 1], hi) - lo - starts
         total = int(lengths.sum())
 
-        if total and self.cursor.selection is None:
-            # Every row of the block: its entries are one contiguous run.
+        if total and (self.selection is None or len(rows) == 1):
+            # Every row of the block, or one: its entries are one run.
             begin = int(starts[0])
             positions = slice(begin, begin + total)
         else:
@@ -556,15 +626,14 @@ class _SparseOutput:
             counts = np.bincount(owner[keep], minlength=len(rows))
             minor, values = mapped[keep], values[keep]
 
-        self.counts.append(counts)
+        self.counts[at : at + len(rows)] += counts
         _append(self.indices, minor.astype(self.indices.dtype, copy=False))
         _append(self.data, values)
 
     def finish(self) -> None:
-        counts = (
-            np.concatenate(self.counts) if self.counts else np.empty(0, dtype=np.int64)
-        )
-        indptr = np.concatenate(([0], np.cumsum(counts, dtype=np.int64)))
+        self.data.flush()
+        self.indices.flush()
+        indptr = np.concatenate(([0], np.cumsum(self.counts, dtype=np.int64)))
         dtype = self.indptr_template.dtype
         dataset = _sparse_dataset(
             self.group, "indptr", dtype, indptr.size, self.indptr_template
@@ -579,12 +648,77 @@ def subset_sparse_matrix_group(
     obs_idx: Optional[np.ndarray],
     var_idx: Optional[np.ndarray],
     *,
-    chunk_major: int = 4096,
+    chunk_rows: int = 1024,
 ) -> None:
-    """Subset a CSR/CSC matrix, streaming it a block of major axis at a time."""
+    """Subset a CSR/CSC matrix, streaming it a block of entries at a time."""
     fan_out_sparse_matrix(
-        src, name, [(dst_parent, obs_idx, var_idx)], chunk_major=chunk_major
+        src, name, [(dst_parent, obs_idx, var_idx)], chunk_rows=chunk_rows
     )
+
+
+def sparse_block_entries(n_rows: int, nnz: int, chunk_rows: int) -> int:
+    """Entries a block of a sparse matrix holds: as many as `chunk_rows`
+    rows hold on average, in either layout.
+
+    Blocks were 4,096 majors, whatever --chunk said. Of a CSC matrix that is
+    4,096 genes across every cell, a block growing with n_obs: 270M entries,
+    several GB, at a million cells (F032).
+    """
+    per_row = -(-int(nnz) // max(1, int(n_rows))) if nnz else 1
+    return max(1, int(chunk_rows) * max(1, per_row))
+
+
+def _sparse_blocks(
+    indptr: np.ndarray,
+    budget: int,
+    selections: List[Optional[np.ndarray]],
+) -> Iterator[Tuple[int, int, int, int]]:
+    """`(first, stop, lo, hi)` for each block: majors `[first, stop)`, of
+    which entries `[lo, hi)` are read.
+
+    A block takes whole majors while they fit `budget` entries; a major
+    holding more is read in parts of `budget`, a block each (then `stop`
+    is `first + 1`). Majors no selection keeps are skipped, and a block is
+    read only from the first to the last major some selection keeps in it.
+    """
+    n_major = indptr.size - 1
+    whole = any(sel is None for sel in selections)
+    # Every major some selection keeps, once: one search a block, not one
+    # for each of `split`'s outputs.
+    kept = None if whole else np.unique(np.concatenate(
+        [np.asarray(sel, dtype=np.int64) for sel in selections] or [np.empty(0, np.int64)]
+    ))
+
+    def next_kept(m: int) -> Optional[int]:
+        if whole:
+            return m if m < n_major else None
+        i = int(np.searchsorted(kept, m, side="left"))
+        return int(kept[i]) if i < kept.size else None
+
+    def last_kept(stop: int) -> int:
+        if whole:
+            return stop - 1
+        return int(kept[int(np.searchsorted(kept, stop, side="left")) - 1])
+
+    m = next_kept(0)
+    at = None  # within major m, when it is being read in parts
+    while m is not None and m < n_major:
+        start = int(indptr[m]) if at is None else at
+        if at is None:
+            stop = int(np.searchsorted(indptr, start + budget, side="right")) - 1
+            stop = min(stop, n_major)
+            if stop > m:
+                hi = int(indptr[last_kept(stop) + 1])
+                yield m, stop, start, hi
+                m = next_kept(stop)
+                continue
+        # Major m holds more than a block: a part of it.
+        end = min(start + budget, int(indptr[m + 1]))
+        yield m, m + 1, start, end
+        if end >= int(indptr[m + 1]):
+            m, at = next_kept(m + 1), None
+        else:
+            at = end
 
 
 def fan_out_sparse_matrix(
@@ -592,19 +726,25 @@ def fan_out_sparse_matrix(
     name: str,
     targets: List[MatrixTarget],
     *,
-    chunk_major: int = 4096,
+    chunk_rows: int = 1024,
+    share: Optional[int] = None,
 ) -> None:
     """Write one subset of a CSR/CSC matrix per target, reading it once.
 
-    The source's major axis is walked in contiguous blocks of `chunk_major`,
-    and each block's `data`/`indices` are read once -- only the span between
-    the first and last row any target keeps -- then shared out among the
-    targets. Peak memory is set by the block, not the matrix.
+    The source is read a block of entries at a time -- about as many as
+    `chunk_rows` rows hold (`sparse_block_entries`), whole majors where
+    they fit and a major too large for one block in parts -- and each block
+    is read once, only from the first to the last major any target keeps,
+    then shared out among the targets. Peak memory is set by the block,
+    not the matrix, in either layout and along either axis.
 
     This is what makes `split` one pass. An earlier version subset once per
     target, reading the span of each target's own selected rows; when the
     groups were interleaved that span was nearly the whole matrix, so a split
     into k groups read and decompressed X k times.
+
+    Each output's `data` and `indices` keep the source's chunks and shards,
+    and are written a whole unit at a time (`RowWriter`), cut to `share`.
     """
     enc = _decode_attr(src.attrs.get("encoding-type", b""))
     if enc not in spec.SPARSE_TYPES:
@@ -641,17 +781,15 @@ def fan_out_sparse_matrix(
                 out_shape,
                 major_idx,
                 _minor_remap(minor_keep, n_minor),
+                n_major,
+                share,
             )
         )
 
-    for start in range(0, n_major, chunk_major):
-        end = min(start + chunk_major, n_major)
-        wanted = [out.cursor.rows(start, end) for out in outputs]
-        nonempty = [rows for rows in wanted if rows.size]
-        if not nonempty:
-            continue
-        lo = int(indptr[min(int(rows[0]) for rows in nonempty)])
-        hi = int(indptr[max(int(rows[-1]) for rows in nonempty) + 1])
+    budget = sparse_block_entries(n_rows, int(indptr[-1]) if indptr.size else 0, chunk_rows)
+    for first, stop, lo, hi in _sparse_blocks(
+        indptr, budget, [out.selection for out in outputs]
+    ):
         if hi > lo:
             block_indices = np.asarray(indices_ds[lo:hi])
             block_data = np.asarray(data_ds[lo:hi])
@@ -659,9 +797,10 @@ def fan_out_sparse_matrix(
             block_indices = np.empty(0, dtype=indices_ds.dtype)
             block_data = np.empty(0, dtype=data_ds.dtype)
 
-        for out, rows in zip(outputs, wanted):
+        for out in outputs:
+            at, rows = _selected(out.selection, first, stop)
             if rows.size:
-                out.take(rows, indptr, lo, block_indices, block_data)
+                out.take(at, rows, indptr, lo, hi, block_indices, block_data)
 
     for out in outputs:
         out.finish()
@@ -699,7 +838,9 @@ def _sparse_dataset(
     """
     backend = _target_backend(group)
     kw = dataset_create_kwargs(template, target_backend=backend, dst_parent=group)
-    kw = fit_chunks(kw, (n,), backend=backend)
+    # A unit cut to what `RowWriter` holds: writers fill these a block at
+    # a time, and anndata's shard of a whole array may be a gigabyte.
+    kw = fit_chunks(kw, (n,), backend=backend, itemsize=np.dtype(dtype).itemsize)
     if compression is not None:
         kw = with_compression(
             kw, compression, shape=(n,), dtype=dtype, backend=backend,
@@ -717,12 +858,18 @@ def _growable_like(
     template: Any,
     *,
     compression: Optional[str] = None,
-) -> Any:
-    """Like `_sparse_dataset`, but extensible for a size not yet known.
+    share: Optional[int] = None,
+) -> RowWriter:
+    """Like `_sparse_dataset`, but extensible for a size not yet known: a
+    `RowWriter` that grows it, appended to with `_append`. Flush it once the
+    last entries are in.
 
     The sparse writers of subset and concat once used a bare growable
     dataset here, which dropped the source's compression: their `data` and
-    `indices` were written uncompressed whatever the input.
+    `indices` were written uncompressed whatever the input. They dropped its
+    shard too, and kept the inner chunk: 245 elements, a file each, under
+    anndata 0.13 (F033). The shard is kept now, cut to `share` bytes (by
+    default `WRITE_UNIT_BYTES`), and written whole.
     """
     backend = _target_backend(group)
     kw = dataset_create_kwargs(template, target_backend=backend, dst_parent=group)
@@ -731,19 +878,27 @@ def _growable_like(
             kw, compression, shape=(0,), dtype=dtype, backend=backend,
             zarr_format=zarr_format_of(group),
         )
-    kw.pop("shards", None)
     chunks = kw.pop("chunks", None)
-    step = int(chunks[0]) if chunks else 1 << 16
+    kw["chunks"] = (int(chunks[0]),) if chunks else (1 << 16,)
+    if kw.get("shards"):
+        kw["shards"] = (int(kw["shards"][0]),)
+    budget = WRITE_UNIT_BYTES if share is None else share
+    kw = cut_unit(kw, (0,), np.dtype(dtype).itemsize, budget)
     if is_zarr_group(group):
-        return group.create_array(name, shape=(0,), dtype=dtype, chunks=(step,), **kw)
-    return group.create_dataset(
-        name, shape=(0,), maxshape=(None,), dtype=dtype, chunks=(step,), **fit_fill(kw, dtype)
-    )
+        ds = group.create_array(name, shape=(0,), dtype=dtype, **kw)
+    else:
+        ds = group.create_dataset(
+            name, shape=(0,), maxshape=(None,), dtype=dtype, **fit_fill(kw, dtype)
+        )
+    return RowWriter(ds, grow=True, budget=budget)
 
 
 def _append(ds: Any, values: np.ndarray) -> None:
-    """Append a block to a growable 1-D dataset."""
+    """Append a block to a growable 1-D dataset, or to its `RowWriter`."""
     if values.size == 0:
+        return
+    if isinstance(ds, RowWriter):
+        ds.write(values)
         return
     start = ds.shape[0]
     ds.resize((start + values.size,))
@@ -776,15 +931,16 @@ def fan_out_matrix_entry(
     *,
     chunk_rows: int,
     entry_label: str,
+    share: Optional[int] = None,
 ) -> None:
     if is_dataset(obj):
-        fan_out_dense_matrix(obj, name, targets, chunk_rows=chunk_rows)
+        fan_out_dense_matrix(obj, name, targets, chunk_rows=chunk_rows, share=share)
         return
 
     if is_group(obj):
         enc = spec.encoding_type(obj)
         if enc in spec.SPARSE_TYPES:
-            fan_out_sparse_matrix(obj, name, targets)
+            fan_out_sparse_matrix(obj, name, targets, chunk_rows=chunk_rows, share=share)
             return
         if enc == spec.DATAFRAME:
             # obsm/varm may hold a dataframe; it is row-aligned like obs/var.
@@ -838,6 +994,7 @@ def _fan_out_raw(
     *,
     chunk_rows: int,
     console: Console,
+    share: Optional[int] = None,
 ) -> None:
     """Subset a `raw/` group into every target, reading its matrices once.
 
@@ -885,6 +1042,7 @@ def _fan_out_raw(
             ],
             chunk_rows=chunk_rows,
             entry_label="raw/X",
+            share=share,
         )
 
     if "varm" in src_raw:
@@ -899,6 +1057,7 @@ def _fan_out_raw(
                 ],
                 chunk_rows=chunk_rows,
                 entry_label=f"raw/varm:{key}",
+                share=share,
             )
 
     for key in src_raw.keys():
@@ -980,6 +1139,9 @@ def _write_targets(
 
     labels = {v: k for k, v in _TASK_LABELS.items()}
     pruned: List[Dict[str, Pruned]] = [{} for _ in targets]
+    # What each output may hold to write whole units, its part of what
+    # one pass holds across them all (F079).
+    share = write_share(len(targets))
     tasks = [t for t in tasks if labels.get(t.split(":", 1)[0], t.split(":", 1)[0]) not in skip
              and not (t.startswith("copy:") and t.split(":", 1)[1] in skip)]
 
@@ -1004,9 +1166,9 @@ def _write_targets(
                 X = src["X"]
                 pairs = [(t.root, t.obs_idx, t.var_idx) for t in targets]
                 if is_dataset(X):
-                    fan_out_dense_matrix(X, "X", pairs, chunk_rows=chunk_rows)
+                    fan_out_dense_matrix(X, "X", pairs, chunk_rows=chunk_rows, share=share)
                 elif is_group(X):
-                    fan_out_sparse_matrix(X, "X", pairs)
+                    fan_out_sparse_matrix(X, "X", pairs, chunk_rows=chunk_rows, share=share)
                 else:
                     for target in targets:
                         copy_tree(X, target.root, "X")
@@ -1017,7 +1179,8 @@ def _write_targets(
                         prune_colors(target.root["uns"], narrowed.get(axis, {}))
             elif task == "raw":
                 _fan_out_raw(
-                    src["raw"], targets, chunk_rows=chunk_rows, console=console
+                    src["raw"], targets, chunk_rows=chunk_rows, console=console,
+                    share=share,
                 )
             elif task.startswith("copy:"):
                 key = task.split(":", 1)[1]
@@ -1054,6 +1217,7 @@ def _write_targets(
                         ],
                         chunk_rows=chunk_rows,
                         entry_label=task,
+                        share=share,
                     )
             progress.update(
                 task_id,
@@ -1301,6 +1465,15 @@ def _open_output_limit() -> int:
 #: rather than running out of file descriptors.
 MAX_OPEN_OUTPUTS = _open_output_limit()
 
+#: How many HDF5 outputs a pass holds open, whatever the descriptor limit
+#: allows. An open HDF5 file costs about 0.6 MB however it is opened -- the
+#: library's own per-file structures; a chunk cache or a smaller metadata
+#: cache changes nothing -- so with a container's high limit, 1,024 outputs
+#: a pass took RSS to about 1 GB, following the number of groups rather than
+#: --chunk (F079). 128 holds that near 80 MB, for a pass more per 128
+#: groups. Zarr outputs hold no descriptor and no such cost.
+MAX_OPEN_HDF5_OUTPUTS = 128
+
 
 def split_h5ad(
     file: Path,
@@ -1320,14 +1493,21 @@ def split_h5ad(
         with open_store(file, "r") as probe:
             zarr_format = probe.zarr_format
 
-    for start in range(0, len(outputs), MAX_OPEN_OUTPUTS):
-        batch = outputs[start : start + MAX_OPEN_OUTPUTS]
+    per_pass = MAX_OPEN_OUTPUTS
+    if any(detect_backend(Path(path)) == "hdf5" for path, _, _ in outputs):
+        per_pass = min(per_pass, MAX_OPEN_HDF5_OUTPUTS)
+    for start in range(0, len(outputs), per_pass):
+        batch = outputs[start : start + per_pass]
         with ExitStack() as stack:
             src = stack.enter_context(open_store(file, "r")).root
             targets = []
             for path, obs_idx, var_idx in batch:
+                # No chunk cache: every chunked array is written whole units
+                # at a time (`RowWriter`), and an HDF5 cache for each dataset
+                # of each of up to 1,024 open outputs, holding the chunks it
+                # was given until closed, took RSS to about 1 GB (F079).
                 dst = stack.enter_context(
-                    open_store(path, "w", zarr_format=zarr_format)
+                    open_store(path, "w", zarr_format=zarr_format, chunk_cache=0)
                 ).root
                 var_keep = (
                     set(read_names(src, "var", var_idx))

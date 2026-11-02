@@ -112,6 +112,10 @@ class IOCounts:
     #: The largest read per dataset, in bytes and in elements.
     largest_by_name: Dict[str, int] = field(default_factory=dict)
     largest_elements_by_name: Dict[str, int] = field(default_factory=dict)
+    #: Bytes written, and whole units encoded, per array: a writer's own
+    #: output apart from its scratch.
+    written_by_name: Dict[str, int] = field(default_factory=dict)
+    encoded_by_name: Dict[str, int] = field(default_factory=dict)
 
     @property
     def elements(self) -> int:
@@ -412,9 +416,13 @@ def count_io() -> Iterator[IOCounts]:
 
     def _write(array: Any, key: Any, value: Any) -> None:
         given = _nbytes(value)
+        encoded = cache.cost(array, key, given, write=True)
         counts.written_bytes += given
         counts.largest_write = max(counts.largest_write, given)
-        counts.encoded_bytes += cache.cost(array, key, given, write=True)
+        counts.encoded_bytes += encoded
+        name = str(getattr(array, "name", None) or getattr(array, "path", None) or "/")
+        counts.written_by_name[name] = counts.written_by_name.get(name, 0) + given
+        counts.encoded_by_name[name] = counts.encoded_by_name.get(name, 0) + encoded
 
     def h5_wrapper(self: Any, key: Any) -> Any:
         result = h5_get(self, key)

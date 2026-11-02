@@ -40,6 +40,7 @@ from adata.core.csr_build import (
 )
 from adata.core.subset import _sparse_dataset
 from adata.storage import (
+    RowWriter,
     copy_attrs,
     create_dataset,
     dataset_create_kwargs,
@@ -394,17 +395,22 @@ def cast_sparse(
     source_data, source_indices = src.obj["data"], src.obj["indices"]
     nnz = int(source_data.shape[0])
 
-    out_data = _sparse_dataset(group, "data", data_dtype, nnz, source_data)
-    out_indices = _sparse_dataset(group, "indices", index_dtype, nnz, source_indices)
+    # Written whole shards at a time: a block of `chunk` entries into the
+    # source's shard, a whole array under anndata 0.13, rewrote it once a
+    # block (F036).
+    out_data = RowWriter(_sparse_dataset(group, "data", data_dtype, nnz, source_data))
+    out_indices = RowWriter(
+        _sparse_dataset(group, "indices", index_dtype, nnz, source_indices)
+    )
 
     for start in range(0, nnz, chunk):
         end = min(start + chunk, nnz)
-        out_data[start:end] = np.asarray(source_data[start:end]).astype(
-            data_dtype, copy=False
+        out_data.write(np.asarray(source_data[start:end]).astype(data_dtype, copy=False))
+        out_indices.write(
+            np.asarray(source_indices[start:end]).astype(index_dtype, copy=False)
         )
-        out_indices[start:end] = np.asarray(source_indices[start:end]).astype(
-            index_dtype, copy=False
-        )
+    out_data.flush()
+    out_indices.flush()
 
     indptr = np.asarray(src.obj["indptr"][...]).astype(pointer_dtype, copy=False)
     out_indptr = _sparse_dataset(
@@ -527,14 +533,13 @@ def transpose_sparse_streaming(
     # written by slice rather than grown block by block.
     group = _new_sparse_group(src, dst_parent, name, target, src.shape)
     templates = (source_data, source_indices, src.obj["indptr"]) if keep_layout else (None,) * 3
-    out_data = _output_array(
+    out_data = RowWriter(_output_array(
         group, "data", data_dtype, nnz, templates[0], codecs_from, compression=compression
-    )
-    out_indices = _output_array(
+    ))
+    out_indices = RowWriter(_output_array(
         group, "indices", index_dtype, nnz, templates[1], codecs_from,
         compression=compression,
-    )
-    written = 0
+    ))
 
     with scratch_group(dst_parent, f"__{name}_transpose_scratch__") as scratch:
         sorter = BucketSorter(scratch, bounds, src.dtype)
@@ -552,16 +557,13 @@ def transpose_sparse_streaming(
             # The input's minor axis is the output's major one.
             sorter.add(minor, _majors_of(indptr, start, end), values)
 
-        # Pass 3: each bucket in turn, in output order.
+        # Pass 3: each bucket in turn, in output order, written a whole
+        # shard at a time: a bucket at a time rewrote the shard (F036).
         for new_minor, values in _bucket_runs(sorter, chunk):
-            count = new_minor.size
-            out_indices[written : written + count] = new_minor.astype(
-                index_dtype, copy=False
-            )
-            out_data[written : written + count] = values.astype(
-                data_dtype, copy=False
-            )
-            written += count
+            out_indices.write(new_minor.astype(index_dtype, copy=False))
+            out_data.write(values.astype(data_dtype, copy=False))
+        out_indices.flush()
+        out_data.flush()
 
     cast_indptr = out_indptr.astype(pointer_dtype, copy=False)
     dataset = _output_array(
@@ -808,12 +810,14 @@ def _sparsify_rows(
     spec.set_encoding(group, spec.CSR_MATRIX)
     set_shape_attr(group, src.shape)
 
-    out_data = _growable_from(
+    # Appended to whole chunks at a time: Zarr keeps no cache, so a block
+    # appended to part of a chunk decoded and encoded it again.
+    out_data = RowWriter(_growable_from(
         group, "data", data_dtype, template, compression=compression
-    )
-    out_indices = _growable_from(
+    ), grow=True)
+    out_indices = RowWriter(_growable_from(
         group, "indices", index_dtype, template, compression=compression
-    )
+    ), grow=True)
     # Per-row counts in one int64 array: a Python list of int objects took
     # 36 to 40 bytes a row against 8.
     counts = np.zeros(n_rows, dtype=np.int64)
@@ -837,6 +841,8 @@ def _sparsify_rows(
         _append(out_indices, cols.astype(index_dtype, copy=False))
         _append(out_data, block[rows, cols])
 
+    out_indices.flush()
+    out_data.flush()
     indptr = np.concatenate(([0], np.cumsum(counts)))
     kw = {}
     if compression is not None:
@@ -934,15 +940,18 @@ def cast_dense(
         name,
         shape=(n_rows, n_cols),
         dtype=data_dtype,
-        **fit_chunks(kw, (n_rows, n_cols), backend=backend),
+        **fit_chunks(kw, (n_rows, n_cols), backend=backend,
+                     itemsize=np.dtype(data_dtype).itemsize),
     )
     copy_attrs(src.obj.attrs, dst.attrs, target_backend=backend)
 
+    # A whole shard at a time: a block of --chunk rows rewrote the source's
+    # shard once a block, 537 MB encoded for 4.4 MB written (F036).
+    writer = RowWriter(dst)
     for lo in range(0, n_rows, chunk_rows):
         hi = min(lo + chunk_rows, n_rows)
-        dst[lo:hi, :] = np.asarray(src.obj[lo:hi, :]).astype(
-            data_dtype, copy=False
-        )
+        writer.write(np.asarray(src.obj[lo:hi, :]).astype(data_dtype, copy=False))
+    writer.flush()
 
 
 # ---------------------------------------------------------------------------

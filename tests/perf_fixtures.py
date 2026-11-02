@@ -77,12 +77,12 @@ def skewed_matrix(n_obs: int, n_var: int = 64, *, dense_genes: Tuple[int, int] =
     return matrix.tocsc() if layout == "csc" else matrix
 
 
-def write_anndata(obj, path: Path, fmt: str) -> Path:
+def write_anndata(obj, path: Path, fmt: str, compression: Optional[str] = None) -> Path:
     """Write `obj` as anndata would in `fmt`."""
     import anndata as ad
 
     if fmt == "h5ad":
-        obj.write_h5ad(path)
+        obj.write_h5ad(path, compression=compression)
     elif fmt == "zarr2":
         with ad.settings.override(zarr_write_format=2):
             obj.write_zarr(path)
@@ -106,11 +106,15 @@ def matrix_store(
     matrix=None,
     dense_chunks: Optional[Tuple[int, int]] = None,
     tag: str = "m",
+    groups: int = 0,
+    compression: Optional[str] = None,
 ) -> Path:
     """A store holding X of the given shape and layout, and a numeric obs column.
 
     `dense_chunks` rechunks a dense h5ad X, as a store written by another
-    tool might be (anndata writes it contiguous).
+    tool might be (anndata writes it contiguous), with `compression` (an
+    h5ad's). `groups` adds a categorical obs column `grp` of that many
+    labels, interleaved, for `split`.
     """
     import anndata as ad
     import pandas as pd
@@ -119,22 +123,70 @@ def matrix_store(
     if matrix is None:
         matrix = counts_matrix(n_obs, n_var, layout, density=density, dtype=dtype)
     n_obs, n_var = matrix.shape
+    columns = {"col": np.arange(n_obs, dtype="int32")}
+    if groups:
+        columns["grp"] = pd.Categorical([f"s{i % groups}" for i in range(n_obs)])
     obj = ad.AnnData(
         X=matrix,
-        obs=pd.DataFrame(
-            {"col": np.arange(n_obs, dtype="int32")},
-            index=[f"c{i}" for i in range(n_obs)],
-        ),
+        obs=pd.DataFrame(columns, index=[f"c{i}" for i in range(n_obs)]),
         var=pd.DataFrame(index=[f"g{i}" for i in range(n_var)]),
     )
     path = directory / f"{tag}-{layout}-{n_obs}x{n_var}{suffix(fmt)}"
-    write_anndata(obj, path, fmt)
+    write_anndata(obj, path, fmt, compression)
     if dense_chunks is not None:
-        rechunk_dense(path, dense_chunks)
+        rechunk_dense(path, dense_chunks, compression=compression)
     return path
 
 
-def rechunk_dense(path: Path, chunks: Tuple[int, int], key: str = "X") -> None:
+#: anndata 0.13's layout as zarr 3.1 chose it (`auto_shard_zarr_v3`): inner
+#: chunks of about a kilobyte, in shards of the whole array. zarr 3.4
+#: chooses inner chunks of about a megabyte, so a store written today does
+#: not show what the users' stores do (F031, F033, F062).
+ZARR31_DENSE_CHUNK = (16, 8)
+ZARR31_ELEMENT_CHUNK = 245
+
+
+def zarr31_layout(path: Path, key: str = "X") -> Path:
+    """Rewrite `key` of a Zarr v3 store in anndata 0.13's layout under zarr
+    3.1: a dense matrix in inner chunks of (16, 8) and shards of 4,096
+    rows across every column, a sparse one's `data` and `indices` in chunks
+    of 245 elements and a shard of the whole array. Values and attributes
+    are kept."""
+    import zarr
+
+    def whole(n: int, c: int) -> int:
+        return max(c, -(-n // c) * c)
+
+    root = zarr.open_group(str(path), mode="r+", use_consolidated=False)
+    node = root[key]
+    names = [None] if isinstance(node, zarr.Array) else ["data", "indices"]
+    for name in names:
+        parent = root if name is None else node
+        member = key if name is None else name
+        array = parent[member]
+        values, attrs = array[...], dict(array.attrs)
+        if array.ndim == 2:
+            chunks = ZARR31_DENSE_CHUNK
+            shards = (whole(min(array.shape[0], 4096), chunks[0]),
+                      whole(array.shape[1], chunks[1]))
+        else:
+            chunks = (ZARR31_ELEMENT_CHUNK,)
+            shards = (whole(array.shape[0], chunks[0]),)
+        compressors = array.compressors
+        del parent[member]
+        rewritten = parent.create_array(
+            member, shape=values.shape, dtype=values.dtype, chunks=chunks,
+            shards=shards, compressors=compressors,
+        )
+        rewritten[...] = values
+        rewritten.attrs.update(attrs)
+    zarr.consolidate_metadata(str(path))
+    return path
+
+
+def rechunk_dense(
+    path: Path, chunks: Tuple[int, int], key: str = "X", compression: Optional[str] = None
+) -> None:
     """Rewrite a dense h5ad matrix with `chunks`, keeping its attributes."""
     import h5py
 
@@ -142,6 +194,8 @@ def rechunk_dense(path: Path, chunks: Tuple[int, int], key: str = "X") -> None:
         values = handle[key][...]
         attrs = dict(handle[key].attrs)
         del handle[key]
-        dataset = handle.create_dataset(key, data=values, chunks=chunks)
+        dataset = handle.create_dataset(
+            key, data=values, chunks=chunks, compression=compression
+        )
         for name, value in attrs.items():
             dataset.attrs[name] = value

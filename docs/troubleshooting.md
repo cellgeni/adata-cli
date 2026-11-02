@@ -338,8 +338,22 @@ store it wrote; for a store another tool changed, run
 
 Lower `--chunk`: a dense block holds `--chunk` × n_var values, 1,024 rows by
 default. Two things are held whole by design: obs and var columns, and a
-pycisTopic pickle, which cannot be read in part. See
+pycisTopic pickle, which cannot be read in part. Writing an output a whole
+shard or chunk at a time holds at most 64 MiB more (256 MiB across
+`split`'s outputs). See
 [Pipelines and containers](guides/pipelines.md#memory-and---chunk).
+
+### It is slow on a Zarr store anndata 0.13 wrote
+
+anndata 0.13 writes Zarr v3 sharded: a whole array in one shard file,
+inner chunks of a kilobyte (with zarr 3.1) inside. Until 0.17.6, `subset`,
+`split`, `concat`, `recast` and `convert` rewrote a whole shard for every
+block they wrote and read its index again for every block they read,
+hundreds of times slower than the same data as `.h5ad`. They write each
+shard once now, keep each index once read, and keep the source's shards on
+output. To cap what writing a shard whole holds, a shard whose rows come to
+more than 64 MiB is cut along its rows. See
+[Writing outputs](reference/commands.md#writing-outputs).
 
 ### `A loom holds its matrices dense: 54.0 GB to compress and write. It is written, but may take a while`
 

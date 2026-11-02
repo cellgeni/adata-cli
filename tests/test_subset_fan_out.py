@@ -140,9 +140,12 @@ def test_subset_keeps_the_source_compression(tmp_path):
 # the vectorised gather, against scipy
 
 
+@pytest.mark.parametrize("chunk_rows", [1, 5])
 @pytest.mark.parametrize("layout", ["csr", "csc"])
 @pytest.mark.parametrize("seed", range(6))
-def test_sparse_subset_matches_scipy(tmp_path, layout, seed):
+def test_sparse_subset_matches_scipy(tmp_path, layout, seed, chunk_rows):
+    """At --chunk 1 a block holds fewer entries than many majors do, so
+    majors are read in parts across blocks (F032's split majors)."""
     rng = np.random.default_rng(seed)
     n_obs, n_var = 57, 23
     dense = rng.poisson(0.5, (n_obs, n_var)).astype("float32")
@@ -167,7 +170,7 @@ def test_sparse_subset_matches_scipy(tmp_path, layout, seed):
             [(o.create_group(f"t{i}"), ob, va) for i, (ob, va) in enumerate(targets)],
             # Small blocks, so selections straddle block boundaries and some
             # blocks hold nothing a target wants.
-            chunk_major=5,
+            chunk_rows=chunk_rows,
         )
     for i, (ob, va) in enumerate(targets):
         expected = dense
