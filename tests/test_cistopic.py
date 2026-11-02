@@ -181,13 +181,16 @@ def test_dense_is_honoured_for_a_sparse_imputed_matrix(tmp_path, fmt, suffix, mo
     got = _read(out)
     assert isinstance(got.X, np.ndarray), type(got.X)
     assert got.X.dtype == np.float32 and np.array_equal(got.X, truth.obj.mtx.T.toarray())
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted([truth.path.name, out.name])
     if suffix == ".h5ad":
         import h5py
 
         with h5py.File(out, "r") as f:
-            assert list(f) == ["X", "layers", "obs", "obsm", "obsp", "uns", "var", "varm", "varp"] or "X" in f
-            assert not any(k.startswith("__cistopic") for k in f), "scratch left behind"
-    assert not list(tmp_path.glob("*.adata-*")), "scratch left behind"
+            assert not [k for k in f if k.startswith("__cistopic")], "scratch left behind"
+    else:
+        import zarr
+
+        assert not [k for k in zarr.open_group(out, mode="r") if k.startswith("__cistopic")]
 
 
 @pytest.mark.parametrize("fmt", ["csr", "csc", "coo"])
