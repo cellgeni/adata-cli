@@ -138,6 +138,8 @@ class CistopicImport(Converter):
             obj = pickled.load(source)
         except pickled.RefusedPickle as exc:
             raise ValueError(f"{name}: {exc}") from None
+        except Exception as exc:  # numpy's, scipy's or pandas' own refusal, or a file cut short
+            raise ValueError(f"{name} could not be read as a pycisTopic pickle: {exc}") from None
         kind = getattr(obj, "kind", type(obj).__name__)
         warnings: List[str] = []
         if kind == "CistopicObject":

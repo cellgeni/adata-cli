@@ -263,6 +263,19 @@ def test_a_pickle_that_asks_for_code_is_refused_unrun(tmp_path):
     assert not out.exists()
 
 
+def test_a_pickle_numpy_or_pandas_cannot_read_is_named_as_such(tmp_path):
+    """A pickle cut short, or one whose contents pandas itself refuses,
+    failed with the library's bare error; the file is named."""
+    truth = write_cistopic_pickle(tmp_path / "obj.pkl", model=False, projections=False)
+    data = truth.path.read_bytes()
+    truth.path.write_bytes(data[: len(data) // 2])
+    out = tmp_path / "out.h5ad"
+    result = _convert(truth.path, "-o", out)
+    assert result.exit_code == 1
+    assert "obj.pkl could not be read as a pycisTopic pickle" in _out(result)
+    assert not out.exists()
+
+
 def test_a_pickle_that_is_not_pycistopics_needs_from(tmp_path):
     path = tmp_path / "other.pkl"
     path.write_bytes(pickle.dumps({"a": [1, 2, 3]}))
