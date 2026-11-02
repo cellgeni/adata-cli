@@ -29,20 +29,50 @@ adata convert imputed_acc_obj.pkl -o imputed.h5ad --dense
 | `projections["cell"]` and `["region"]`, such as UMAP | `obsm["X_<name>"]`, `varm["X_<name>"]` |
 | `project`, `path_to_fragments`, the topic names, the model's metrics, coherence, parameters and other tables | `uns["pycistopic"]` |
 
-A `CistopicImputedFeatures` becomes X, cells x features, CSR (`--dense`
-keeps it dense), with `feature_names` and `cell_names` as var and obs names.
+A `CistopicImputedFeatures` becomes X, cells x features, CSR, or dense with
+`--dense`, with `feature_names` and `cell_names` as var and obs names. Its
+matrix is dense for imputed accessibility and sparse for gene activity;
+`--dense` makes X dense either way. A matrix that is not numbers is refused.
 
-The pickle is read without running anything from it: an unpickler that
-resolves only the names a pycisTopic object holds (numpy arrays, scipy
-sparse matrices, pandas frames, a few builtins) and refuses any other by
-name, so a pickle naming `os.system` is refused rather than run.
-pycisTopic's own classes are stood in for by plain holders of their
-attributes. A pickle written by pycisTopic's pandas 1.5 reads with pandas 2
-or 3, as CI checks. Columns are written as anndata writes them: Categorical
-as categorical, nullable integers and booleans as nullable, numbers held as
+## Pickles are trusted input
+
+Read a pickle only from a source you would trust with the data itself. It
+is read without running anything from it: an unpickler that resolves only
+the names a pycisTopic object holds (numpy arrays, scipy sparse matrices,
+pandas frames, a few builtins) and refuses any other by name, so a pickle
+naming `os.system` is refused rather than run. pycisTopic's own classes are
+stood in for by plain holders of their attributes.
+
+What those names are given is checked too, before numpy, scipy or pandas
+act on it, and a pickle that fails a check is refused before anything is
+written:
+
+- every numpy dtype and array is one numpy itself would write: a plain
+  dtype (no structured ones), and data that fills the array's shape
+  exactly;
+- pandas' and scipy's classes are created empty and given their state, as
+  every pickle of them does, never constructed from the file's arguments;
+- every sparse matrix has its indices within its shape and an `indptr`
+  that rises from 0 to its number of entries, and every categorical's
+  codes lie within its categories.
+
+Dates and times are not read; pycisTopic's objects hold none.
+
+A pickle written by pycisTopic's pandas 1.5 reads with pandas 2 or 3, as CI
+checks. Columns are written as anndata writes them: Categorical as
+categorical, nullable integers and booleans as nullable, numbers held as
 `object` as numbers, repeated text as categorical. Anything else on the
 object is named in a warning and left out.
 
+## Memory
+
 A pickle cannot be read in part, so it is held in memory whole, as it was
-when pycisTopic saved it; the fragment matrix is turned into CSR on disk by
-the streaming transpose rather than copied in memory.
+when pycisTopic saved it. Reading it checks each value, which takes about
+ten times as long as Python's own `pickle.load`: under a second for a
+200 MB pickle. The
+fragment matrix is turned into CSR on disk by the streaming transpose
+rather than copied in memory. An imputed matrix is written a block of about
+a million entries at a time (a block of cells, or of one cell's features
+when a cell has more), whatever the number of features, and a dense X is
+chunked the same way. A sparse matrix written with `--dense` goes through
+CSR on disk first, then a block of cells at a time.
