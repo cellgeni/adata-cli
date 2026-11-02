@@ -22,8 +22,9 @@ are given is checked too, before numpy, scipy or pandas act on it:
 * once the whole file is read, every sparse matrix's indices must lie within
   its shape and its `indptr` must rise from 0 to its entries, every
   Categorical's and MultiIndex's codes within its categories, and every
-  nullable array's mask must match its values: scipy's and pandas' compiled
-  code indexes with them unchecked.
+  nullable array's mask must match its values, and every frame's blocks
+  must fill its rows and hold each column once: scipy's and pandas'
+  compiled code indexes with them unchecked.
 
 That keeps a crafted file from corrupting memory or reading files through
 what it names, but it is still parsed by numpy, scipy and pandas: a pickle
@@ -131,17 +132,26 @@ ALLOWED: Dict[str, FrozenSet[str]] = {
 #: which nothing pycisTopic holds uses.
 _KINDS = frozenset("biufcOUSMm")
 
-#: Classes a pickle calls with arguments, as the allowlist names them: none
-#: of them parses a dtype from text. Any other is only ever created empty
-#: and given its state.
-_CONSTRUCTED = (
-    *(("builtins", name) for name in ("slice", "set", "frozenset", "complex", "range", "bytes", "bytearray")),
-    ("collections", "OrderedDict"),
-    ("pandas.core.internals.managers", "BlockManager"),
-    ("pandas.core.internals.managers", "SingleBlockManager"),
-    ("pandas._libs.internals", "BlockPlacement"),
-    ("pandas.core.arrays.string_", "StringDtype"),  # (storage, na_value), from pandas 3
-)
+#: Classes a pickle calls with arguments, as the allowlist names them, and
+#: the most arguments it passes: none of them parses a dtype from text, and
+#: pandas' managers get no third, which would turn off their own check of
+#: their blocks. Any other class is only ever created empty and given its
+#: state.
+_CONSTRUCTED = {
+    **{("builtins", name): 3 for name in ("slice", "range", "bytes", "bytearray")},
+    **{("builtins", name): 1 for name in ("set", "frozenset")},
+    ("builtins", "complex"): 2,
+    ("collections", "OrderedDict"): 1,
+    ("pandas.core.internals.managers", "BlockManager"): 2,
+    ("pandas.core.internals.managers", "SingleBlockManager"): 2,
+    ("pandas._libs.internals", "BlockPlacement"): 1,
+    ("pandas.core.arrays.string_", "StringDtype"): 2,  # (storage, na_value), from pandas 3
+}
+
+#: What pandas pickles a DataFrame's or Series' state with (pandas 1.5 to 3):
+#: the state is set as attributes as it stands, so nothing else, such as a
+#: cache of columns, gets in.
+_FRAME_STATE = frozenset({"_mgr", "_data", "_typ", "_metadata", "attrs", "_attrs", "_flags", "name", "_name"})
 
 #: What a scipy matrix pickles: its arrays, its shape, and how it prints.
 #: The flags scipy caches about its indices are dropped, so that scipy works
@@ -251,6 +261,15 @@ def _vector(state: Dict[str, Any], key: str, kinds: str, what: str) -> np.ndarra
     return value
 
 
+def _index(state: Dict[str, Any], key: str, what: str) -> np.ndarray:
+    """An index array as scipy makes them, and its compiled routines take:
+    int32 or int64, in the machine's byte order."""
+    value = _vector(state, key, "i", what)
+    if value.dtype not in (np.dtype(np.int32), np.dtype(np.int64)):
+        raise _refuse(f"gives {what} {key} as {value.dtype}")
+    return value
+
+
 def _within(values: np.ndarray, lo: int, hi: int, what: str) -> None:
     """Every value in [lo, hi)."""
     if values.size and (values.min() < lo or values.max() >= hi):
@@ -271,22 +290,27 @@ def check_sparse(matrix: Any) -> None:
     shape = state.get("_shape")
     if type(shape) is not tuple or len(shape) != 2 or not all(_is_count(n) for n in shape):
         raise _refuse(f"gives {what} the shape {shape!r}")
+    # Plain integers, as scipy makes them: it sizes its arrays from the
+    # shape, and `np.uint8(255) + 1` is 0.
     n_rows, n_cols = (int(n) for n in shape)
+    matrix._shape = (n_rows, n_cols)
     data = _vector(state, "data", "biufc", what)
+    if not data.dtype.isnative:
+        raise _refuse(f"gives {what} data as {data.dtype}")
     if kind == "coo":
         coords = state.get("coords")
         if type(coords) is not tuple or len(coords) != 2:
             raise _refuse(f"gives {what} coords that are not a row and a column")
-        rows = _vector({"row": coords[0]}, "row", "iu", what)
-        cols = _vector({"col": coords[1]}, "col", "iu", what)
+        rows = _index({"row": coords[0]}, "row", what)
+        cols = _index({"col": coords[1]}, "col", what)
         if not len(rows) == len(cols) == len(data):
             raise _refuse(f"gives {what} rows, columns and values of different length")
         _within(rows, 0, n_rows, f"{what}'s rows")
         _within(cols, 0, n_cols, f"{what}'s columns")
         matrix.has_canonical_format = False  # scipy sums duplicates when it needs to
         return
-    indices = _vector(state, "indices", "iu", what)
-    indptr = _vector(state, "indptr", "iu", what)
+    indices = _index(state, "indices", what)
+    indptr = _index(state, "indptr", what)
     n_major, n_minor = (n_rows, n_cols) if kind == "csr" else (n_cols, n_rows)
     if len(indptr) != n_major + 1:
         raise _refuse(f"gives {what} an indptr of {len(indptr):,} for {n_major:,} rows")
@@ -302,13 +326,68 @@ def check_sparse(matrix: Any) -> None:
     _within(indices, 0, n_minor, f"{what}'s indices")
 
 
+def _is_frame_or_series(value: Any) -> bool:
+    import pandas as pd
+
+    return isinstance(value, (pd.DataFrame, pd.Series))
+
+
+def _check_manager(manager: Any, what: str) -> None:
+    """A DataFrame's or Series' blocks fill its axes: each block as many
+    rows as the index, and between them every column once. pandas checks
+    neither when it unpickles a frame, and indexes the blocks by the axes."""
+    import pandas as pd
+    from pandas.api.extensions import ExtensionArray
+    from pandas.core.internals.managers import SingleBlockManager
+
+    axes, blocks = getattr(manager, "axes", None), getattr(manager, "blocks", None)
+    if type(axes) is not list or not all(isinstance(axis, pd.Index) for axis in axes) or type(blocks) is not tuple:
+        raise _refuse(f"gives {what} a manager without its axes and blocks")
+    single = isinstance(manager, SingleBlockManager)
+    if len(axes) != (1 if single else 2) or (single and len(blocks) != 1):
+        raise _refuse(f"gives {what} {len(axes)} axes and {len(blocks)} blocks")
+    n_rows = len(axes[-1])
+    covered = []
+    for block in blocks:
+        values = getattr(block, "values", None)
+        if not (type(values) is np.ndarray or isinstance(values, ExtensionArray)):
+            raise _refuse(f"gives {what} a block of {type(values).__name__}")
+        if single:
+            if block.ndim != 1 or values.shape != (n_rows,):
+                raise _refuse(f"gives {what} {values.shape} values for {n_rows:,} rows")
+            continue
+        locs = block.mgr_locs.as_array
+        fits = values.shape == (len(locs), n_rows) or (
+            values.ndim == 1 and len(locs) == 1 and values.shape[0] == n_rows
+        )
+        if block.ndim != 2 or not fits:
+            raise _refuse(
+                f"gives {what} a block of shape {values.shape} for {len(locs):,} columns "
+                f"of {n_rows:,} rows"
+            )
+        covered.append(np.asarray(locs, dtype=np.int64))
+    if not single:
+        columns = np.sort(np.concatenate(covered)) if covered else np.zeros(0, dtype=np.int64)
+        if not np.array_equal(columns, np.arange(len(axes[0]))):
+            raise _refuse(f"gives {what} blocks that do not hold each of its {len(axes[0]):,} columns once")
+
+
 def _check_pandas(value: Any) -> None:
-    """pandas objects whose integer codes its compiled code indexes with
-    unchecked: within what they index."""
+    """pandas objects whose integer codes and blocks its compiled code
+    indexes with unchecked: within what they index."""
     import pandas as pd
     from pandas.core.arrays.masked import BaseMaskedArray
+    from pandas.core.internals.managers import BlockManager, SingleBlockManager
 
-    if isinstance(value, pd.Categorical):
+    if _is_frame_or_series(value):
+        manager = vars(value).get("_mgr")
+        kind = SingleBlockManager if isinstance(value, pd.Series) else BlockManager
+        if type(manager) is not kind:
+            raise _refuse(f"gives a {type(value).__name__} a {type(manager).__name__} for its data")
+        _check_manager(manager, f"a {type(value).__name__}")
+    elif type(value) in (BlockManager, SingleBlockManager):
+        _check_manager(value, f"a {type(value).__name__}")
+    elif isinstance(value, pd.Categorical):
         what = "a Categorical"
         codes = value._ndarray
         categories = getattr(value.dtype, "categories", None)
@@ -354,7 +433,7 @@ class _Unpickler(pickle._Unpickler):
         self._dtype_args: Dict[int, Tuple[str, bool]] = {}
         self._loaded: Dict[int, Any] = {}
         self._own: Dict[Tuple[str, int], Callable[..., Any]] = {}
-        self._classes: Optional[Tuple[type, ...]] = None
+        self._classes: Optional[Dict[int, Tuple[type, int]]] = None
 
     def load(self) -> Any:
         value = super().load()
@@ -390,15 +469,17 @@ class _Unpickler(pickle._Unpickler):
         own = self._wrappers().get(_key(value))
         return own if own is not None else value
 
-    def _constructed(self) -> Tuple[type, ...]:
+    def _constructed(self) -> Dict[int, Tuple[type, int]]:
+        """The classes called with arguments, by identity: each and the most
+        arguments it is given."""
         if self._classes is None:
-            found = []
-            for module, name in _CONSTRUCTED:
+            self._classes = {}
+            for (module, name), most in _CONSTRUCTED.items():
                 try:
-                    found.append(_resolve(module, name))
+                    found = _resolve(module, name)
                 except RefusedGlobal:  # pragma: no cover - pandas comes with the extra
-                    pass
-            self._classes = tuple(found)
+                    continue
+                self._classes[id(found)] = (found, most)
         return self._classes
 
     def _wrappers(self) -> Dict[Tuple[str, int], Callable[..., Any]]:
@@ -456,7 +537,10 @@ class _Unpickler(pickle._Unpickler):
         if isinstance(func, type):
             if not args:
                 return self._created(func())
-            if any(func is c for c in self._constructed()):
+            found, most = self._constructed().get(id(func), (None, 0))
+            if found is func:
+                if len(args) > most:
+                    raise _refuse(f"constructs {_name(func)} from {len(args)} arguments")
                 if func in (bytes, bytearray) and any(not isinstance(a, (str, bytes)) for a in args):
                     raise _refuse(f"calls {func.__name__} with {', '.join(type(a).__name__ for a in args)}")
                 return self._created(func(*args), fresh=False)
@@ -523,6 +607,10 @@ class _Unpickler(pickle._Unpickler):
             else:
                 inst.__dict__.update(state)
         elif type(inst).__module__.startswith("pandas"):
+            if _is_frame_or_series(inst) and type(state) is dict:
+                unknown = sorted(map(str, set(state) - _FRAME_STATE))
+                if unknown:
+                    raise _refuse(f"gives a {type(inst).__name__} {', '.join(unknown)}")
             stack.append(state)
             super().load_build()
         else:

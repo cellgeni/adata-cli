@@ -431,15 +431,17 @@ def _write_dense_from_sparse(root: Any, matrix: Any, detail: _Import) -> None:
         csr = scratch["csr"]
         indptr = np.asarray(csr["indptr"][...], dtype=np.int64)
         target = _dense_target(root, detail, dtype)
+        read = None  # the cells whose entries are held: one read for all their runs of features
         for cells, features in _blocks(detail.n_obs, detail.n_var):
-            block = np.zeros((cells.stop - cells.start, features.stop - features.start), dtype=dtype)
-            start, end = int(indptr[cells.start]), int(indptr[cells.stop])
-            if end > start:
+            if read != cells:
+                read = cells
+                start, end = int(indptr[cells.start]), int(indptr[cells.stop])
                 cols = np.asarray(csr["indices"][start:end], dtype=np.int64)
                 values = np.asarray(csr["data"][start:end])
-                rows = np.repeat(np.arange(len(block)), np.diff(indptr[cells.start : cells.stop + 1]))
-                keep = (cols >= features.start) & (cols < features.stop)
-                np.add.at(block, (rows[keep], cols[keep] - features.start), values[keep])
+                rows = np.repeat(np.arange(cells.stop - cells.start), np.diff(indptr[cells.start : cells.stop + 1]))
+            block = np.zeros((cells.stop - cells.start, features.stop - features.start), dtype=dtype)
+            keep = (cols >= features.start) & (cols < features.stop)
+            np.add.at(block, (rows[keep], cols[keep] - features.start), values[keep])
             target[cells, features] = block
 
 

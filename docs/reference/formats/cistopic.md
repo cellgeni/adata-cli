@@ -53,8 +53,9 @@ written:
 - pandas' and scipy's classes are created empty and given their state, as
   every pickle of them does, never constructed from the file's arguments;
 - every sparse matrix has its indices within its shape and an `indptr`
-  that rises from 0 to its number of entries, and every categorical's
-  codes lie within its categories.
+  that rises from 0 to its number of entries, every categorical's codes
+  lie within its categories, and every table's columns hold as many rows
+  as its index.
 
 Dates and times are not read; pycisTopic's objects hold none.
 

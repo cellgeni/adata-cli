@@ -46,6 +46,22 @@ class _Crafted:
         return self.func, self.args, self.state
 
 
+class _New:
+    """Pickles as `cls.__new__(cls)` (NEWOBJ), then `state` set on it: how
+    protocol 2 and later write a class's instance. `__class__` is what the
+    pickler checks NEWOBJ's class against."""
+
+    def __init__(self, cls, state):
+        self.cls, self.state = cls, state
+
+    @property
+    def __class__(self):
+        return self.cls
+
+    def __reduce_ex__(self, protocol):
+        return copyreg.__newobj__, (self.cls,), self.state
+
+
 def _array(dtype, shape, raw):
     """An ndarray as numpy pickles one, with whatever state is given."""
     return _Crafted(_reconstruct, (np.ndarray, (0,), b"b"), (1, shape, dtype, False, raw))
@@ -311,6 +327,105 @@ def test_a_categorical_whose_codes_pass_its_categories_is_refused(tmp_path):
     func, args = cat.__reduce__()[:2]
     crafted = _Crafted(func, (args[0], args[1], (cat.dtype, np.array([0, 10**8], dtype=np.int64))))
     _refused(_load_isolated(_write(tmp_path / "cat.pkl", crafted)), "codes")
+
+
+def _frame_of(manager):
+    """A DataFrame around `manager`, as pandas 1.5 pickles one: created
+    empty, then given its manager in its state."""
+    state = {"_mgr": manager, "_typ": "dataframe", "_metadata": [], "attrs": {},
+             "_flags": {"allows_duplicate_labels": True}}
+    return _Crafted(copyreg._reconstructor, (pd.DataFrame, object, None), state)
+
+
+def _manager_state(columns, rows, blocks):
+    """BlockManager's state as pandas 1.5 (pycisTopic's) pickles it."""
+    return ([], [], [], {"0.14.1": {"axes": [columns, rows], "blocks": [
+        {"values": values, "mgr_locs": locs} for values, locs in blocks
+    ]}})
+
+
+def _short_frames():
+    """Frames that claim 4,000 rows but whose one block holds a single
+    value, by the two routes pandas' pickles build a frame's manager."""
+    from pandas._libs.internals import _unpickle_block
+    from pandas.core.internals.managers import BlockManager
+
+    with pd.option_context("future.infer_string", False):
+        rows = pd.Index([f"c{k}" for k in range(4000)])
+        columns = pd.Index(["score"])
+    note = np.empty((1, 1), dtype=object)
+    note[0, 0] = "hi"
+    old = lambda values: _New(BlockManager, _manager_state(columns, rows, [(values, slice(0, 1, 1))]))
+    unchecked = _Crafted(BlockManager, ((_Crafted(_unpickle_block, (np.array([[1.5]]), slice(0, 1, 1), 2)),),
+                                        [columns, rows], False))
+    return {"float": _frame_of(old(np.array([[7.25]]))), "object": _frame_of(old(note)),
+            "unverified": _frame_of(unchecked)}
+
+
+@pytest.mark.parametrize("route", ["float", "object", "unverified"])
+def test_a_frame_whose_blocks_do_not_fill_its_rows_is_refused(tmp_path, route):
+    """Review of #101: pandas does not check, when it unpickles a frame,
+    that its blocks hold as many rows as its index; a reindex then read
+    past the block: heap words written into the output for a float
+    column, a crash for an object one. Both of pandas' routes to a
+    manager (its pandas 1.5 state, and its constructor told not to
+    verify) are checked."""
+    path = _write(tmp_path / "short.pkl", _short_frames()[route])
+    _refused(_load_isolated(path), "rows" if route != "unverified" else "BlockManager")
+
+
+def test_a_frame_whose_blocks_do_not_cover_its_columns_once_is_refused(tmp_path):
+    """Two blocks for column x and none for y: pandas' constructor counts
+    the columns, not which ones."""
+    from pandas._libs.internals import _unpickle_block
+    from pandas.core.internals.managers import BlockManager
+
+    with pd.option_context("future.infer_string", False):
+        rows, columns = pd.Index(["a", "b"]), pd.Index(["x", "y"])
+    blocks = tuple(_Crafted(_unpickle_block, (np.full((1, 2), v), slice(0, 1, 1), 2)) for v in (0.0, 1.0))
+    manager = _Crafted(BlockManager, (blocks, [columns, rows]))
+    _refused(_load_isolated(_write(tmp_path / "twice.pkl", _frame_of(manager))), "columns")
+
+
+def test_a_frame_holds_only_what_pandas_pickles_a_frame_with(tmp_path):
+    """A frame's state is set as attributes as it stands: one naming
+    pandas' cache of columns could hand back any Series for a column."""
+    with pd.option_context("future.infer_string", False):
+        frame = pd.DataFrame({"x": [1.0, 2.0]})
+        state = {**frame.__getstate__(), "_item_cache": {"x": pd.Series([1.0])}}
+    crafted = _Crafted(copyreg._reconstructor, (pd.DataFrame, object, None), state)
+    _refused(_load_isolated(_write(tmp_path / "cache.pkl", crafted)), "_item_cache")
+
+
+def test_a_sparse_shape_given_as_numpy_scalars_is_read_as_plain_numbers(tmp_path):
+    """Review of #101: a shape of `np.uint8(255)` passed the bounds check,
+    and scipy then sized its `indptr` as 255 + 1 in uint8, which is 0, and
+    wrote past it converting to CSR. The shape is plain integers once
+    read."""
+    import warnings
+
+    m = sp.coo_matrix(np.zeros((255, 3), dtype=np.float32))
+    m.data = np.array([1.0, 2.0], dtype=np.float32)
+    m.coords = (np.array([0, 254], dtype=np.int32), np.array([0, 2], dtype=np.int32))
+    m._shape = (np.uint8(255), 3)
+    loaded = pickled.load(_write(tmp_path / "u8.pkl", m))
+    assert all(type(n) is int for n in loaded._shape)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        csr = loaded.tocsr()
+    assert len(csr.indptr) == 256 and csr[254, 2] == 2.0
+
+
+@pytest.mark.parametrize("key, value", [
+    ("indices", np.array([0, 2, 1], dtype=np.uint8)),
+    ("indptr", np.array([0, 2, 3], dtype=">i4")),
+    ("data", np.array([1, 2, 3], dtype=">i4")),
+])
+def test_sparse_arrays_must_be_of_the_dtypes_scipy_makes(tmp_path, key, value):
+    """scipy's compiled routines take int32 or int64 indices in the
+    machine's byte order, as scipy builds them; anything else is refused
+    rather than handed over."""
+    _refused(_load_isolated(_write(tmp_path / "dtype.pkl", _sparse_with("csr", **{key: value}), protocol=5)), key)
 
 
 def test_a_nullable_array_whose_mask_does_not_match_is_refused(tmp_path):
