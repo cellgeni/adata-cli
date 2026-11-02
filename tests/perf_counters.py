@@ -34,8 +34,7 @@ Bytes come in three kinds, because each catches a different defect:
 
 Decoded and encoded bytes are a model worked out from the selection, the
 chunk grid and the codecs, not a measurement of the library, which is what
-keeps them deterministic. It follows HDF5's per-dataset chunk cache, and
-counts an HDF5 chunk with no filter as read or written in place; see
+keeps them deterministic. It follows HDF5's per-dataset chunk cache; see
 `_ChunkCache`.
 
 Memory has two instruments. `count_allocations` (tracemalloc) is exact and
@@ -275,14 +274,16 @@ _MODELLED_CHUNKS = 1 << 16
 class _ChunkCache:
     """Which chunks a backend still holds decoded, dataset by dataset.
 
-    HDF5 keeps a chunk cache per dataset (1 MiB by default, none at all for a
-    chunk bigger than that), and serves a read or a write from it without
-    touching the file: appending a block at a time to a growing dataset
-    encodes each chunk once, when it leaves the cache, not once a block.
-    Modelled as least recently used, at the dataset's own cache size. A
-    chunk with no filter has nothing to decode, and HDF5 reads or writes
-    just the part asked for. Zarr caches nothing, so every chunk a selection
-    touches is decoded and every shard it writes is rewritten.
+    HDF5 keeps a chunk cache per dataset (1 MiB in the stores `open_store`
+    opens, 8 MiB by default since HDF5 2.0, none for a chunk bigger than the
+    cache) and serves a read or a write from it without touching the file:
+    appending a block at a time to a growing dataset encodes each chunk
+    once, when it leaves the cache, not once a block. Modelled as least
+    recently used, at the dataset's own cache size. A chunk is read into the
+    cache whole, filtered or not; only an unfiltered chunk too big for the
+    cache is read and written in place, just the part asked for. Zarr caches
+    nothing, so every chunk a selection touches is decoded and every shard
+    it writes is rewritten.
     """
 
     def __init__(self) -> None:
@@ -290,7 +291,7 @@ class _ChunkCache:
 
     @staticmethod
     def _unfiltered_hdf5(array: Any) -> bool:
-        """An HDF5 chunk with no filter is read and written in place, in part."""
+        """Whether an HDF5 dataset's chunks have no filter."""
         plist = getattr(getattr(array, "id", None), "get_create_plist", None)
         if plist is None:
             return False  # Zarr
@@ -317,13 +318,13 @@ class _ChunkCache:
             shape = tuple(int(n) for n in array.shape)
         except Exception:  # pragma: no cover - an object without a layout
             return returned
-        if not grid or not shape or self._unfiltered_hdf5(array):
-            # Contiguous, a scalar, or chunks with no codec: what was asked
-            # for is what moved.
-            return returned
+        if not grid or not shape:
+            return returned  # contiguous, or a scalar: what was asked is what moved
         unit = _unit_bytes(array, grid)
-        touched = chunks_touched(key, shape, grid)
         capacity = self._capacity(array, unit)
+        if capacity == 0 and self._unfiltered_hdf5(array):
+            return returned  # bypasses the cache, in place
+        touched = chunks_touched(key, shape, grid)
         if capacity == 0 or touched > _MODELLED_CHUNKS:
             return touched * unit
 
@@ -348,7 +349,7 @@ class _ChunkCache:
 def count_io() -> Iterator[IOCounts]:
     """Count backend reads and writes for the duration of the block.
 
-    Patches these seams, verified against h5py 3.15.1 and zarr 3.1.5:
+    Patches these seams, verified against h5py 3.16.0 and zarr 3.1.5:
 
     ======================================  =================================
     ``h5py.Dataset.__getitem__``            HDF5 reads

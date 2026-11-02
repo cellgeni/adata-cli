@@ -273,15 +273,43 @@ def test_a_dense_source_whose_nonzeros_overflow_the_offsets_is_refused(
     dtype's range the offsets wrapped and the command still succeeded. nnz is
     only known by reading, so this one is refused while writing; staging then
     removes the half-written output."""
+    from tests.perf_counters import count_io
+
     source_path = _put(new_store, np.ones((300, 200), dtype="float32"))
     out = _output(source_path)
 
-    with pytest.raises(ValueError, match="cannot hold this matrix's offsets"):
+    with count_io() as io, pytest.raises(ValueError, match="cannot hold this matrix's offsets"):
         recast_store(source_path, ["X"], out, QUIET, layout=layout,
                      indices_dtype="int16", chunk_rows=16)
     assert not out.exists()
+    # As soon as the count passes the range, CSC's scratch included: not
+    # after writing all of it.
+    assert io.read_bytes < 300 * 200 * 4, f"read {io.read_bytes:,} bytes first"
     leftovers = [p.name for p in source_path.parent.iterdir() if "adata-" in p.name]
     assert leftovers == [], leftovers
+
+
+@pytest.mark.parametrize("layout,refused", [("csr", False), ("csc", True)])
+def test_the_coordinates_checked_are_those_of_the_output_minor_axis(
+    new_store, int16_indices, layout, refused
+):
+    """With F013's check always running, it must check the right thing: CSR
+    indices are column coordinates and CSC ones row coordinates. Checking
+    the larger dimension refused int16 indices for a CSR matrix with more
+    rows than int16 holds but two columns."""
+    rows = np.arange(0, 40_000, 800)
+    matrix = sparse.csr_matrix(
+        (np.ones(rows.size), (rows, np.zeros(rows.size, dtype=int))), shape=(40_000, 2)
+    )
+    source_path = _put(new_store, matrix)
+
+    if refused:
+        with pytest.raises(ValueError, match="cannot hold this matrix's coordinates"):
+            _recast(source_path, layout=layout, indices_dtype="int16")
+        assert not _output(source_path).exists()
+        return
+    out = _recast(source_path, layout=layout, indices_dtype="int16")
+    _same(_read(out).X, matrix)
 
 
 def test_offsets_that_fit_are_written_in_the_narrow_dtype(new_store, int16_indices):
@@ -461,38 +489,63 @@ def test_a_sparse_matrix_from_a_dense_one_has_element_sized_chunks(new_store, la
 
 
 @pytest.mark.parametrize(
-    "layout,source,scratch",
-    [("csc", "csr", True), ("dense", "csc", True), ("dense", "csr", False), ("csr", "csr", False)],
+    "layout,source,streamed,in_memory",
+    [
+        # bucket entries: an int64 major, an int64 minor and a float64 value
+        ("csc", "csr", 24, 0),
+        # and the CSR the CSC goes through first, with its indptr
+        ("dense", "csc", 24 + 16, 16),
+        ("dense", "csr", 0, 0),
+        ("csr", "csr", 0, 0),
+    ],
 )
-def test_the_free_space_estimate_counts_the_transpose_scratch(
-    tmp_path, monkeypatch, layout, source, scratch
+def test_the_free_space_estimate_counts_the_scratch(
+    tmp_path, layout, source, streamed, in_memory
 ):
     """A streaming transpose writes every entry to scratch beside the output,
-    as an int64 major, an int64 minor and its value, and a CSC matrix being
-    densified goes through a CSR first. The estimate counted only the output,
-    so a disk with room for that ran out part way through the scratch."""
+    and a CSC matrix being densified goes through a CSR first, in memory or
+    not. The estimate counted only the output, so a disk with room for that
+    could fill part way through the scratch."""
     import adata.commands.recast as command
+    from adata.storage import open_store
 
     matrix = _matrix(n_obs=50, n_var=40)
-    value = _as(matrix, source)
     path = tmp_path / "in.h5ad"
-    ad.AnnData(X=value).write_h5ad(path)
+    ad.AnnData(X=_as(matrix, source)).write_h5ad(path)
+
+    with open_store(path, "r") as store:
+        plan = core.plan_conversion(store.root["X"], "X", layout=layout, force=True)
+        rows = 8 * (matrix.shape[0] + 1) if layout == "dense" and source == "csc" else 0
+        for flag, per_entry in ((False, streamed), (True, in_memory)):
+            expected = matrix.nnz * per_entry + (rows if per_entry else 0)
+            assert command._scratch(plan, flag) == expected, (flag, per_entry)
+
+
+def test_dense_to_csc_checks_free_space_again_once_it_knows_its_nonzeros(
+    tmp_path, monkeypatch
+):
+    """Dense to CSC goes through a CSR in scratch and the transpose's buckets,
+    sized by nnz, which is known only once the matrix has been read. The
+    up-front estimate cannot count them, so `sparsify` asks again before
+    transposing, and a disk too small for them is refused there."""
+    import adata.commands.recast as command
+
+    dense = _matrix(n_obs=60, n_var=30).toarray()
+    path = tmp_path / "in.h5ad"
+    ad.AnnData(X=dense).write_h5ad(path)
     asked = []
-    monkeypatch.setattr(
-        command, "check_free_space",
-        lambda output, needed, check=True: asked.append(needed()),
-    )
 
-    def estimate(in_memory: bool) -> float:
-        asked.clear()
-        out = tmp_path / f"o{len(asked)}{in_memory}{layout}.h5ad"
-        recast_store(path, ["X"], out, QUIET, layout=layout, force=True,
-                     dtype="float32", in_memory=in_memory)
-        return asked[0]
+    def check(output, needed, check=True):
+        asked.append(needed() if callable(needed) else needed)
+        if len(asked) == 2:
+            raise OSError("Not enough free space")
 
-    extra = estimate(False) - estimate(True)
-    if not scratch:
-        assert extra == 0
-        return
-    per_entry = 16 + 8 + (8 + 8 if layout == "dense" else 0)  # float64 source
-    assert extra == pytest.approx(matrix.nnz * per_entry), extra
+    monkeypatch.setattr(command, "check_free_space", check)
+    out = tmp_path / "out.h5ad"
+    with pytest.raises(OSError, match="Not enough free space"):
+        recast_store(path, ["X"], out, QUIET, layout="csc", chunk_rows=7)
+
+    nnz = int(np.count_nonzero(dense))
+    assert asked[1] == nnz * (16 + 8 + 8 + 8), asked
+    assert not out.exists()
+    assert [p.name for p in tmp_path.iterdir() if "adata-" in p.name] == []

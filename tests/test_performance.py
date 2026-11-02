@@ -212,14 +212,16 @@ def test_the_byte_counters_see_whole_chunks_decoded_and_rewritten(tmp_path):
     with h5py.File(tmp_path / "c.h5", "r") as handle, count_io() as io:
         handle["gz"][5:6]  # one row: the whole compressed chunk is decoded
         handle["gz"][6:7]  # the same chunk again, from HDF5's chunk cache
-        handle["raw"][5:6]  # no filter: HDF5 reads just the row
-    assert (io.read_bytes, io.largest_read) == (3 * row, row)
-    assert io.decoded_bytes == chunk + row
+        handle["raw"][5:6]  # no filter, but the chunk fits: read into the cache whole
+        handle["raw"][6:7]
+    assert (io.read_bytes, io.largest_read) == (4 * row, row)
+    assert io.decoded_bytes == 2 * chunk
 
     with h5py.File(tmp_path / "c.h5", "r", rdcc_nbytes=0) as handle, count_io() as io:
         handle["gz"][5:6]
         handle["gz"][6:7]
-    assert io.decoded_bytes == 2 * chunk, "with no cache, each read decodes the chunk"
+        handle["raw"][5:6]  # no cache and no filter: just the row, in place
+    assert io.decoded_bytes == 2 * chunk + row, "with no cache, each read decodes the chunk"
 
     array = zarr.create_array(
         str(tmp_path / "s.zarr"), shape=(64, 64), chunks=(8, 8), shards=(32, 64),
@@ -236,7 +238,7 @@ def test_the_byte_counters_see_whole_chunks_decoded_and_rewritten(tmp_path):
 
 
 def test_h5py_calls_keep_no_memory_once_they_return(tmp_path):
-    """h5py 3.15 kept 100 to 160 bytes of every dataset read, write and
+    """h5py 3.15 kept 32 to 160 bytes of every dataset read, write and
     `.shape` for good: 48 MB of resident memory after 300,000 writes. Every
     streaming loop makes calls in proportion to its blocks, so memory grew
     with the input, and in the transpose, whose bucket writes grow with the
@@ -273,6 +275,23 @@ def test_h5py_calls_keep_no_memory_once_they_return(tmp_path):
         f"h5py {h5py.__version__} kept {kept / calls:.0f} bytes a call "
         f"({kept / 1e6:.1f} MB over {calls:,} calls of a read, a write and .shape)"
     )
+
+
+@pytest.mark.parametrize("mode", ["w", "r"])
+def test_stores_give_each_hdf5_dataset_a_one_mebibyte_chunk_cache(tmp_path, mode):
+    """HDF5 2.0, which h5py 3.16 brings, raised the chunk cache from 1 MiB to
+    8 MiB a dataset. A writer fills one for each dataset it grows, and
+    `split` holds many outputs open, so memory followed the outputs eight
+    times faster: eight groups of a 200,000 x 2,000 CSR took 530 MB of
+    resident memory against 429 MB on h5py 3.15. Stores keep 1 MiB."""
+    from adata.storage import HDF5_CHUNK_CACHE, open_store
+
+    path = tmp_path / "cache.h5ad"
+    with open_store(path, "w") as store:
+        store.root.create_dataset("x", shape=(10,), dtype="f4", chunks=(5,))
+    with open_store(path, mode if mode == "r" else "a") as store:
+        cache = store.root["x"].id.get_access_plist().get_chunk_cache()[1]
+    assert cache == HDF5_CHUNK_CACHE == 1 << 20
 
 
 @pytest.mark.slow
@@ -2072,14 +2091,14 @@ def test_the_transpose_streams_unless_asked_not_to(tmp_path, monkeypatch):
 # rows adds a few hundredths of it; one holding the matrix adds all of it.
 
 #: Rows in a dense block, and entries in a sparse read, while the grid runs.
-GRID_ROWS, GRID_ENTRIES = 32, 16_384
+GRID_ROWS, GRID_ENTRIES = 32, 32_768
 
 #: Sizes along the grown axis, and the other axis's fixed size. Small enough
-#: that a transpose needs no more than a few dozen buckets (see
-#: `test_a_transpose_buckets_hold_about_a_chunk_on_a_skewed_matrix`).
+#: that a transpose needs no more than a few dozen buckets, each of which
+#: costs some memory of its own; at this chunk, a few hundredths of the input.
 GRID_SIZES = {"n_obs": (1024, 8192), "n_var": (128, 1024)}
 GRID_FIXED = {"n_obs": 1024, "n_var": 4096}
-GRID_DENSITY = 0.05
+GRID_DENSITY = 0.1
 
 
 def _grid_shape(axis: str, n: int) -> tuple:
@@ -2116,17 +2135,11 @@ GRID_COMMANDS = {
 
 #: Known gaps, each owned by another batch, and whether the fix must flip it.
 _F032 = "F032: sparse subset blocks are 4,096 majors, whatever --chunk (B6b, #97)"
-_CONCAT = (
-    "concat keeps every obs name by design, and its row pointers in Python "
-    "lists until B3b (#116, F132); together a third of this fixture's input"
-)
 GRID_GAPS = {
     ("subset", "csr", "n_obs"): (_F032, True),
     ("subset", "csr", "n_var"): (_F032, True),
     ("subset", "csc", "n_obs"): (_F032, True),
     ("subset", "csc", "n_var"): (_F032, True),
-    ("concat", "csr", "n_obs"): (_CONCAT, False),
-    ("concat", "csc", "n_obs"): (_CONCAT, False),
 }
 
 
@@ -2163,9 +2176,14 @@ def test_peak_memory_is_a_small_share_of_the_input(tmp_path, command, layout, ax
                               layout=layout, matrix=matrix(n))
         if command == "concat":
             shutil.copy(source, source.with_name(f"b{source.name}"))
-        with count_allocations() as peak:
-            run(source, tmp_path / f"g{n}" / "out.h5ad")
-        return peak[0]
+        peaks = []
+        # Twice, keeping the smaller, so a one-time growth of the process's
+        # own structures cannot land in one measurement and decide it.
+        for attempt in range(2):
+            with count_allocations() as peak:
+                run(source, tmp_path / f"g{n}" / f"out{attempt}.h5ad")
+            peaks.append(peak[0])
+        return min(peaks)
 
     copies = 2 if command == "concat" else 1
     assert_memory_is_a_fraction_of_the_input(
@@ -2223,7 +2241,9 @@ def test_a_dense_cast_check_reads_a_block_of_rows_not_the_matrix(tmp_path, fmt):
         with count_io() as io:
             _recast(source, out, dtype="float64", chunk_rows=256)
         assert io.read_bytes >= n * 16 * 4, "the matrix was read"
-        return _largest_matrix_read(io)
+        largest = _largest_matrix_read(io)
+        assert largest > 0, "no read of X was seen: the names no longer match"
+        return largest
 
     assert_independent_of(
         measure, what=f"the largest read of recast --dtype ({fmt})", axis="n_obs",
@@ -2254,7 +2274,7 @@ def test_csc_densify_and_sparsify_read_blocks_set_by_the_chunk(tmp_path, fmt, la
             peaks.append(peak[0])
             # No read larger than a chunk of entries or a block of rows.
             bound = GRID_ENTRIES * 8 + rows * 64 * 8
-            assert io.read_bytes > 0 and _largest_matrix_read(io) <= bound, io
+            assert 0 < _largest_matrix_read(io) <= bound, io
         return min(peaks)
 
     # Per row added, so the fixed cost of the store cancels. A block of
@@ -2292,11 +2312,39 @@ def test_a_transpose_reads_about_a_chunk_on_a_skewed_matrix(tmp_path, fmt, sourc
             _recast(store, tmp_path / f"o{n}{store.suffix}", layout=target, chunk=chunk)
         assert io.read_bytes >= n * 8 * 4, "the dense genes were read"
         largest = _largest_matrix_read(io, elements=True)
-        assert largest <= bound, (
+        assert 0 < largest <= bound, (
             f"a skewed {source} transpose of {n:,} cells ({fmt}) read "
             f"{largest:,} entries at once, against {bound:,} for a chunk of "
             f"{chunk:,}: a run of genes in every cell is being read whole"
         )
+
+
+def test_a_compressed_dense_matrix_to_csc_does_not_rewrite_its_scratch(tmp_path):
+    """F030's route through a CSR in scratch gave that scratch the source's
+    gzip, and scratch has no chunk cache, so every block's append decoded
+    and re-encoded a whole 65,536-element chunk: 2,471 MB encoded for 14.5 MB
+    written, 30 to 100 times slower at --chunk 16. The scratch is plain now,
+    and the output still takes the source's codecs."""
+    import h5py
+
+    from tests.perf_fixtures import counts_matrix
+
+    dense = counts_matrix(20_000, 64, "dense", density=0.1)
+    source = tmp_path / "gz.h5ad"
+    ad.AnnData(X=dense).write_h5ad(source, compression="gzip")
+    out = tmp_path / "csc.h5ad"
+
+    with count_io() as io:
+        _recast(source, out, layout="csc", chunk_rows=16, chunk=GRID_ENTRIES)
+
+    assert io.written_bytes > 0
+    assert io.encoded_bytes <= 4 * io.written_bytes, (
+        f"{io.encoded_bytes / 1e6:.0f} MB of chunks encoded for "
+        f"{io.written_bytes / 1e6:.1f} MB written: something is rewritten per block"
+    )
+    with h5py.File(out, "r") as handle:
+        for name in ("data", "indices"):
+            assert handle[f"X/{name}"].compression == "gzip", name
 
 
 @pytest.mark.slow

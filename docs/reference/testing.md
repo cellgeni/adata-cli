@@ -153,11 +153,13 @@ shard rewritten on every block, so `IOCounts` also counts bytes:
 
 Decoded and encoded bytes are a model worked out from the selection, the chunk
 grid and the codecs, not a measurement of the library, which is what keeps them
-deterministic. It follows HDF5's chunk cache (per dataset, 1 MiB unless the
-file says otherwise, least recently used), so appending a block at a time to a
-growing compressed dataset costs each chunk once. A chunk with no filter costs
-only the bytes asked for: HDF5 reads and writes it in place. Zarr caches
-nothing, and writing part of a shard rewrites the shard.
+deterministic. It follows HDF5's chunk cache (per dataset, least recently used,
+at the dataset's own size: 1 MiB in the stores `open_store` opens, 8 MiB by
+default since HDF5 2.0), so appending a block at a time to a growing dataset
+costs each chunk once. A chunk is read into the cache whole, filtered or not;
+only an unfiltered chunk too big for the cache is read and written in place,
+just the bytes asked for. Zarr caches nothing, and writing part of a shard
+rewrites the shard.
 `test_the_byte_counters_see_whole_chunks_decoded_and_rewritten` checks the
 model against numbers worked out by hand.
 
@@ -264,10 +266,8 @@ from the whole matrix. Peak memory added per byte of input added can: a block
 of 32 rows of a matrix thousands of rows tall adds a few hundredths, and a path
 holding the matrix adds a whole byte and more for each copy.
 
-The known gaps are marked `xfail`, each with its owner: sparse `subset`
-(F032, strict, so the fix has to flip it) and `concat` of a sparse matrix grown
-in n_obs (not strict: concat keeps obs names by design, and B3b's row pointers
-change the figure).
+The known gap is marked `xfail` with its owner: sparse `subset` (F032, B6b),
+strict, so the fix has to flip it.
 
 The recast guards beside it pin each block in bytes, on every format: the cast
 check reads `--chunk` rows of a dense matrix, CSC densify and sparsify read
@@ -347,10 +347,12 @@ The `slow` marker is on the guards that build a 65,536-row store or run `peak_rs
 they still gate merges, and `-m "not slow"` skips them locally. `perf` is on the
 tracing guards.
 
-h5py 3.15 kept 100 to 160 bytes of every dataset read, write and `.shape` for good, so
+h5py 3.15 kept 32 to 160 bytes of every dataset read, write and `.shape` for good, so
 any long streaming loop grew with its block count;
 `test_h5py_calls_keep_no_memory_once_they_return` keeps the floor at 3.16.0, which
-does not.
+does not. 3.16.0 brings HDF5 2.0, whose chunk cache is 8 MiB a dataset rather than 1;
+`open_store` keeps 1 MiB, which
+`test_stores_give_each_hdf5_dataset_a_one_mebibyte_chunk_cache` checks.
 
 ### Reading a failure
 

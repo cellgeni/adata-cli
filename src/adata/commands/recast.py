@@ -145,6 +145,11 @@ def recast_store(
                     src, dst, plans,
                     chunk=chunk, chunk_rows=chunk_rows, in_memory=in_memory,
                     console=console,
+                    # Dense to CSC learns its nnz only once it has read the
+                    # matrix, so it checks again then, for its scratch.
+                    room=lambda nbytes: check_free_space(
+                        dst_path, nbytes, check=space_check
+                    ),
                 )
                 ensure_anndata_skeleton(dst)
 
@@ -183,24 +188,25 @@ def _extra(plan: Plan) -> float:
 
 
 def _scratch(plan: Plan, in_memory: bool) -> float:
-    """Bytes of scratch a streaming transpose writes beside the output.
+    """Bytes of scratch a conversion writes beside the output.
 
-    Every entry passes through a bucket as an int64 major, an int64 minor
-    and its value; a CSC matrix being densified is also sorted into a CSR
-    first. A dense matrix sparsified to CSC goes through the same, but its
-    nnz is not known until it is read, so it is not counted.
+    A streaming transpose passes every entry through a bucket as an int64
+    major, an int64 minor and its value (`--in-memory` does not). A CSC
+    matrix being densified is also sorted into a CSR first, either way. A
+    dense matrix sparsified to CSC goes through the same, but its nnz is not
+    known until it is read, so `sparsify` checks for that itself.
     """
     src = plan.source
-    if in_memory or not src.sparse:
+    if not src.sparse:
         return 0.0
     transposed = plan.layout in spec.SPARSE_TYPES and plan.layout != src.kind
     densified_csc = plan.layout == "dense" and src.kind == spec.CSC_MATRIX
-    if not (transposed or densified_csc):
-        return 0.0
-    entry = 16 + src.dtype.itemsize
+    needed = 0.0
+    if (transposed or densified_csc) and not in_memory:
+        needed += src.nnz * (16 + src.dtype.itemsize)
     if densified_csc:
-        entry += 8 + src.dtype.itemsize
-    return float(src.nnz * entry)
+        needed += src.nnz * (8 + src.dtype.itemsize) + 8 * (src.shape[0] + 1)
+    return needed
 
 
 def _on_disk(obj: Any) -> int:
