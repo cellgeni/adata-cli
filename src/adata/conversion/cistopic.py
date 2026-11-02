@@ -130,7 +130,7 @@ class CistopicImport(Converter):
         name = Path(source).name
         try:
             obj = pickled.load(source)
-        except pickled.RefusedGlobal as exc:
+        except pickled.RefusedPickle as exc:
             raise ValueError(f"{name}: {exc}") from None
         kind = getattr(obj, "kind", type(obj).__name__)
         warnings: List[str] = []
