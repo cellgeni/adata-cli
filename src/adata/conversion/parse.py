@@ -6,8 +6,10 @@ split-pipe writes, for the combined run and for each sample it was told of:
     <run>/all-sample/DGE_unfiltered/   (every barcode, not only cells)
     <run>/<sample>/DGE_filtered/ ...
 
-(`all-well` rather than `all-sample` in older versions.) The matrix is
-cells x genes, the other way round from 10x, so each file row is a row of X.
+Each file may be gzipped. This is the layout split-pipe 1.6.1 writes, which
+it was checked against; a run laid out otherwise, as older versions' may
+be, is not recognised. The matrix is cells x genes, the other way round
+from 10x, so each file row is a row of X.
 `all_genes.csv` holds `gene_id,gene_name,genome`, and `cell_metadata.csv`
 starts with `bc_wells`, the barcode, followed by the sample, the species and
 per-cell counts.
@@ -45,7 +47,7 @@ from adata.util.path import is_zarr_path
 
 _FILTERED, _UNFILTERED = "DGE_filtered", "DGE_unfiltered"
 
-#: The combined folder, by split-pipe version.
+#: The combined folder's names.
 _COMBINED = ("all-sample", "all-well")
 
 _INDEX = "bc_wells"
@@ -71,16 +73,18 @@ class _Dge:
         return self.path.name != _UNFILTERED
 
 
+def _file(folder: Path, name: str) -> Optional[Path]:
+    """`name` or `name.gz` in `folder`, whichever exists."""
+    return next((p for p in (folder / name, folder / f"{name}.gz") if p.is_file()), None)
+
+
 def _dge(folder: Path) -> Optional[_Dge]:
     """The DGE folder `folder` is, or None."""
     if not folder.is_dir() or is_zarr_path(folder):
         return None
-    matrix = next(
-        (p for p in (folder / "count_matrix.mtx", folder / "count_matrix.mtx.gz") if p.is_file()),
-        None,
-    )
-    genes, cells = folder / "all_genes.csv", folder / "cell_metadata.csv"
-    if matrix is None or not genes.is_file() or not cells.is_file():
+    matrix = _file(folder, "count_matrix.mtx")
+    genes, cells = _file(folder, "all_genes.csv"), _file(folder, "cell_metadata.csv")
+    if matrix is None or genes is None or cells is None:
         return None
     return _Dge(folder, matrix, genes, cells)
 
@@ -152,8 +156,8 @@ def locate(path: Path, options: Options) -> List[_Dge]:
             )
         raise ValueError(
             f"{path} is not split-pipe output: it needs count_matrix.mtx, "
-            "all_genes.csv and cell_metadata.csv, in DGE_filtered/ or "
-            "DGE_unfiltered/ under each sample."
+            "all_genes.csv and cell_metadata.csv (each plain or gzipped), in "
+            "DGE_filtered/ or DGE_unfiltered/ under each sample."
         )
 
     named = [name for name in samples if name not in _COMBINED]

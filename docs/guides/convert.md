@@ -74,6 +74,9 @@ each against them, with a few deliberate differences, listed below.
   recast out.h5ad X --inplace --dtype float32` if a tool needs floats.
 - **Nothing is dropped**: every feature type unless `--feature-type` picks
   one, the run's metadata in `uns`, a loom's graphs and global attributes.
+- **Text is read as Cell Ranger means it**: the XML character references it
+  writes for text outside ASCII (`&#947;`) become the characters, where
+  scanpy's `read_10x_h5` shows the references.
 
 ## h5ad and Zarr
 

@@ -154,9 +154,20 @@ names are case-sensitive.
 ### `The obs query matched no rows.`
 
 Nothing to write, so nothing is written. Check the values with `adata export
-dataframe data.h5ad obs --columns cluster`. Equality compares each value's
-text, so in a float column `n == 1` matches nothing where `n == 1.0` matches;
-`>=` and `<=` compare numbers.
+dataframe data.h5ad obs --columns cluster`. Text compares exactly, case
+included; numbers and booleans compare by value (`n == 1` matches `1.0`,
+`flag == true` matches `True`). See [Query expressions](reference/query.md).
+
+### `Column 'total_counts' holds numbers, so it compares with a number, not 'zero'.`
+
+A number column is compared by value, so the value has to be a number; a
+boolean column likewise takes `true` or `false`. A typo used to make `!=`
+keep every row. To select missing values, compare with `nan`.
+
+### `Unknown operator at '= A': use ==, !=, <, <=, > or >=.`
+
+Equality is `==`. A value that holds `=`, `!`, `<`, `>`, a comma, a space or
+a parenthesis is quoted: `label == "a=b"`.
 
 ### `Operator '>' needs a number, but got 'high'.`
 
@@ -175,6 +186,12 @@ The input belongs to another store, or is transposed.
 and `var` are dataframes, and `obsm`, `layers` or `uns` hold one element per
 key. Name the entry instead, such as `obsm/X_pca` or `uns/params`, or use
 `import dataframe` for a table. See [Commands](reference/commands.md#import).
+
+### `Cannot subset obsm/ragged: it is a group encoded as awkward-array, which subset cannot narrow.`
+
+`subset` and `split` narrow every element to the rows kept, and this one
+they cannot (an awkward array, or a matrix that is not 2-D). Nothing is
+written. Drop the element from a copy first, or subset it with anndata.
 
 ### `Provide at least one of --obs, --var, --obs-query or --var-query.`
 

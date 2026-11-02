@@ -14,11 +14,17 @@ A loom is one HDF5 file:
 Import follows `anndata.read_loom`: X is the `spliced` layer when there is
 one (with the main matrix kept as `layers["matrix"]`), else the main matrix;
 attributes with one value per cell are obs columns and those with several
-are obsm. Four things differ, on purpose:
+are obsm. Four things differ, on purpose (docs/reference/formats/loom.md
+lists the same four):
 
-* values keep their dtype, where anndata casts X to float32;
-* graphs become obsp/varp, and global attributes `uns["loom"]`, where
-  anndata drops them;
+* values keep their dtype, where anndata casts X to float32 (but for
+  float16, which no scipy sparse matrix holds: it becomes float32 unless
+  kept dense);
+* graphs become obsp/varp and global attributes `uns["loom"]`, where
+  anndata drops them; and the main matrix is never dropped: with a layer
+  named `matrix` (a loom written from an AnnData that had one), X is the
+  main matrix, where anndata takes `spliced` and lets the layer replace
+  the main matrix;
 * var is named by gene id when the file records one, as `convert` names
   every other format;
 * compound attributes become dataframes in obsm and varm, a column per
@@ -86,6 +92,7 @@ from adata.storage import (
     create_dataset,
     is_dataset,
     is_group,
+    is_legacy_categorical,
     is_zarr_group,
     open_store,
 )
@@ -286,10 +293,20 @@ class LoomImport(Converter):
             for name, ds in (("matrix", matrix), *layers.items()):
                 if ds.dtype.kind not in "biuf":
                     raise ValueError(f"{name} holds {ds.dtype} values, which a loom may not.")
+            half = [name for name, ds in (("matrix", matrix), *layers.items()) if ds.dtype == np.float16]
+            if half and not options.dense:
+                warnings.append(
+                    f"float16 matrices become float32: {', '.join(half)}. scipy's sparse "
+                    "matrices, and so anndata's, have no float16; --dense keeps them float16."
+                )
 
             x = options.layer
             if x is None:
-                x = "spliced" if "spliced" in layers else ""
+                # A layer named matrix says the loom was written from an
+                # AnnData, its X as the main matrix and anndata's
+                # layers["matrix"] beside it: that X comes back as X, so a
+                # round trip neither drops the main matrix nor copies it.
+                x = "spliced" if "spliced" in layers and "matrix" not in layers else ""
             elif x == "matrix":
                 x = ""
             elif x not in layers:
@@ -301,10 +318,17 @@ class LoomImport(Converter):
             sources[x].append("X")
             for name in layers:
                 sources[name].append(f"layers/{name}")
-            if x != "" and "matrix" not in layers:
-                # anndata's place for the main matrix, unless a layer of
-                # that name -- from an exported AnnData -- takes it.
-                sources[""].append("layers/matrix")
+            if x != "":
+                # anndata's place for the main matrix; when a layer of that
+                # name takes it (--layer naming another), the next free one,
+                # so neither is lost.
+                main = claim("matrix", set(layers))
+                sources[""].append(f"layers/{main}")
+                if main != "matrix":
+                    warnings.append(
+                        f"The main matrix is written as layers[{main!r}]: a layer is "
+                        "already named 'matrix'."
+                    )
 
             empty: Dict[str, Any] = {}
             obs = _axis(handle.get("col_attrs", empty), n_cells, "Column")
@@ -336,7 +360,13 @@ class LoomImport(Converter):
             for axis in (obs, var):
                 if axis.names in axis.columns:
                     axis.columns.remove(axis.names)
-            attrs = _global_attrs(handle)
+            too_large: List[str] = []
+            attrs = _global_attrs(handle, too_large)
+            if too_large:
+                warnings.append(
+                    f"Not read: global attributes {', '.join(too_large)} -- each holds more than "
+                    f"{scope.MAX_METADATA_BYTES:,} bytes once decompressed."
+                )
             found = None
             if scope.is_scope(attrs, handle.get("col_attrs", empty).keys()):
                 metadata = attrs.get(scope.METADATA)
@@ -463,14 +493,25 @@ class LoomImport(Converter):
                     _write_matrix(ds, root, places, detail)
 
 
-def _global_attrs(handle: h5py.File) -> Dict[str, Any]:
-    """Global attributes, spec 3's datasets and older root attributes alike."""
+def _global_attrs(handle: h5py.File, skipped: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Global attributes, spec 3's datasets and older root attributes alike.
+
+    A dataset is read only if it holds at most `scope.MAX_METADATA_BYTES`
+    once read: one compressed, or never written, can hold far more than
+    the file does. (A root attribute cannot be compressed.) Those that
+    hold more are left out, their names added to `skipped`.
+    """
     found: Dict[str, Any] = {key: value for key, value in handle.attrs.items()}
     attrs = handle.get("attrs")
     if isinstance(attrs, h5py.Group):
         for key, ds in attrs.items():
-            if isinstance(ds, h5py.Dataset):
-                found[key] = ds[()]
+            if not isinstance(ds, h5py.Dataset):
+                continue
+            if ds.size * ds.dtype.itemsize > scope.MAX_METADATA_BYTES:
+                if skipped is not None:
+                    skipped.append(key)
+                continue
+            found[key] = ds[()]
     return found
 
 
@@ -701,15 +742,34 @@ def slab_cells(n_genes: int, itemsize: int, chunk_width: int) -> int:
 
 
 def _write_matrix(ds: h5py.Dataset, root: Any, places: List[str], detail: _Import) -> None:
-    """One loom matrix, read once, written to every place that holds it."""
+    """One loom matrix, read once, written to every place that holds it.
+
+    float16 goes sparse as float32: a CSR of float16, which scipy has no
+    sparse matrix for, is one anndata cannot read back.
+    """
     parents = [
         (root, "X") if place == "X" else (root["layers"], place.split("/", 1)[1])
         for place in places
     ]
+    source = _AsFloat32(ds) if ds.dtype == np.float16 and not detail.dense else ds
     write_dense_matrix(
-        ds, parents, cells_axis=1, dense=detail.dense, compression=detail.compression,
+        source, parents, cells_axis=1, dense=detail.dense, compression=detail.compression,
         zarr_format=detail.zarr_format, slab_bytes=SLAB_BYTES,
     )
+
+
+class _AsFloat32:
+    """A float16 dataset read as float32, a slice at a time: what
+    `write_dense_matrix` reads (shape, chunks, dtype, slices) and no more."""
+
+    dtype = np.dtype(np.float32)
+
+    def __init__(self, ds: h5py.Dataset) -> None:
+        self._ds = ds
+        self.shape, self.chunks = ds.shape, ds.chunks
+
+    def __getitem__(self, key: Any) -> np.ndarray:
+        return np.asarray(self._ds[key]).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -727,7 +787,8 @@ _ASCII = h5py.string_dtype(encoding="ascii")
 @dataclass
 class _Export:
     matrix: str
-    layers: List[str]
+    #: (loom layer, the element it is written from)
+    layers: List[Tuple[str, str]]
     obs_columns: List[str]
     var_columns: List[str]
     obsm: List[str]
@@ -772,26 +833,42 @@ class LoomExport(Converter):
             obs_index, obs_name = resolve_index(root["obs"], "obs")
             var_index, var_name = resolve_index(var_group, "var")
             n_obs, n_var = element_len(obs_index), element_len(var_index)
+            if path == "X" and "X" not in root:
+                # Refused here, before the output exists, not when X is read.
+                names = list(root["layers"]) if "layers" in root else []
+                if "raw" in root and is_group(root["raw"]) and "X" in root["raw"]:
+                    names.append("raw/X")
+                raise ValueError(
+                    "This store has no X: name the matrix to write with --layer "
+                    f"(there are {', '.join(names)})."
+                    if names else "This store has no X, nor a layer to write in its place."
+                )
             main = _matrix(root, path, (n_obs, n_var))
-            layers = []
+            #: (loom layer, the element it is written from)
+            layers: List[Tuple[str, str]] = []
             if raw:
                 # raw/X has raw/var's genes; X and the layers have var's.
-                if "layers" in root and len(root["layers"]) or path != "X":
+                if "X" in root or ("layers" in root and len(root["layers"])):
                     warnings.append(
                         "Not written: X and the layers -- they follow var, and "
                         "raw/X follows raw/var."
                     )
-            elif "layers" in root:
-                for name in root["layers"]:
-                    if f"layers/{name}" == path:
-                        continue
+            else:
+                names = [n for n in (root["layers"] if "layers" in root else []) if f"layers/{n}" != path]
+                others = [(name, f"layers/{name}") for name in names]
+                if path != "X" and "X" in root:
+                    # X too, when --layer names another matrix: as layer X,
+                    # unless a layer of the store's has that name.
+                    name = claim("X", set(names))
+                    if name != "X":
+                        warnings.append(f"X is written as layers/{name}: a layer is already named 'X'.")
+                    others.insert(0, (name, "X"))
+                for name, other in others:
                     try:
-                        _matrix(root, f"layers/{name}", (n_obs, n_var))
-                        layers.append(name)
+                        _matrix(root, other, (n_obs, n_var))
+                        layers.append((name, other))
                     except ValueError as exc:
-                        warnings.append(f"Not written: layers/{name}: {exc}")
-            if path != "X" and not raw:
-                layers.insert(0, "X")
+                        warnings.append(f"Not written: {other}: {exc}")
             obs_columns = _columns(root["obs"], obs_name, warnings, "obs")
             var_columns = _columns(var_group, var_name, warnings, var_path)
             gene, accession = _gene_attrs(var_columns)
@@ -803,26 +880,21 @@ class LoomExport(Converter):
             uns = _uns_scalars(root, warnings)
             # A clustering goes out inside Clusterings alone (a plain copy too
             # would come back from the loom as a second column), so it claims
-            # no attribute name of its own.
-            clustered = set(scope.clustering_columns(root, options.clusterings)) if options.scope else set()
+            # no attribute name of its own. The plan refuses any it cannot
+            # write, so there is a ClusterID exactly when there are some.
+            clustered = scope.clustering_columns(root, options.clusterings) if options.scope else []
             obs_columns, var_columns, owners = _column_owners(
                 [c for c in obs_columns if c not in clustered], var_columns, gene, accession,
-                options.scope, warnings,
+                options.scope, clustered[0] if clustered else None, warnings,
             )
             found = None
             if options.scope:
                 found = scope.plan_export(
-                    root, obs_columns=[c for c in obs_columns if c != "CellID"],
+                    root, obs_columns=obs_columns,
                     varm_key=varm_key, clusterings=options.clusterings,
                     default_embedding=options.default_embedding, warnings=warnings,
                     owners=owners,
                 )
-                if found.cluster_id and "ClusterID" in obs_columns:
-                    # A stale copy would disagree with Clusterings once the
-                    # first clustering is edited.
-                    obs_columns = [c for c in obs_columns if c != "ClusterID"]
-                    warnings.append("obs column 'ClusterID' is written afresh from the "
-                                    f"first clustering, {found.clusterings[0].column!r}.")
                 # Embeddings go out as SCope's, not again as plain attributes.
                 embedded = {e.key for e in found.embeddings}
                 obsm = [name for name in obsm if name not in embedded]
@@ -842,7 +914,7 @@ class LoomExport(Converter):
         summary = (
             f"{src_format} → loom 3.0.0{' (SCope)' if found is not None else ''}, "
             f"{n_var:,} genes x {n_obs:,} cells from "
-            f"{path}{', layers: ' + ', '.join(layers) if layers else ''}"
+            f"{path}{', layers: ' + ', '.join(name for name, _ in layers) if layers else ''}"
             f"{', ' + found.describe() if found is not None and found.describe() else ''}; "
             f"dense {_size(dense)} before compression"
         )
@@ -878,10 +950,9 @@ class LoomExport(Converter):
             with console.status(f"[cyan]Writing {detail.matrix} dense...[/]"):
                 _export_matrix(resolve(root, detail.matrix), out, "matrix")
             layers = out.create_group("layers")
-            for name in detail.layers:
+            for name, where in detail.layers:
                 with console.status(f"[cyan]Writing layer {name} dense...[/]"):
-                    obj = root["X"] if name == "X" else root["layers"][name]
-                    _export_matrix(obj, layers, name)
+                    _export_matrix(resolve(root, where), layers, name)
 
             with console.status("[cyan]Writing the attributes...[/]"):
                 cols = out.create_group("col_attrs")
@@ -891,17 +962,14 @@ class LoomExport(Converter):
                 var_index, _ = resolve_index(var, "var")
                 _export_strings(cols, "CellID", obs_index, obs)
                 for name in detail.obs_columns:
-                    if name != "CellID":
-                        _export_column(cols, name, obs[name], obs)
+                    _export_column(cols, name, obs[name], obs)
                 for attr, where in (("Gene", detail.gene), ("Accession", detail.accession)):
                     if where == "":
                         _export_strings(rows, attr, var_index, var)
                     elif where is not None:
                         _export_column(rows, attr, var[where], var)
-                skip = {detail.gene, detail.accession, "Gene", "Accession"}
                 for name in detail.var_columns:
-                    if name not in skip:
-                        _export_column(rows, name, var[name], var)
+                    _export_column(rows, name, var[name], var)
                 for key, group, where in (
                     ("obsm", cols, "obsm"), ("varm", rows, detail.varm_key)
                 ):
@@ -1005,7 +1073,10 @@ def _matrix(root: Any, path: str, shape: Tuple[int, int]) -> Matrix:
 
 
 def _column_kind(col: Any) -> Optional[str]:
-    """'number', 'text', or None for what a loom attribute cannot hold."""
+    """'number', 'text', 'masked', or None for what a loom attribute cannot hold."""
+    if is_legacy_categorical(col):
+        # anndata 0.7's categorical: integer codes, their labels elsewhere.
+        return "text" if col.ndim == 1 else None
     if is_dataset(col):
         if col.ndim != 1:
             return None
@@ -1038,14 +1109,19 @@ def _columns(group: Any, index_name: str, warnings: List[str], axis: str) -> Lis
 
 def _column_owners(
     obs_columns: List[str], var_columns: List[str], gene: str, accession: Optional[str],
-    scope_export: bool, warnings: List[str],
+    scope_export: bool, first_clustering: Optional[str], warnings: List[str],
 ) -> Tuple[List[str], List[str], Dict[str, Dict[str, str]]]:
     """A loom's col_attrs and row_attrs are flat, so an obs column, an obsm
     entry and one of SCope's parts can ask for one name, and the second
     write failed with the output half written. Names go to the first that
-    asks: loom's and SCope's own attributes, then columns here; SCope's
-    tables (`scope.plan_export`) and arrays claim theirs after. The others
-    are left out, each with a warning."""
+    asks: loom's and SCope's own attributes (CellID, Gene, Accession, and
+    ClusterID when there is a clustering to write it from), then columns
+    here; SCope's tables (`scope.plan_export`) and arrays claim theirs
+    after. The others are left out, each with a warning.
+
+    Returns the obs and var columns to write as attributes of their own
+    names: not those Gene and Accession are written from.
+    """
     owners: Dict[str, Dict[str, str]] = {"col_attrs": {"CellID": "the cell names"},
                                          "row_attrs": {"Gene": "the gene names"}}
     if accession is not None:
@@ -1055,14 +1131,18 @@ def _column_owners(
             scope.EMBEDDING: "SCope's default embedding", scope.EMBEDDINGS_X: "SCope's embeddings",
             scope.EMBEDDINGS_Y: "SCope's embeddings", scope.CLUSTERINGS: "SCope's clusterings",
         })
-    # ClusterID is SCope's only once there are clusterings; the plan decides.
-    obs_columns = [c for c in obs_columns if c in ("CellID", "ClusterID")
-                   or scope.claim_attr(owners, "col_attrs", c, f"obs column {c!r}", warnings)]
-    skip = {gene, accession, "Gene", "Accession"}
-    var_columns = [c for c in var_columns if c in skip
-                   or scope.claim_attr(owners, "row_attrs", c, f"var column {c!r}", warnings)]
-    if scope_export:
-        owners["col_attrs"].setdefault("ClusterID", "SCope's first clustering")
+    if first_clustering is not None:
+        owners["col_attrs"]["ClusterID"] = "SCope's first clustering"
+        if "ClusterID" in obs_columns:
+            # A stale copy would disagree with Clusterings once the first
+            # clustering is edited.
+            obs_columns = [c for c in obs_columns if c != "ClusterID"]
+            warnings.append("obs column 'ClusterID' is written afresh from the "
+                            f"first clustering, {first_clustering!r}.")
+    obs_columns = [c for c in obs_columns
+                   if scope.claim_attr(owners, "col_attrs", c, f"obs column {c!r}", warnings)]
+    var_columns = [c for c in var_columns if c not in (gene, accession)
+                   and scope.claim_attr(owners, "row_attrs", c, f"var column {c!r}", warnings)]
     return obs_columns, var_columns, owners
 
 
