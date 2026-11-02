@@ -2496,25 +2496,29 @@ def test_a_dense_cast_check_reads_a_block_of_rows_not_the_matrix(tmp_path, fmt):
     """F029: `recast --dtype` on a dense matrix read `dataset[0:1048576]` --
     every row and column -- to check the cast, then made two more copies,
     whatever --chunk said: 1,500,000 elements in one read of a 3000 x 500
-    matrix at --chunk 100. The largest read is --chunk rows now."""
+    matrix at --chunk 100. The largest read is --chunk rows now, or one
+    chunk height of the source where that is taller, since a read of part
+    of a chunk decodes all of it (F061): anndata's Zarr v3 chunks grow with
+    the matrix, to about a megabyte, so at this size they are half of it."""
+    import zarr
+
     from tests.perf_fixtures import matrix_store
 
-    def measure(n: int) -> int:
-        # Narrow, and 256-row blocks: on sharded Zarr each block still
-        # rewrites the whole shard (F036, B6b), which is slow, not wrong.
+    rows = 256
+    for n in (1024, 8192):
         source = matrix_store(tmp_path, n_obs=n, n_var=16, layout="dense", fmt=fmt)
+        height = (zarr.open_group(str(source), mode="r")["X"].chunks[0]
+                  if fmt != "h5ad" else 1)
         out = tmp_path / f"o{n}{source.suffix}"
         with count_io() as io:
-            _recast(source, out, dtype="float64", chunk_rows=256)
+            _recast(source, out, dtype="float64", chunk_rows=rows)
         assert io.read_bytes >= n * 16 * 4, "the matrix was read"
         largest = _largest_matrix_read(io)
-        assert largest > 0, "no read of X was seen: the names no longer match"
-        return largest
-
-    assert_independent_of(
-        measure, what=f"the largest read of recast --dtype ({fmt})", axis="n_obs",
-        sizes=(1024, 8192),
-    )
+        bound = -(-rows // height) * height * 16 * 4
+        assert 0 < largest <= bound, (
+            f"recast --dtype ({fmt}) of {n:,} rows read {largest:,} bytes of X at "
+            f"once against {bound:,} for --chunk {rows} in chunks {height} tall"
+        )
 
 
 # h5ad only: what a row costs is the algorithm's, and Zarr v3's reads are
