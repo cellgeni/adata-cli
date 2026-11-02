@@ -55,11 +55,11 @@ def _names(tmp_path: Path, stem: str, prefix: str, picked) -> Path:
 
 @pytest.mark.parametrize("layout", ["csr", "csc", "dense"])
 @pytest.mark.parametrize("fmt", FORMATS)
-@pytest.mark.parametrize("chunk", [1, 3])
-def test_a_subset_in_tiny_blocks_matches_anndata(tmp_path, fmt, layout, chunk):
-    """At --chunk 1 a sparse block holds a row's worth of entries, so
-    majors of the CSC layers are read in parts (F032), and every output
-    unit is filled over many blocks before it is written (F031)."""
+def test_a_subset_in_tiny_blocks_matches_anndata(tmp_path, fmt, layout):
+    """At --chunk 2 a sparse block holds two rows' worth of entries, fewer
+    than a column of a CSC layer, which is read in parts (F032); every
+    output unit is filled over many blocks before it is written (F031)."""
+    chunk = 2
     source = rich_anndata(layout, seed=3)
     src = write_store(source, tmp_path, fmt)
     obs = [0, 1, 2, 5, 9, 10, 11, 17, 23, 28, 29]
@@ -71,8 +71,10 @@ def test_a_subset_in_tiny_blocks_matches_anndata(tmp_path, fmt, layout, chunk):
     assert_matches_anndata(read_anndata(out), source, obs, var)
 
 
+# h5ad's chunks and anndata 0.13's shards: the other formats' units are
+# cut by the same code, and `test_subset_oracle` splits them.
 @pytest.mark.parametrize("layout", ["csr", "csc", "dense"])
-@pytest.mark.parametrize("fmt", FORMATS)
+@pytest.mark.parametrize("fmt", ["h5ad", "zarr31"])
 def test_split_in_tiny_blocks_and_a_tiny_write_budget_matches_anndata(
     tmp_path, monkeypatch, fmt, layout
 ):

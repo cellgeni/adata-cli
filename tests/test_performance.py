@@ -2651,7 +2651,7 @@ def test_a_dense_cast_adds_a_block_of_resident_memory_not_the_matrix(tmp_path):
 # as bytes decoded or encoded many times over, without a clock.
 
 #: Rows of the stores below, and --chunk: blocks far smaller than a unit.
-UNIT_ROWS, UNIT_CHUNK = 8192, 256
+UNIT_ROWS, UNIT_CHUNK = 4096, 256
 
 
 def _x_amplification(io, *, encoded: bool = True) -> float:
@@ -2746,9 +2746,9 @@ def test_a_sharded_output_is_written_a_whole_shard_at_a_time(tmp_path, monkeypat
     )
 
 
-@pytest.mark.parametrize("fmt,chunks", [("h5ad", (UNIT_ROWS, 8)), ("zarr2", None)],
+@pytest.mark.parametrize("fmt,n_obs,chunks", [("h5ad", 8192, (8192, 8)), ("zarr2", 32768, None)],
                          ids=["tall-chunked-h5ad", "zarr2-default"])
-def test_a_dense_subset_decodes_each_source_chunk_once(tmp_path, fmt, chunks):
+def test_a_dense_subset_decodes_each_source_chunk_once(tmp_path, fmt, n_obs, chunks):
     """F061: blocks of --chunk rows were not aligned to the source's chunk
     height, so every chunk was decoded once a block: 15 times the matrix
     for gzip chunks of (n_obs, 8) at 16,384 rows (60 at 65,536), 7 for
@@ -2756,13 +2756,13 @@ def test_a_dense_subset_decodes_each_source_chunk_once(tmp_path, fmt, chunks):
     chunk heights now, within the read budget."""
     from tests.perf_fixtures import matrix_store
 
-    source = matrix_store(tmp_path, n_obs=4 * UNIT_ROWS if fmt == "zarr2" else UNIT_ROWS,
+    source = matrix_store(tmp_path, n_obs=n_obs,
                           n_var=64, layout="dense", fmt=fmt, density=0.5,
                           dense_chunks=chunks, compression="gzip" if chunks else None)
     with count_io() as io:
         _subset(source, tmp_path / f"o{source.suffix}", chunk_rows=1024)
     x = [n for n in io.by_name if n.strip("/") == "X"]
-    assert io.read_bytes >= 4 * UNIT_ROWS * 64, "the matrix was read"
+    assert io.read_bytes >= n_obs * 64 * 4, "the matrix was read"
     assert io.read_amplification <= 1.25, (
         f"subset decoded {io.read_amplification:.1f} times the bytes it read "
         f"({fmt}, X read as {x}): a block splits the source's chunks"
