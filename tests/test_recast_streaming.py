@@ -390,7 +390,9 @@ def test_anndata_reads_back_every_dtype_and_layout_recast_writes(
     if dtype == "float16" and layout != "dense":
         pytest.skip("refused, see test_float16_is_refused_for_a_sparse_output")
 
-    out = _recast(source_path, dtype=dtype, layout=layout, force=True)
+    # Blocks do not matter here; the dtype and layout do.
+    out = _recast(source_path, dtype=dtype, layout=layout, force=True,
+                  chunk=4096, chunk_rows=64)
 
     if layout == "dense":
         expected = matrix.toarray().astype(dtype)
@@ -470,7 +472,7 @@ def test_a_sparse_matrix_from_a_dense_one_has_element_sized_chunks(new_store, la
         ew.write_dataframe_header(root, "var", [f"g{i}" for i in range(50)], [])
         ew.write_dense(root, "X", dense, chunks=(4, 50))
 
-    out = _recast(path, layout=layout, chunk_rows=64)
+    out = _recast(path, layout=layout, chunk_rows=64, chunk=4096)
 
     from adata.storage import open_store
 

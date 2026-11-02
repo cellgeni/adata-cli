@@ -167,8 +167,9 @@ model against numbers worked out by hand.
 buffers but not what HDF5, blosc or zarr's codecs allocate in C.
 `peak_rss(argv)` runs `adata <argv>` in a fresh interpreter and returns how far
 the command raised the operating system's high-water mark (`ru_maxrss`, read
-once the CLI is imported and again when the command ends). A subprocess,
-because the high-water mark only rises. It has a few megabytes of noise, so
+once the CLI is imported and again when the command ends; on Linux `VmHWM`,
+since `ru_maxrss` there starts at the parent's peak). A subprocess, because
+the high-water mark only rises. It has a few megabytes of noise, so
 guard it with generous ratios against inputs of tens of megabytes, as
 `test_a_dense_cast_adds_a_block_of_resident_memory_not_the_matrix` does;
 `test_peak_rss_sees_a_command_that_holds_the_matrix` checks that it sees
@@ -220,7 +221,7 @@ accept a 64x increase in a command that is supposed to read nothing.
 |---|---|---|
 | `assert_grows_linearly` | no worse than linear in one axis | most commands |
 | `assert_grows_slower_than_input` | grows at least N times slower than the input | streaming at a fixed chunk |
-| `assert_memory_is_a_fraction_of_the_input` | adds at most a share (a quarter) of what the input adds, in bytes | memory, along either axis |
+| `assert_memory_is_a_fraction_of_the_input` | adds at most a share (half) of what the input adds, in bytes | memory, along either axis |
 | `assert_independent_of` | does not grow at all | inspection, grouping work per row, the largest read |
 
 **Inspection is free, and that is an exact number.** `view` and `ls` reach only
@@ -264,12 +265,16 @@ A growth ratio cannot be the claim along n_var: widen a matrix and a block of
 `--chunk` rows widens with it, as fast as the input, so a ratio cannot tell it
 from the whole matrix. Peak memory added per byte of input added can: a block
 of 32 rows of a matrix thousands of rows tall adds a few hundredths, and a path
-holding the matrix adds a whole byte and more for each copy.
+holding the matrix adds a whole byte and more for each copy. The limit is half;
+bounded paths came to at most 0.21. Growing n_obs, `--chunk` is 256 rows, so a
+block of `--chunk` columns over every row (CSC densify before F030) is plain.
+Each fixture is built once and shared by the commands.
 
 The known gap is marked `xfail` with its owner: sparse `subset` (F032, B6b),
 strict, so the fix has to flip it.
 
-The recast guards beside it pin each block in bytes, on every format: the cast
+The recast guards beside it pin each block in bytes, on h5ad and sharded Zarr
+v3 (Zarr v2 is covered by the correctness tests): the cast
 check reads `--chunk` rows of a dense matrix, CSC densify and sparsify read
 blocks set by the chunk, and a skewed transpose never reads more than about two
 buckets of entries at once.
@@ -341,7 +346,7 @@ should scale with, scale only that, and hold everything else fixed.
 | `convert` CellBender (plain, `--min-cell-probability`, `--raw` full and filtered) | n_barcodes | linear; **flat** write calls |
 | `recast --dtype`, `--layout csc`, `--layout dense` | nnz, n_obs | linear; the streaming transpose's **peak memory** is bounded |
 | `recast` (every dtype and layout change), `subset`, `concat` | n_obs, n_var; CSR, CSC, dense | **peak memory** a small share of the input |
-| `recast --dtype` (dense), CSC `--layout dense`, dense `--layout csc`, a skewed transpose | n_obs; h5ad, Zarr v2, sharded Zarr v3 | the **largest read** set by the chunk |
+| `recast --dtype` (dense), CSC `--layout dense`, dense `--layout csc`, a skewed transpose | n_obs; h5ad, sharded Zarr v3 | the **largest read** set by the chunk |
 
 The `slow` marker is on the guards that build a 65,536-row store or run `peak_rss`;
 they still gate merges, and `-m "not slow"` skips them locally. `perf` is on the

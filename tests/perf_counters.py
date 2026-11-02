@@ -537,10 +537,23 @@ def count_allocations() -> Iterator[List[int]]:
 #: Run by `peak_rss` in a fresh interpreter. The high-water mark is read once
 #: the CLI and everything it imports is loaded, and again after the command,
 #: so the difference is what the command itself added.
+#:
+#: On Linux that is `VmHWM`, the peak of the process's own memory map, not
+#: `ru_maxrss`: at exec the kernel folds the memory map being replaced -- the
+#: parent's, after fork or vfork -- into `ru_maxrss`, so a child of a large
+#: pytest process starts at the parent's peak and its command added nothing.
+#: macOS keeps no such history, and has no /proc.
 _RSS_RUNNER = r"""
 import json, resource, sys
 
 def high_water():
+    try:
+        with open("/proc/self/status") as status:
+            for line in status:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1]) * 1024  # kB
+    except OSError:
+        pass
     value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return value if sys.platform == "darwin" else value * 1024  # Linux: KiB
 
@@ -581,7 +594,8 @@ def peak_rss(argv: List[str], *, cwd: Any = None) -> PeakRSS:
     blosc and zarr's codecs decode into, and anything else allocated in C,
     none of which tracemalloc can see. A subprocess because the high-water
     mark only rises: in this process it would hold whatever the test suite
-    reached before. Not exact -- the allocator keeps a few megabytes it has
+    reached before (and on Linux, see `_RSS_RUNNER`, `ru_maxrss` would carry
+    it into the child too). Not exact -- the allocator keeps a few megabytes it has
     freed -- so guard it with ratios that leave room, against inputs large
     enough (tens of megabytes) that holding one would be unmistakable.
     """
@@ -885,9 +899,10 @@ def assert_grows_slower_than_input(
 #: The most memory a streaming path may add per byte of input added. A path
 #: holding a block of `--chunk` rows of a matrix many blocks tall adds a few
 #: hundredths; one holding the matrix adds a whole byte, and more for every
-#: copy it makes. A quarter leaves room for the per-row arrays a path keeps
-#: by design (an indptr, a row's count) on a narrow fixture.
-INPUT_SHARE = 0.25
+#: copy it makes. Half leaves room on both sides: what a bounded path keeps
+#: by design (an indptr, a row's count, concat's obs names, the buckets of a
+#: transpose) came to at most 0.21 on the test fixtures.
+INPUT_SHARE = 0.5
 
 
 def assert_memory_is_a_fraction_of_the_input(
