@@ -11,8 +11,9 @@ and write their files:
 * export: which matrix to write (`plan_matrix_source`) and each feature's id,
   name and type, worked out from var (`export_features`).
 
-The AnnData produced matches what scanpy's `read_10x_h5` and `read_10x_mtx`
-give with `gex_only=False`.
+With `--var-names gene_symbols`, the AnnData produced has the names and
+columns scanpy's `read_10x_h5` and `read_10x_mtx` give with `gex_only=False`;
+the default names features by gene id instead.
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ from adata.elements.write import (
     write_dense,
     write_string_array,
 )
-from adata.storage import create_dataset, is_group, is_zarr_group, open_store
+from adata.storage import create_dataset, is_dataset, is_group, is_zarr_group, open_store
 from adata.util.names import (
     count_duplicates,
     make_index_unique,
@@ -97,10 +98,11 @@ def annotate(
         return values if keep is None else values[keep]
 
     picked = {key: pick(values) for key, values in columns.items()}
+    ids = picked.get("gene_ids")
     if options.var_names == "gene_ids":
         # As scanpy's read_10x_mtx does it: ids become the names, and the
         # symbols move into a column where the ids were.
-        index = list(picked["gene_ids"])
+        index = list(ids)
         picked = {
             ("gene_symbols" if key == "gene_ids" else key): (
                 pick(names) if key == "gene_ids" else values
@@ -110,7 +112,19 @@ def annotate(
     else:
         index = list(pick(names))
     if options.make_unique:
-        index = make_index_unique(index)
+        unique = make_index_unique(index)
+        if options.var_names == "gene_ids" and unique != index:
+            # Ids that repeat -- a probe-level matrix's, several probes to a
+            # gene -- are not ids once suffixed. The originals are kept
+            # beside the symbols, so an export writes them rather than the
+            # suffixed names.
+            kept: Dict[str, np.ndarray] = {}
+            for key, values in picked.items():
+                kept[key] = values
+                if key == "gene_symbols":
+                    kept["gene_ids"] = ids
+            picked = kept
+        index = unique
     return Target(label=label, keep=keep, var_names=index, columns=picked)
 
 
@@ -138,7 +152,21 @@ def plan_targets(
                 f"No features of type {options.feature_type!r}; this {noun} "
                 f"has: {', '.join(available)}."
             )
-        groups.append((options.feature_type, keep & (types == options.feature_type)))
+        mask = keep & (types == options.feature_type)
+        if not mask.any():
+            # The type exists, but not among the features an earlier filter
+            # kept: writing would give an output of no features at all.
+            kept = [t for t, _ in type_counts(types[keep])]
+            among = (
+                f"in genome {options.genome!r}" if options.genome is not None
+                else "among the features kept"
+            )
+            raise ValueError(
+                f"No features of type {options.feature_type!r} {among}; "
+                f"{'its' if options.genome is not None else 'their'} types are: "
+                f"{', '.join(kept)}."
+            )
+        groups.append((options.feature_type, mask))
     elif options.split_feature_types:
         for label, _ in type_counts(types[keep]):
             groups.append((label, keep & (types == label)))
@@ -264,11 +292,20 @@ def resolve(root: Any, path: str) -> Any:
 
 @dataclass
 class ExportFeatures:
+    """Each feature's id, name and type, and every other field to write.
+
+    `fields` hold the other per-feature datasets in the order they are
+    written: `genome` always, a probe-level matrix's `gene_id`, then those an
+    import recorded. Booleans stay arrays of bool, as Cell Ranger stores
+    them; the rest are strings. `tag_keys` is `_all_tag_keys`: which of them
+    Cell Ranger counts as tags.
+    """
+
     ids: List[str]
     names: List[str]
     types: List[str]
-    genomes: List[str]
-    tags: Dict[str, List[str]]
+    fields: Dict[str, Any]
+    tag_keys: List[str]
 
 
 @dataclass
@@ -341,23 +378,27 @@ def export_features(
     ids_col = requested("--gene-ids-column", options.gene_ids_column)
     names_col = requested("--gene-names-column", options.gene_names_column)
     types_col = requested("--feature-types-column", options.feature_types_column)
-    index = read_str_all(var_index)
-
-    missing = []
-    if ids_col is None and names_col is None and "gene_ids" not in columns and "gene_symbols" in columns:
-        # var_names are ids already, as `--var-names gene_ids` leaves them.
-        ids, names = index, column("gene_symbols")
-    else:
-        names = column(names_col) if names_col else index
-        if ids_col is None and "gene_ids" in columns:
-            ids_col = "gene_ids"
-        if ids_col is not None:
-            ids = column(ids_col)
-        else:
-            missing.append("gene ids (a gene_ids column, or --gene-ids-column)")
-            ids = names
+    if ids_col is None and "gene_ids" in columns:
+        ids_col = "gene_ids"
+    if names_col is None and "gene_symbols" in columns:
+        names_col = "gene_symbols"
     if types_col is None and "feature_types" in columns:
         types_col = "feature_types"
+    index = read_str_all(var_index)
+
+    # Ids and names each come from their column. The var names are ids when
+    # var is laid out as `--var-names gene_ids` leaves it, with the symbols
+    # in a column of their own, whichever column a flag names for the names;
+    # otherwise they are names, and no ids is refused.
+    missing = []
+    names = column(names_col) if names_col else index
+    if ids_col is not None:
+        ids = column(ids_col)
+    elif "gene_symbols" in columns:
+        ids = index
+    else:
+        missing.append("gene ids (a gene_ids column, or --gene-ids-column)")
+        ids = names
     if types_col is not None:
         types = column(types_col)
     else:
@@ -373,12 +414,59 @@ def export_features(
             )
         warnings.append(f"Writing placeholders for {' and '.join(missing)}.")
 
-    genomes = column("genome") if "genome" in columns else [""] * n
-    tags: Dict[str, List[str]] = {}
-    for key in recorded_tag_keys(root):
-        if key != "genome" and key in columns:
-            tags[key] = column(key)
-    return ExportFeatures(ids=ids, names=names, types=types, genomes=genomes, tags=tags)
+    fields: Dict[str, Any] = {"genome": column("genome") if "genome" in columns else [""] * n}
+    if "probe_ids" in columns:
+        # A probe-level (Flex) matrix: Cell Ranger's `id` names the probe,
+        # and `gene_id` the gene it measures.
+        fields["gene_id"] = ids
+        ids = column("probe_ids")
+    tags = recorded_tag_keys(root)
+    recorded = recorded_feature_keys(root)
+    keys = list(tags if recorded is None else recorded)
+    if recorded is None and "gene_id" in fields:
+        # Nothing recorded which fields a probe-level matrix had -- an
+        # older import, or scanpy's: Cell Ranger's are known.
+        keys += _FLEX_FIELDS
+    for key in keys:
+        if key not in fields and key not in _EXPORT_CORE and key in columns:
+            fields[key] = _field(var, key, warnings)
+    known = _FLEX_TAGS if "gene_id" in fields else ("genome",)
+    tag_keys = [key for key in (tags or known) if key in fields]
+    if "genome" not in tag_keys:
+        tag_keys.insert(0, "genome")
+    return ExportFeatures(ids=ids, names=names, types=types, fields=fields, tag_keys=tag_keys)
+
+
+#: The per-probe fields of Cell Ranger's probe-level (Flex) matrix besides
+#: `gene_id` and `genome`, and which of them it lists in `_all_tag_keys`.
+_FLEX_FIELDS = ("filtered_probes", "gene_name", "probe_region")
+_FLEX_TAGS = ("gene_id", "gene_name", "genome", "probe_region")
+
+
+#: var columns that are Cell Ranger's `id`, `name` or `feature_type`, not a
+#: field of their own.
+_EXPORT_CORE = frozenset({"gene_ids", "gene_symbols", "probe_ids", "feature_types"})
+
+
+def _field(var: Any, key: str, warnings: List[str]) -> Any:
+    """A var column as a feature dataset holds it: bool, or strings.
+
+    A pandas nullable boolean is bool too. A 10x file cannot say a value is
+    missing, so missing ones are written as False, with a warning: written
+    as strings, 'False' would read back as true.
+    """
+    obj = var[key]
+    if is_dataset(obj) and "categories" not in obj.attrs and obj.dtype.kind == "b":
+        return np.asarray(obj[...], dtype=bool)
+    if is_group(obj) and spec.encoding_type(obj) == spec.NULLABLE_BOOLEAN:
+        missing = np.asarray(obj["mask"][...], dtype=bool)
+        if missing.any():
+            warnings.append(
+                f"var[{key!r}] has {int(missing.sum()):,} missing values, "
+                "written as False: a 10x matrix has no missing booleans."
+            )
+        return np.asarray(obj["values"][...], dtype=bool) & ~missing
+    return read_str_all(obj, parent_group=var)
 
 
 def cellranger_meta(root: Any) -> Optional[Any]:
@@ -394,4 +482,13 @@ def recorded_tag_keys(root: Any) -> List[str]:
     if meta is None or "feature_tag_keys" not in meta:
         return []
     return read_str_all(meta["feature_tag_keys"])
+
+
+def recorded_feature_keys(root: Any) -> Optional[List[str]]:
+    """The feature datasets an import read into var, tags or not; None
+    from an import that did not record them, whose tags are all it kept."""
+    meta = cellranger_meta(root)
+    if meta is None or "feature_keys" not in meta:
+        return None
+    return read_str_all(meta["feature_keys"])
 
