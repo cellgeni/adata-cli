@@ -259,6 +259,41 @@ def test_cell_ranger_2_genome_folders(tmp_path, counts):
     assert np.array_equal(_read(out).X.toarray(), counts[:, :3])
 
 
+@pytest.mark.parametrize(
+    "run,subfolders,layout",
+    [
+        ("Solo.out/Gene", ["filtered", "raw"], "starsolo"),
+        ("outs", ["filtered_feature_bc_matrix", "raw_feature_bc_matrix"], "cr3"),
+        ("count", ["sample_filtered_feature_bc_matrix"], "cr3"),
+        # Cell Ranger 2's file names, as DropletUtils' write10xCounts writes them.
+        ("droplets", ["filtered", "raw"], "cr2"),
+        ("droplets", ["filtered"], "cr2"),
+    ],
+)
+def test_a_runs_filtered_and_raw_folders_are_not_taken_for_genomes(tmp_path, counts, run, subfolders, layout):
+    """F105: a folder holding a run's filtered/ and raw/ matrices, as
+    STARsolo's Gene/ and Cell Ranger's outs/ do, was read as Cell Ranger 2's
+    one folder per genome: refused with 'pick one with --genome'; and with
+    one such folder, as Cell Ranger multi's count/ holds, converted with its
+    name recorded as the genome. Only a Cell Ranger 2 folder (genes.tsv) is
+    a genome."""
+    root = tmp_path / run
+    for name in subfolders:
+        write_10x_mtx(root / name, counts, barcodes=_barcodes(), ids=IDS, names=NAMES,
+                      types=TYPES, layout=layout)
+    out = tmp_path / "out.h5ad"
+    result = _convert(root, "-o", out)
+    assert result.exit_code == 1
+    assert "not Cell Ranger 2's one folder per genome" in _out(result)
+    assert f"such as {root.name}/{subfolders[0]}" in _out(result)
+    assert not out.exists()
+
+    _ok(root / subfolders[0], "-o", out)
+    got = _read(out)
+    assert np.array_equal(got.X.toarray(), counts)
+    assert "genome" not in got.uns["cellranger"]
+
+
 def test_cell_ranger_metadata_is_kept_and_written_back(tmp_path, counts):
     comment = '%metadata_json: {"software_version": "cellranger-7.1.0", "format_version": 2}'
     folder = write_10x_mtx(
@@ -468,6 +503,86 @@ def test_a_barcode_with_a_tab_is_refused(tmp_path, counts):
     assert "tab or a line break" in _out(result)
     assert not (tmp_path / "out").exists()
     assert _debris(tmp_path) == []
+
+
+def _store_named(tmp_path: Path, counts, *, barcodes=None, names=None, ids=None) -> Path:
+    store = tmp_path / "s.h5ad"
+    obj = ad.AnnData(
+        X=sparse.csr_matrix(counts.astype(np.int32)),
+        obs={"_": np.zeros(N_CELLS)},
+        var={"gene_ids": ids or IDS, "gene_symbols": names or NAMES, "feature_types": TYPES},
+    )
+    obj.obs_names = barcodes or _barcodes()
+    obj.var_names = IDS
+    obj.write_h5ad(store)
+    return store
+
+
+@pytest.mark.parametrize(
+    "where,value,message",
+    [
+        ("barcode", '"AAAC-1', "A barcode starts with a double quote"),
+        ("name", '"quoted', "A feature name starts with a double quote"),
+        ("barcode", "", "A barcode is empty"),
+        ("barcode", "AAAC,1", "A barcode contains a comma"),
+        ("id", "", "A feature id is empty"),
+    ],
+)
+def test_names_pandas_and_r_would_misread_are_refused(tmp_path, counts, where, value, message):
+    """F106: a name starting with a double quote was written as it was, and
+    pandas (so scanpy) and R read it as a quoted field running on into the
+    next lines; an empty barcode made a blank line, which they skip, moving
+    every later barcode up a row. Found in review: scanpy reads barcodes.tsv
+    as comma-separated, so a comma cut a barcode short, and pandas reads an
+    empty id as missing."""
+    barcodes, names, ids = _barcodes(), list(NAMES), list(IDS)
+    if where == "barcode":
+        barcodes[3] = value
+    elif where == "id":
+        ids[3] = value
+    else:
+        names[3] = value
+    store = _store_named(tmp_path, counts, barcodes=barcodes, names=names, ids=ids)
+    out = tmp_path / "out"
+    result = _convert(store, "-o", out, "--to", "10x-mtx")
+    assert result.exit_code == 1
+    assert message in _out(result)
+    assert not out.exists()
+    assert _debris(tmp_path) == []
+
+
+def test_a_quote_inside_a_name_reads_back_in_pandas(tmp_path, counts):
+    """Only a quote that starts a field is taken for quoting: one inside it
+    is exported, and reads back as written. An empty name is exported too:
+    pandas reads it as missing, as it reads a gap in the table it came from."""
+    pd = pytest.importorskip("pandas")
+    names = list(NAMES)
+    names[3], names[4] = 'say "hi"', ""
+    out = tmp_path / "out"
+    _ok(_store_named(tmp_path, counts, names=names), "-o", out, "--to", "10x-mtx")
+    # As scanpy's read_10x_mtx reads it.
+    features = pd.read_csv(out / "features.tsv.gz", header=None, sep="\t")
+    assert list(features[1].fillna("")) == names
+
+
+def test_a_probe_level_matrix_exports_its_probe_ids(tmp_path, counts):
+    """F045: an imported Flex matrix exported its gene ids as the feature
+    ids, the same for several probes, and lost the probe ids."""
+    from tests.conftest import write_10x_h5
+
+    pd = pytest.importorskip("pandas")
+    probes = [f"ENSG{i // 2}|G{i // 2}|h{i}" for i in range(len(IDS))]
+    h5 = write_10x_h5(
+        tmp_path / "flex.h5", counts, barcodes=_barcodes(), ids=probes,
+        names=[f"G{i // 2}|h{i}" for i in range(len(IDS))],
+        probe_gene_ids=[f"ENSG{i // 2}" for i in range(len(IDS))],
+    )
+    store, out = tmp_path / "flex.h5ad", tmp_path / "out"
+    _ok(h5, "-o", store, "--make-unique")
+    _ok(store, "-o", out, "--to", "10x-mtx")
+    # As scanpy's read_10x_mtx reads it.
+    features = pd.read_csv(out / "features.tsv.gz", header=None, sep="\t")
+    assert list(features[0]) == probes
 
 
 def test_a_folder_output_needs_to(cr3, tmp_path):

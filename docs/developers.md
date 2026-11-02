@@ -149,8 +149,10 @@ before changing anything that writes:
   parametrised over `h5ad`, `zarr2` and `zarr3`.
 - **An oracle, not self-consistency.** anndata reads back what is written,
   scipy checks `recast`, scanpy, loompy and mudata check the conversions.
-  `test_anndata_versions.py` builds environments with anndata 0.8 to 0.13 and
-  checks both directions.
+  `test_anndata_versions.py` builds environments with anndata 0.7.8 to 0.13,
+  pinned exactly, and checks both directions: each release's store is read,
+  and from 0.8 the release reads back `subset`, `convert`, `split` and
+  `concat` outputs.
 - **Complexity guards that count, not time.** `tests/test_performance.py`
   counts the elements and bytes read through hooks on h5py and zarr. A change
   that adds reads per row or per group fails it on any machine.
@@ -217,9 +219,21 @@ It reports and never gates; the complexity guards gate.
 3. Add a `## X.Y.Z` section at the top of `docs/changelog.md`: a summary
    paragraph, then whichever of `### Added`, `### Changed` and `### Fixed`
    apply, each entry led by a bold line and an issue link.
-4. Merge, then push a tag with no `v` prefix. The tag runs `publish.yml` (checks
-   the tag against `pyproject.toml`, tests, publishes to PyPI),
-   `quay-on-tag.yml` (the image) and `benchmark.yml` (the benchmark page).
+4. Merge, then push a tag with no `v` prefix. The tag runs `publish.yml`,
+   which checks the tag against `pyproject.toml`, tests (`tests.yml`,
+   including a build and smoke test of the image), publishes to PyPI, then
+   calls `quay-on-tag.yml` to build the image, check that it runs, and push
+   that image. If the tests fail or the tag does not match, nothing is
+   published. `:latest` moves only to the highest `X.Y.Z` tag. The tag also
+   runs `benchmark.yml` (the benchmark page), whose measuring job has a
+   read-only token; the job that commits the results installs nothing.
+
+A manual `Publish` dispatch to TestPyPI publishes there alone, from any ref;
+one to PyPI publishes, and pushes the image, only when run from a tag, and
+fails from a branch.
+Workflows pin third-party actions by commit SHA, with the version in a
+comment, and pass tags and inputs to scripts through `env:`.
+`tests/test_release_pipeline.py` and the `workflow lint` job check both.
 
 `h5ad` as a command name, `info` and `convert` with `recast`'s flags are
 deprecated and stay until 1.0.0.

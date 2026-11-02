@@ -29,6 +29,22 @@ the unit suite once more, on both interpreters, with each direct dependency
 at the lowest version `pyproject.toml` allows, after checking that each one
 is at its floor and imports.
 
+Each leg of the unit suite checks that it runs the Python it is named after
+before testing anything. uv takes its interpreter from `.python-version`
+(3.12) ahead of the one on `PATH`, so up to 0.17.4 the 3.13 leg ran the
+suite on 3.12; the workflow now sets `UV_PYTHON` for each leg.
+
+The workflows are tested too. Publishing, the image and the benchmark run
+only on a tag, so a pull request never runs them. `test_release_pipeline.py`
+reads them, works out which jobs publish in each kind of run, and runs their
+scripts against stand-ins. The `workflow lint` job runs
+[actionlint](https://github.com/rhysd/actionlint) and
+[zizmor](https://docs.zizmor.sh) over them on every pull request, though not
+inside a release, where an advisory published that day would stop it. The
+`container image` job builds the Docker image and runs
+`.github/scripts/smoke-image.sh` against it, on every pull request and inside
+every release before PyPI has it.
+
 ## How the suite is organised
 
 | File | What it covers |
@@ -39,7 +55,8 @@ is at its floor and imports.
 | `test_validate.py` | Dimension validation for every axis-bearing path, including `raw/` |
 | `test_invariants.py` | Relationships that must hold for any data: subsetting everything is the identity, split partitions exactly, concat undoes split |
 | `test_anndata_roundtrip.py` | anndata writes the fixtures, reads back our output |
-| `test_anndata_versions.py` | Compatibility with six real anndata releases (see below) |
+| `test_anndata_versions.py` | Compatibility with seven real anndata releases (see below) |
+| `test_element_fidelity.py` | Elements anndata and scanpy write through every copy path (HDF5 to HDF5, HDF5 to Zarr, Zarr to HDF5, Zarr v2 and v3): scanpy's `rank_genes_groups` record arrays, the stores anndata 0.7.8 wrote (nested 0.1.0 frames, `ordered` on the labels), variable-length numbers and references, unusual attributes, Zarr v2 codecs, empty dataspaces and fill values; read back by anndata |
 | `test_commands_phase2.py`, `test_commands_coverage.py`, `test_cli.py` | Command surfaces and error paths |
 | `test_convert.py` | `convert` between every backend pair, read back by anndata; its refusals, staging, and the forwarding of recast's old flags |
 | `test_recast.py` | `recast` against scipy: casts, transposes, density changes and every refusal |
@@ -61,7 +78,10 @@ is at its floor and imports.
 | `test_mtx_codec.py`, `test_csr_build.py` | The streaming Matrix Market reader and writer against scipy, and the bucket sort they and `recast` share |
 | `test_external_readers.py` | 10x conversions, HDF5 and MTX, Parse runs and looms, checked by scanpy (Parse's own recipe for Parse), anndata with loompy (the pySCENIC tutorial's recipe for SCope looms), anndata's `read_csv`, `read_text` and `read_hdf`, a pandas 1.5 pycisTopic pickle read back there, mudata (a file it writes read as it reads it; ours read by it), and PyTables in their own uv environments (`integration`) |
 | `test_performance.py` | Complexity guards -- what an operation costs, not how long it takes (see below) |
-| `test_benchmark_harness.py` | That the benchmark's measurement is trustworthy |
+| `test_benchmark_harness.py` | That the benchmark's measurement is trustworthy, and that each run compares with the release before it |
+| `test_release_pipeline.py` | The workflows and the Dockerfile: which jobs publish in each kind of run, which hold a write token and what they run, pinned actions and base image, no untrusted value pasted into a script, each Python leg on its own Python |
+| `test_subset_oracle.py` | `subset` and `split` against anndata's `adata[obs, var]`, element by element: X, every layer layout, obsm and varm of any rank and as dataframes, obsp, varp, raw; on HDF5, Zarr v2 and Zarr v3 |
+| `test_subset_selection.py`, `test_select.py`, `test_split_names.py` | Name lists that repeat a name, queries on every column layout against pandas, missing labels apart from empty ones, and output names that never share a file |
 | `test_subset.py`, `test_export.py`, `test_import.py`, `test_info_read.py`, `test_zarr.py`, `test_query.py` | Per-feature unit tests |
 
 ## Writing a test
@@ -110,7 +130,7 @@ be rather than only that it did not grow.
 ### What is counted
 
 `tests/perf_counters.py` patches four seams, all verified against the pinned
-h5py 3.15.1 and zarr 3.1.5:
+h5py 3.15.1 and zarr 3.4.1:
 
 | Hook | Sees |
 |---|---|
@@ -331,7 +351,14 @@ rather than to assert a claim the code does not yet meet.
 
 Results are published to [Benchmarks](benchmarks.md) and `docs/benchmarks/<tag>.json`
 on every tag, and appended to the GitHub release notes if a release exists.
-Artifacts expire; the docs page is the durable series.
+Artifacts expire; the docs page is the durable series. The "vs previous"
+column compares with the release just before, at the same tier; a run that
+is not a release compares with the newest one.
+
+The job that measures holds a read-only token, because the baselines are the
+newest anndata, scanpy, dask and geopandas from PyPI rather than anything
+`uv.lock` pins. A second job, which installs nothing, renders the results
+with the standard library and commits them.
 
 ### How it measures
 
@@ -391,20 +418,45 @@ decays fastest.
 `test_anndata_versions.py` does not trust this repo's idea of the format. For
 each release below it builds an environment with `uv`, writes a reference
 store with that exact anndata, and then checks that the CLI reads it, and that
-what the CLI writes can be reopened **by that same release**.
+what the CLI writes can be reopened **by that same release**: the output of
+`subset`, of `convert` (to the same backend and to the other, `--zarr-format
+2` for the releases on zarr-python 2), of `split` and of `concat` over its
+pieces. The reference store holds a categorical in `raw/var` and scanpy's
+`rank_genes_groups` record arrays besides the common encodings.
 
-| Release | Interpreter | Pins | Why it is in the list |
+| Release | Interpreter | Pins (exact) | Why it is in the list |
 |---|---|---|---|
-| 0.8.0 | 3.11 | `pandas<2`, `numpy<2`, `zarr<3` | Introduced `encoding-type`/`encoding-version` |
-| 0.9.2 | 3.11 | `pandas<2`, `numpy<2`, `zarr<3` | |
-| 0.10.9 | 3.12 | `pandas<3`, `numpy<2`, `zarr<3` | |
-| 0.11.4 | 3.12 | `pandas<3`, `zarr<3` | The index became a `nullable-string-array` group |
-| 0.12.2 | 3.12 | `pandas<3`, `zarr>=3` | Zarr v3 |
-| 0.13.3 | 3.12 | `zarr>=3` | Zarr v3 by default |
+| 0.7.8 | 3.10 | pandas 1.3.5, numpy 1.23.5, zarr 2.10.3, h5py 3.7.0 | The legacy layout: no root attributes, categoricals as codes with a reference, `ordered` on `__categories`. Read only: it predates the encoding `adata` writes |
+| 0.8.0 | 3.11 | pandas 1.5.3, numpy 1.26.4, zarr 2.18.7 | Introduced `encoding-type`/`encoding-version`; the oldest release that reads what `adata` writes |
+| 0.9.2 | 3.11 | pandas 1.5.3, numpy 1.26.4, zarr 2.18.7 | |
+| 0.10.9 | 3.12 | pandas 2.3.3, numpy 1.26.4, zarr 2.18.7 | |
+| 0.11.4 | 3.12 | pandas 2.3.3, numpy 2.5.4, zarr 2.18.7 | The first that reads a `nullable-string-array` (it still writes text as `string-array`) |
+| 0.12.2 | 3.12 | pandas 2.3.3, numpy 2.5.4, zarr 3.4.2 | Zarr v3; the first that reads a `null` |
+| 0.13.4 | 3.12 | pandas 3.1.0, numpy 2.5.4, zarr 3.4.2 | Zarr v3 by default; with pandas 3, text as `nullable-string-array` |
 
-The pins matter: a modern pandas makes string columns a type the older
-releases cannot write, and pandas 1.x has no wheels for Python 3.12. To add a
-release, append to `RELEASES` in `tests/reference_stores.py`.
+Every release runs on exact versions (scipy and h5py too). A modern pandas
+makes string columns a type the older releases cannot write, pandas 1.x has
+no wheels for Python 3.12, and a floating pin would change what the job
+checks, or turn it red, without a change here. To add a release, append to
+`RELEASES` in `tests/reference_stores.py`. The readers
+`test_external_readers.py` compares against (scanpy, PyTables, loompy,
+mudata, squidpy and the rest) are pinned the same way, in `ORACLES` there.
+
+The unit suite needs no network to read anndata 0.7's layout:
+`tests/fixtures/anndata-0.7.8/` holds the two stores the 0.7.8 environment
+wrote (the Zarr one zipped), which `test_element_fidelity.py` copies through
+every path. To write them again, run the fixture writer in that environment:
+
+```bash
+uv run --no-project --python 3.10 --with anndata==0.7.8 --with scipy==1.9.3 --with pandas==1.3.5 --with numpy==1.23.5 --with zarr==2.10.3 --with h5py==3.7.0 --with numcodecs==0.13.1 tests/fixtures/write_reference_store.py <dir> h5ad
+```
+
+and the same with `zarr` for the Zarr store.
+
+Under pandas 3 anndata 0.13 writes every text column as a
+`nullable-string-array`, while most files in the wild hold `string-array`
+datasets. `test_anndata_roundtrip.py` builds its fixtures both ways, and
+concatenates one of each against `anndata.concat`.
 
 First run downloads those environments; afterwards `uv` serves them from cache
 and the suite takes about a minute. To skip it without the marker:

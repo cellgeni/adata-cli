@@ -435,3 +435,68 @@ def test_decode_str_array_preserves_shape():
 
 def test_decode_str_array_replaces_undecodable_bytes():
     assert "�" in decode_str_array(np.array([b"\xff\xfe"]))[0]
+
+
+# ---------------------------------------------------------------------------
+# rendering numbers, and dtypes h5py calls object
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float16", "float64"])
+def test_floats_render_at_their_own_precision(new_store, dtype):
+    """F125: a float32 was widened to a Python float first, so 0.1 printed as
+    0.10000000149011612; pandas writes the shortest text for the dtype."""
+    pd = pytest.importorskip("pandas")
+    values = np.array([0.1, 2.3, 33.7, -0.0, 1e4, 0.003], dtype=dtype)
+    path, opener = new_store()
+    with opener("a") as root:
+        ew.write_dense(root["uns"], "v", values)
+        got = read_str_chunk(root["uns"]["v"], 0, len(values))
+    assert got == pd.Series(values).to_csv(index=False, header=False).splitlines()
+
+
+def test_h5py_object_dtypes_other_than_text_are_not_text():
+    """F126: every object dtype was text, so variable-length numbers and
+    references were copied as their string forms."""
+    import h5py
+
+    assert is_string_dtype(h5py.string_dtype())
+    assert is_string_dtype(h5py.string_dtype("ascii"))
+    assert is_string_dtype(np.dtype(object)), "an in-memory object array of str"
+    assert not is_string_dtype(h5py.vlen_dtype(np.int32))
+    assert not is_string_dtype(h5py.ref_dtype)
+    assert target_dtype(h5py.vlen_dtype(np.int32), "hdf5") == h5py.vlen_dtype(np.int32)
+
+
+def test_record_dtypes_respell_text_fields_for_each_backend():
+    """F017: as anndata writes a rec-array, text fields are variable-length
+    str on HDF5 and `<U` of the longest value on Zarr."""
+    import h5py
+
+    from adata.elements.strings import as_records, record_dtype, text_field_widths
+
+    hdf5 = np.dtype([("a", h5py.string_dtype()), ("b", "f4"), ("c", "S3")])
+    records = np.array([(b"x", 1.0, b"p"), ("yyyy".encode(), 2.0, b"q")], dtype=hdf5)
+    widths = text_field_widths(records)
+    assert widths == {"a": 4}
+    zarr_dtype = record_dtype(hdf5, "zarr", widths)
+    assert zarr_dtype == np.dtype([("a", "<U4"), ("b", "f4"), ("c", "S3")])
+    assert as_records(records, zarr_dtype).tolist() == [("x", 1.0, b"p"), ("yyyy", 2.0, b"q")]
+    back = record_dtype(zarr_dtype, "hdf5")
+    assert h5py.check_string_dtype(back.fields["a"][0]) is not None
+    assert as_records(as_records(records, zarr_dtype), back)["a"].tolist() == ["x", "yyyy"]
+
+
+@pytest.mark.parametrize("fmt", ["h5ad", "zarr"])
+def test_a_legacy_column_reads_its_order_from_its_labels(tmp_path, fmt):
+    """F072: anndata 0.7 kept `ordered` on `__categories/<key>`; reading it
+    from the codes made every such column unordered."""
+    from adata.storage import open_store
+    from tests.reference_stores import legacy_store
+
+    src = legacy_store(fmt, tmp_path)
+    with open_store(src, "r") as store:
+        obs = store.root["obs"]
+        assert "ordered" not in obs["cell_type"].attrs, "0.7.8 put it on the labels"
+        assert is_ordered(obs["cell_type"], obs)
+        assert not is_ordered(obs["unordered"], obs)
+        assert read_categories(obs["cell_type"], obs).tolist() == ["A", "B", "C"]

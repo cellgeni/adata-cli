@@ -52,7 +52,9 @@ dependencies = [
     "pillow>=13.0.0",
     "rich>=14.2.0",
     "typer>=0.20.0,<1",
-    "zarr>=3.1.5,<4",
+    # 3.2.0 reads both spellings of a v3 record dtype (scanpy's
+    # rank_genes_groups); 3.1 cannot open a store newer zarr wrote with one.
+    "zarr>=3.2.0,<4",
 ]
 
 [project.urls]

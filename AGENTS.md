@@ -43,8 +43,9 @@ uv run python -m benchmarks.report results.json
 ```
 
 Test markers:
-- `integration` tests build uv environments with real anndata releases (0.8 to
-  0.13), scanpy and PyTables, so they need the network on the first run.
+- `integration` tests build uv environments with real anndata releases (0.7.8
+  to 0.13) and the oracles (scanpy, PyTables and others), all pinned exactly
+  in `tests/reference_stores.py`, so they need the network on the first run.
 - `perf` tests are slow, but CI runs them in the main job.
 
 CI also installs the package from a fresh resolution, without the lock,
@@ -252,11 +253,22 @@ an item to Released when its tag is out.
   - entries that start with a bold one-line lead and an issue link.
 - Merge the release branch, then push a tag with no `v` prefix. The tag
   triggers:
-  - `publish.yml`, which checks that the tag matches pyproject, tests, builds
-    and publishes to PyPI;
-  - `quay-on-tag.yml`, which pushes the Docker image to
-    `quay.io/cellgeni/adata-cli`;
+  - `publish.yml`, which checks that the tag matches pyproject, tests
+    (`tests.yml`, including a build and smoke test of the Docker image),
+    builds and publishes to PyPI, then calls `quay-on-tag.yml` to build the
+    image, check that it runs, and push that image to
+    `quay.io/cellgeni/adata-cli`. If the tests fail or the tag does not
+    match, nothing is published. `:latest` moves only to the highest
+    `X.Y.Z` tag;
   - `benchmark.yml`, which reruns `benchmarks/` and commits the results to
-    `docs/reference/benchmarks.md` and `docs/benchmarks/<tag>.json`.
+    `docs/reference/benchmarks.md` and `docs/benchmarks/<tag>.json`. The job
+    that measures has a read-only token; the one that commits installs
+    nothing.
+- A manual `Publish` dispatch to `testpypi` publishes there alone, from any
+  ref. One to `pypi` publishes, and pushes the image, only when run from a
+  tag; from a branch it fails.
+- Workflows pin third-party actions by commit SHA, with the version in a
+  comment, and pass tags and inputs to scripts through `env:`.
+  `tests/test_release_pipeline.py` and the `workflow lint` job check both.
 - `docs/reference/benchmarks.md` is generated. To change its wording, edit
   `benchmarks/page_template.md`.

@@ -1,5 +1,9 @@
-# Base image: Python 3.12 + uv preinstalled (Debian slim)
-FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+# Base image: Python 3.12 + uv preinstalled (Debian slim), pinned by digest
+# (of the multi-arch index) so a rebuilt release gets the same base. Up to
+# 0.17.4 this was the floating `python3.12-bookworm-slim`, which has pointed
+# at this image since uv 0.9.30. To move it, take the index digest of the new
+# tag:  docker buildx imagetools inspect ghcr.io/astral-sh/uv:<tag>
+FROM ghcr.io/astral-sh/uv:0.9.30-python3.12-bookworm-slim@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58
 
 # PYTHONNOUSERSITE: Apptainer bind-mounts the host $HOME by default, so a user's
 #   ~/.local/lib/python3.12/site-packages would otherwise shadow this venv.
@@ -26,15 +30,23 @@ RUN apt-get update \
 # duckdb, for the filtering workflows in the docs: export obs to CSV, query it,
 # feed the names back to `adata subset --obs`. A single static binary, so it
 # needs no venv and cannot conflict with the project's dependencies.
+#
+# Checked against the SHA-256 of each release zip, which the build fails
+# without. duckdb publishes no checksums for 1.1.3, so these were taken from
+# the zips, as served by both GitHub and install.duckdb.org. A new version
+# needs both hashes replaced: `sha256sum duckdb_cli-linux-*.zip`.
 ARG DUCKDB_VERSION=v1.1.3
+ARG DUCKDB_SHA256_AMD64=efd0fccdb1a28d9ec7a6ebfcde59900068b8ba43a846c9b553c0fd2bbe4acf43
+ARG DUCKDB_SHA256_AARCH64=6e6caaab69a9c8d77c4400e88197695b072a98b678f6f8ffb015af4f02b13618
 RUN ARCH="$(dpkg --print-architecture)" \
     && case "$ARCH" in \
-         amd64) DUCKDB_ARCH=amd64 ;; \
-         arm64) DUCKDB_ARCH=aarch64 ;; \
+         amd64) DUCKDB_ARCH=amd64; DUCKDB_SHA256="$DUCKDB_SHA256_AMD64" ;; \
+         arm64) DUCKDB_ARCH=aarch64; DUCKDB_SHA256="$DUCKDB_SHA256_AARCH64" ;; \
          *) echo "unsupported architecture: $ARCH" >&2; exit 1 ;; \
        esac \
     && curl -fsSL -o /tmp/duckdb.zip \
          "https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/duckdb_cli-linux-${DUCKDB_ARCH}.zip" \
+    && echo "${DUCKDB_SHA256}  /tmp/duckdb.zip" | sha256sum -c - \
     && unzip -q /tmp/duckdb.zip -d /usr/local/bin \
     && chmod +x /usr/local/bin/duckdb \
     && rm /tmp/duckdb.zip
@@ -71,6 +83,16 @@ RUN uv sync --locked --extra pickle --extra spatial \
 
 # Put the project venv on PATH so `adata` is directly runnable
 ENV PATH="/cli/.venv/bin:${PATH}"
+
+# Not root: up to 0.17.4 a plain `docker run` ran as root. Singularity and
+# Apptainer run the image as the caller whatever this says, as does Docker
+# given `-u $(id -u):$(id -g)`, and everything above is readable by any user
+# id. A bind mount the image writes to must be writable by whichever user it
+# runs as. Numeric, so that a runtime enforcing non-root (Kubernetes'
+# runAsNonRoot) can check it.
+RUN useradd --uid 10001 --user-group --create-home --no-log-init adata
+USER 10001:10001
+WORKDIR /home/adata
 
 # No ENTRYPOINT on purpose: Nextflow requires /bin/bash to be the container
 # entrypoint, so the image must not set one of its own. This is why invocations

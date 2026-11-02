@@ -21,6 +21,7 @@ from adata.conversion import (
     detect_format,
     output_format,
 )
+from adata.storage import check_hdf5_inputs
 from adata.util.path import check_output, is_zarr_path, same_path
 from adata.util.staging import check_free_space, disk_size, staged_outputs
 
@@ -57,6 +58,10 @@ def convert_store(
     dst_format = output_format(output, dst_format)
     converter = converter_for(src_format, dst_format)
     check_options(converter, options, src_format, dst_format)
+    # Most converters read their HDF5 with h5py directly, not open_store.
+    for source in (file, options.raw):
+        if source is not None:
+            check_hdf5_inputs(source)
 
     plan = converter.plan(file, output, src_format, dst_format, options)
     for out in plan.outputs:

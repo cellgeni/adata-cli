@@ -39,7 +39,7 @@ from tests.conftest import (
     write_starsolo_velocyto,
     write_text_matrix,
 )
-from tests.reference_stores import must_build, offline, uv_available
+from tests.reference_stores import must_build, offline, oracle, uv_available
 
 pytestmark = [pytest.mark.integration, pytest.mark.timeout(1800)]
 
@@ -55,7 +55,8 @@ def _run(packages: List[str], script: str, *args: str, python: str = PYTHON):
         pytest.skip("needs uv and the network")
     cmd = ["uv", "run", "--no-project", "--python", python]
     for package in packages:
-        cmd += ["--with", package]
+        # Pinned: an oracle that moves on its own changes what is checked.
+        cmd += ["--with", oracle(package)]
     cmd += ["python", "-c", script, *args]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=1500)
     lines = [l for l in result.stdout.splitlines() if l.startswith("RESULT ")]
@@ -151,7 +152,8 @@ def test_a_probe_barcode_matrix_imports_as_scanpy_reads_it(tmp_path):
         ids=[f"ENSG{i}|PROBE{i}" for i in range(6)],
         names=[f"G{i}" for i in range(6)],
         probe_gene_ids=[f"ENSG{i // 2}" for i in range(6)],
-        extra={"filtered_probes": [True, False, True, True, False, True]},
+        extra={"gene_name": [f"G{i // 2}" for i in range(6)]},
+        untagged={"filtered_probes": [True, False, True, True, False, True]},
         filtered_barcodes=[i % 3 != 0 for i in range(30)],
     )
     _import_matches_scanpy(h5, tmp_path)
@@ -418,6 +420,99 @@ def test_scanpy_reads_what_we_export(tmp_path, layout):
     _convert(str(source), "-o", str(out))
     problems = _run(["scanpy"], _READ_EXPORT_WITH_SCANPY, str(source), str(out), "X")
     assert problems == [], problems
+
+
+# Read two 10x files with scanpy and list every difference: the original,
+# and what an import and export of it wrote.
+_COMPARE_10X_FILES = r"""
+import json, sys, warnings
+warnings.filterwarnings("ignore")
+import numpy as np, scanpy as sc
+
+ref, got = (sc.read_10x_h5(path, gex_only=False) for path in sys.argv[1:3])
+problems = []
+if ref.shape != got.shape:
+    problems.append(f"shape {ref.shape} != {got.shape}")
+else:
+    if ref.X.dtype != got.X.dtype or not np.array_equal(ref.X.toarray(), got.X.toarray()):
+        problems.append("X differs")
+    for axis in ("obs", "var"):
+        a, b = getattr(ref, axis), getattr(got, axis)
+        if list(a.index) != list(b.index):
+            problems.append(f"{axis}_names differ")
+        if sorted(a.columns) != sorted(b.columns):
+            problems.append(f"{axis} columns {list(a.columns)} != {list(b.columns)}")
+        for column in a.columns:
+            if column in b.columns and (
+                a[column].dtype != b[column].dtype or list(a[column]) != list(b[column])
+            ):
+                problems.append(f"{axis}[{column!r}] differs")
+print("RESULT " + json.dumps(problems))
+"""
+
+
+@pytest.mark.parametrize("flags", [[], ["--make-unique"]], ids=["ids", "unique"])
+def test_scanpy_reads_an_exported_flex_matrix_as_it_reads_the_original(tmp_path, flags):
+    """F045, F048: an imported Flex matrix exported its gene ids as probe
+    ids and its filtered_probes as strings, so scanpy read back other
+    probe_ids, no gene_ids, and filtered_probes always true."""
+    h5 = write_10x_h5(
+        tmp_path / "flex.h5",
+        _counts(30, 6, seed=1),
+        barcodes=_barcodes(30),
+        ids=[f"ENSG{i // 2}|G{i // 2}|h{i}" for i in range(6)],
+        names=[f"G{i // 2}|h{i}" for i in range(6)],
+        probe_gene_ids=[f"ENSG{i // 2}" for i in range(6)],
+        extra={"gene_name": [f"G{i // 2}" for i in range(6)], "probe_region": ["spliced"] * 6},
+        untagged={"filtered_probes": [True, False, True, True, False, True]},
+        filtered_barcodes=[i % 3 != 0 for i in range(30)],
+    )
+    h5ad, back = tmp_path / "flex.h5ad", tmp_path / "back.h5"
+    _convert(str(h5), "-o", str(h5ad), *flags)
+    _convert(str(h5ad), "-o", str(back))
+    problems = _run(["scanpy"], _COMPARE_10X_FILES, str(h5), str(back))
+    assert problems == [], problems
+
+
+_READ_TEXT_WITH_SCANPY = r"""
+import json, sys, warnings
+warnings.filterwarnings("ignore")
+import scanpy as sc
+
+got = sc.read_10x_h5(sys.argv[1], gex_only=False)
+print("RESULT " + json.dumps({
+    "var_names": list(got.var_names), "obs_names": list(got.obs_names), "dtype": str(got.X.dtype),
+}))
+"""
+
+
+def test_scanpy_reads_exported_text_outside_ascii_and_float16_counts(tmp_path):
+    """F110: names outside ASCII were written as UTF-8 bytes, which scanpy
+    decodes as ASCII and fails on; Cell Ranger writes XML character
+    references. F049: float16 counts were written as float16, which scipy
+    cannot hold as a sparse matrix."""
+    ad = pytest.importorskip("anndata")
+    pd = pytest.importorskip("pandas")
+
+    names = ["IFNγ", "Gré", "C", "D"]
+    barcodes = [f"é{b}" for b in _barcodes(12)]
+    counts = _counts(12, 4)
+    source = tmp_path / "text.h5ad"
+    ad.AnnData(
+        X=counts.astype(np.float16),
+        obs=pd.DataFrame(index=barcodes),
+        var=pd.DataFrame(
+            {"gene_ids": [f"E{i}" for i in range(4)], "feature_types": ["Gene Expression"] * 4},
+            index=names,
+        ),
+    ).write_h5ad(source)
+    out = tmp_path / "text.h5"
+    _convert(str(source), "-o", str(out))
+
+    got = _run(["scanpy"], _READ_TEXT_WITH_SCANPY, str(out))
+    assert got["var_names"] == ["IFN&#947;", "Gr&#233;", "C", "D"]
+    assert got["obs_names"] == [b.replace("é", "&#233;") for b in barcodes]
+    assert got["dtype"] == "float32"
 
 
 _READ_WITH_PYTABLES = r"""
@@ -1267,3 +1362,62 @@ def test_visium_hd_cells_import_as_10x_s_geopandas_recipe_reads_them(tmp_path):
     out = tmp_path / "cells.h5ad"
     _convert(str(hd.outs), "-o", str(out), "--cells", "--var-names", "gene_symbols")
     assert _run(["scanpy", "geopandas"], _COMPARE_VISIUM_CELLS, str(hd.cells.folder), str(out)) == []
+
+
+# ---------------------------------------------------------------------------
+# scanpy's marker genes, written by scanpy, read back by scanpy after every
+# copy: `rank_genes_groups` is a dict of record arrays, one field per group.
+
+_WRITE_MARKERS = r"""
+import json, sys, warnings
+warnings.filterwarnings("ignore")
+import numpy as np, pandas as pd, scanpy as sc, anndata as ad
+rng = np.random.default_rng(0)
+a = ad.AnnData(rng.poisson(1.0, (40, 12)).astype("float32"))
+a.var_names = [f"gene_{i}" for i in range(12)]
+a.obs["group"] = pd.Categorical(["a", "bb"] * 20)
+sc.pp.log1p(a)
+sc.tl.rank_genes_groups(a, "group", method="wilcoxon")
+a.write_h5ad(sys.argv[1] + ".h5ad")
+a.write_zarr(sys.argv[1] + ".zarr")
+print("RESULT", json.dumps(True))
+"""
+
+_COMPARE_MARKERS = r"""
+import json, sys, warnings
+warnings.filterwarnings("ignore")
+import scanpy as sc, anndata as ad
+read = lambda p: ad.read_zarr(p) if p.endswith(".zarr") else ad.read_h5ad(p)
+want = sc.get.rank_genes_groups_df(read(sys.argv[1]), group=None)
+got = sc.get.rank_genes_groups_df(read(sys.argv[2]), group=None)
+problems = []
+if list(got.columns) != list(want.columns):
+    problems.append(f"columns {list(got.columns)} != {list(want.columns)}")
+else:
+    for column in want.columns:
+        if got[column].astype(str).tolist() != want[column].astype(str).tolist():
+            problems.append(f"{column} differs")
+print("RESULT", json.dumps(problems))
+"""
+
+
+@pytest.mark.parametrize(
+    "source,target,extra",
+    [
+        ("h5ad", "zarr", []),
+        ("h5ad", "zarr", ["--zarr-format", "2"]),
+        ("zarr", "h5ad", []),
+        ("h5ad", "h5ad", ["--compression", "gzip"]),
+    ],
+    ids=["h5ad-zarr3", "h5ad-zarr2", "zarr-h5ad", "h5ad-h5ad-gzip"],
+)
+def test_rank_genes_groups_survives_a_conversion_as_scanpy_reads_it(tmp_path, source, target, extra):
+    """F017, F021: scanpy's marker genes crossed no backend (Zarr refused the
+    HDF5 text fields, h5py the Zarr ones), and a copy with --compression
+    crashed the process."""
+    stem = tmp_path / "scanpy"
+    _run(["scanpy"], _WRITE_MARKERS, str(stem))
+    src = f"{stem}.{source}"
+    out = tmp_path / f"out.{target}"
+    _convert(src, "-o", str(out), *extra)
+    assert _run(["scanpy"], _COMPARE_MARKERS, src, str(out)) == []
