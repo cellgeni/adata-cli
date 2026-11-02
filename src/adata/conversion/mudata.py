@@ -82,10 +82,12 @@ MAGIC = b"MuData"
 #: muon's names for 10x feature types; any other type is named after itself.
 MODALITY_NAMES = {"Gene Expression": "rna", "Peaks": "atac", "Antibody Capture": "prot"}
 
-#: Rows read at a time when global rows are taken onto a modality's.
+#: Rows read at a time when global rows are taken onto a modality's, and
+#: the most of a dense matrix's read at once.
 ROW_BLOCK = 1 << 14
 
-#: Bytes read at a time from a dense graph, whose rows span the global axis.
+#: Bytes of a dense matrix read at a time: wide rows (a graph's span the
+#: global axis, X's every feature) make the block fewer rows than ROW_BLOCK.
 SLAB_BYTES = 1 << 26
 
 _AXES = (("obs", "obsm", "obsp"), ("var", "varm", "varp"))
@@ -93,6 +95,15 @@ _AXES = (("obs", "obsm", "obsp"), ("var", "varm", "varp"))
 
 def _attr(obj: Any, name: str) -> Any:
     return spec.decode_attr(obj.attrs.get(name, None))
+
+
+def block_rows(*arrays: Any) -> int:
+    """Rows of dense `arrays` read at once: as many of the widest as
+    `SLAB_BYTES` holds, `ROW_BLOCK` at most, one at least."""
+    widest = max(
+        (int(np.prod(a.shape[1:], dtype=np.int64)) * a.dtype.itemsize for a in arrays), default=0
+    )
+    return max(1, min(ROW_BLOCK, SLAB_BYTES // max(1, widest)))
 
 
 def is_mudata_root(root: Any) -> bool:
@@ -527,8 +538,9 @@ def _take_array(obj: Any, parent: Any, name: str, rows: np.ndarray, compression:
     out = create_dataset(parent, name, shape=shape, dtype=obj.dtype,
                          **_layout(obj, parent, shape, obj.dtype, compression))
     copy_attrs(obj.attrs, out.attrs, target_backend=backend)
-    for lo in range(0, len(rows), ROW_BLOCK):
-        out[lo:lo + ROW_BLOCK, ...] = aligned_rows(obj, rows[lo:lo + ROW_BLOCK])
+    step = block_rows(obj)
+    for lo in range(0, len(rows), step):
+        out[lo:lo + step, ...] = aligned_rows(obj, rows[lo:lo + step])
 
 
 def _take_square(obj: Any, parent: Any, name: str, rows: np.ndarray, compression: Optional[str]) -> None:
@@ -539,7 +551,7 @@ def _take_square(obj: Any, parent: Any, name: str, rows: np.ndarray, compression
     out = create_dataset(parent, name, shape=shape, dtype=obj.dtype,
                          **_layout(obj, parent, shape, obj.dtype, compression))
     copy_attrs(obj.attrs, out.attrs, target_backend=backend)
-    step = max(1, min(ROW_BLOCK, SLAB_BYTES // max(1, obj.shape[1] * obj.dtype.itemsize)))
+    step = block_rows(obj)
     for lo in range(0, len(rows), step):
         out[lo:lo + step, :] = aligned_rows(obj, rows[lo:lo + step])[:, rows]
 
@@ -700,7 +712,7 @@ class MudataExport(Converter):
                 group.attrs["encoder-version"] = __version__
                 targets.append(Target(group, None, None if len(rows) == detail.n_var else rows, keep))
             _write_targets(
-                src, targets, chunk_rows=ROW_BLOCK, console=console,
+                src, targets, chunk_rows=block_rows(*_dense_matrices(src)), console=console,
                 skip={"obs", "obsm", "obsp", "uns"}, verb="Writing",
                 # A modality split from var narrows its categories, as
                 # anndata's adata[:, mask] does; the whole AnnData is no subset.
@@ -722,6 +734,27 @@ class MudataExport(Converter):
         header = f"MuData (format-version={ENCODING_VERSION};creator=adata;creator-version={__version__})"
         with open(staged[0], "r+b") as raw:
             raw.write(header.encode("ascii")[:USERBLOCK].ljust(USERBLOCK, b"\0"))
+
+
+def _dense_matrices(root: Any) -> List[Any]:
+    """The dense arrays the modalities are written from a block of rows at
+    a time (X, the layers, varm, varp and raw's), so one block size, set by
+    the widest, bounds every read in bytes."""
+    found = []
+    for path in ("X", "layers", "varm", "varp", "raw/X", "raw/varm"):
+        node: Any = root
+        for part in path.split("/"):
+            node = node[part] if is_group(node) and part in node else None
+            if node is None:
+                break
+        if is_dataset(node):
+            members = [node]
+        elif is_group(node) and spec.encoding_type(node) not in spec.SPARSE_TYPES:
+            members = [node[k] for k in node.keys()]
+        else:
+            members = []
+        found += [m for m in members if is_dataset(m) and m.ndim >= 2]
+    return found
 
 
 def _plan_raw(
