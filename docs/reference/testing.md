@@ -79,6 +79,8 @@ every release before PyPI has it.
 | `test_performance.py` | Complexity guards -- what an operation costs, not how long it takes (see below) |
 | `test_benchmark_harness.py` | That the benchmark's measurement is trustworthy, and that each run compares with the release before it |
 | `test_release_pipeline.py` | The workflows and the Dockerfile: which jobs publish in each kind of run, which hold a write token and what they run, pinned actions and base image, no untrusted value pasted into a script, each Python leg on its own Python |
+| `test_subset_oracle.py` | `subset` and `split` against anndata's `adata[obs, var]`, element by element: X, every layer layout, obsm and varm of any rank and as dataframes, obsp, varp, raw; on HDF5, Zarr v2 and Zarr v3 |
+| `test_subset_selection.py`, `test_select.py`, `test_split_names.py` | Name lists that repeat a name, queries on every column layout against pandas, missing labels apart from empty ones, and output names that never share a file |
 | `test_subset.py`, `test_export.py`, `test_import.py`, `test_info_read.py`, `test_zarr.py`, `test_query.py` | Per-feature unit tests |
 
 ## Writing a test

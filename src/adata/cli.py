@@ -681,7 +681,7 @@ def convert(
     gene_names_column: Optional[str] = typer.Option(
         None,
         "--gene-names-column",
-        help="10x output: var column holding gene names (default: var_names)",
+        help="10x output: var column holding gene names (default: gene_symbols, else var_names)",
     ),
     feature_types_column: Optional[str] = typer.Option(
         None,
@@ -838,9 +838,9 @@ def convert(
     10x-mtx writes a Matrix Market folder. Between h5ad and zarr every element is
     copied, streamed, keeping the source's chunking and compression where the
     target can express them. CellBender output keeps its latent variables, as
-    CellBender's own loader names them. A 10x matrix is read as scanpy's
-    read_10x_h5 or read_10x_mtx (gex_only=False) reads it, keeping integer
-    counts, and written as Cell Ranger writes it. A Space Ranger outs/
+    CellBender's own loader names them. A 10x matrix is read with the
+    columns scanpy's read_10x_h5 or read_10x_mtx (gex_only=False) gives,
+    keeping integer counts, and written as Cell Ranger writes it. A Space Ranger outs/
     folder keeps its spot positions, images and scale factors where squidpy
     puts them; a Visium HD one is read at the bin size --bin-size names
     (needs pyadata-cli[spatial]), or as Space Ranger 4's segmented cells

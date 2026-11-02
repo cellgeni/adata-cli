@@ -101,6 +101,91 @@ def test_a_velocyto_loom_makes_x_spliced_and_keeps_the_main_matrix(tmp_path):
         assert np.array_equal(got.layers[name].toarray(), truth.layers[name])
 
 
+def test_the_main_matrix_is_kept_when_a_layer_is_also_named_matrix(tmp_path):
+    """F047: with X a layer (spliced), the main matrix goes to
+    layers["matrix"]; when the loom had a layer of that name too, the main
+    matrix was not written at all."""
+    truth = write_loom(tmp_path / "velo.loom", velocyto=True)
+    with h5py.File(truth.path, "a") as f:
+        f["layers"].create_dataset("matrix", data=f["matrix"][...] + 100)
+        main, named = f["matrix"][...], f["layers/matrix"][...]
+
+    # A layer named matrix: written from an AnnData, whose X is the main one.
+    out = tmp_path / "out.h5ad"
+    result = _ok(truth.path, "-o", out)
+    assert "X = matrix, layers: " in _out(result)
+    got = _read(out)
+    assert np.array_equal(_dense(got.X), main.T)
+    assert np.array_equal(_dense(got.layers["matrix"]), named.T)
+    assert np.array_equal(_dense(got.layers["spliced"]), truth.layers["spliced"])
+
+    # spliced asked for: the main matrix takes the next free name.
+    out = tmp_path / "spliced.h5ad"
+    result = _ok(truth.path, "-o", out, "--layer", "spliced")
+    assert "The main matrix is written as layers['matrix_1']: a layer is already named 'matrix'." in _out(result)
+    assert "X = spliced, layers: matrix_1, " in _out(result)
+    got = _read(out)
+    assert np.array_equal(_dense(got.layers["matrix_1"]), main.T)
+    assert np.array_equal(_dense(got.layers["matrix"]), named.T)
+    assert np.array_equal(_dense(got.X), truth.layers["spliced"])
+
+
+def test_a_velocyto_round_trip_keeps_the_same_matrices_however_often_it_is_made(tmp_path):
+    """F047: keeping the main matrix as layers["matrix_1"] made each loom ->
+    h5ad -> loom cycle of a velocyto file add a copy of X; the main matrix
+    of a loom written from an AnnData is that AnnData's X."""
+    truth = write_loom(tmp_path / "velo.loom", velocyto=True)
+    first = tmp_path / "0.h5ad"
+    _ok(truth.path, "-o", first)
+    path = first
+    for cycle in (1, 2):
+        loom, path = tmp_path / f"{cycle}.loom", tmp_path / f"{cycle}.h5ad"
+        _ok(tmp_path / f"{cycle - 1}.h5ad", "-o", loom)
+        result = _ok(loom, "-o", path)
+        assert "Warning" not in _out(result)
+    ref, got = ad.read_h5ad(first), ad.read_h5ad(path)
+    # anndata 0.13 lists a None key among the layers; the integration tests skip it too.
+    names = lambda a: sorted(k for k in a.layers.keys() if k)  # noqa: E731
+    assert names(got) == names(ref) == ["ambiguous", "matrix", "spliced", "unspliced"]
+    assert np.array_equal(_dense(got.X), _dense(ref.X))
+    for name in names(ref):
+        assert np.array_equal(_dense(got.layers[name]), _dense(ref.layers[name])), name
+
+
+@pytest.mark.parametrize("suffix", [".h5ad", ".zarr"])
+def test_a_float16_loom_imports_as_float32_where_it_goes_sparse(tmp_path, suffix):
+    """F049 (moved from B8a): a float16 loom, or one exported from a
+    float16 X, imported as a float16 CSR, which anndata cannot read:
+    scipy's sparse matrices have no float16."""
+    half = (np.arange(24, dtype=np.float16).reshape(4, 6) / 8).astype(np.float16)  # cells x genes
+    source = tmp_path / "half.h5ad"
+    ad.AnnData(
+        X=half,
+        obs=pd.DataFrame(index=[f"c{i}" for i in range(4)]),
+        var=pd.DataFrame(index=[f"g{j}" for j in range(6)]),
+        layers={"counts": half * 2},
+    ).write_h5ad(source)
+    loom = tmp_path / "half.loom"
+    _ok(source, "-o", loom)
+    with h5py.File(loom, "r") as f:
+        assert f["matrix"].dtype == np.float16, "a loom may hold float16"
+
+    out = tmp_path / f"back{suffix}"
+    result = _ok(loom, "-o", out)
+    assert "float16 matrices become float32" in _out(result)
+    got = _read(out)
+    assert got.X.dtype == np.float32 and sparse.issparse(got.X)
+    assert np.array_equal(_dense(got.X), half.astype(np.float32))
+    assert np.array_equal(_dense(got.layers["counts"]), (half * 2).astype(np.float32))
+
+    dense = tmp_path / f"dense{suffix}"
+    result = _ok(loom, "-o", dense, "--dense")
+    assert "become float32" not in _out(result)
+    got = _read(dense)
+    assert got.X.dtype == np.float16, "dense, anndata reads float16 as it is"
+    assert np.array_equal(got.X, half)
+
+
 def test_layer_picks_x(tmp_path):
     truth = write_loom(tmp_path / "velo.loom", velocyto=True)
     out = tmp_path / "u.h5ad"
@@ -325,6 +410,168 @@ def test_explicit_gene_ids_are_the_accession_whatever_the_var_names(tmp_path):
         assert [v.decode() for v in f["row_attrs/Gene"][...]] == ["S1", "S2", "S3"]
 
 
+def _text(ds) -> list:
+    return [v.decode() if isinstance(v, bytes) else str(v) for v in ds[...]]
+
+
+def _legacy_h5ad(path: Path) -> Path:
+    """An h5ad as anndata 0.7 wrote it: dataframes at encoding-version
+    0.1.0, a categorical as its codes with a `categories` reference into
+    `__categories`, -1 for a missing value."""
+    with h5py.File(path, "w") as f:
+        for axis, names in (("obs", ["c1", "c2", "c3", "c4"]), ("var", ["E1", "E2"])):
+            frame = f.create_group(axis)
+            frame.attrs.update({"_index": "_index", "encoding-type": "dataframe", "encoding-version": "0.1.0"})
+            frame.create_dataset("_index", data=np.array(names, dtype="S"))
+        for axis, column, labels, codes in (
+            ("obs", "cell_type", ["TypeA", "TypeB", "TypeC"], [0, 1, -1, 2]),
+            ("var", "gene_symbols", ["A", "B"], [1, 0]),
+        ):
+            frame = f[axis]
+            labels_ds = frame.require_group("__categories").create_dataset(column, data=np.array(labels, dtype="S"))
+            frame.create_dataset(column, data=np.array(codes, dtype=np.int8)).attrs["categories"] = labels_ds.ref
+            frame.attrs["column-order"] = np.array([column], dtype="S")
+        f.create_dataset("X", data=np.arange(8, dtype=np.float32).reshape(4, 2))
+    return path
+
+
+def test_anndata_07_categoricals_export_as_their_labels(tmp_path):
+    """F008: an anndata 0.7 categorical (codes with a `categories`
+    reference) was taken for a number column, and its codes written in
+    place of its labels."""
+    source = _legacy_h5ad(tmp_path / "legacy.h5ad")
+    ref = ad.read_h5ad(source)
+    out = tmp_path / "out.loom"
+    _ok(source, "-o", out)
+    with h5py.File(out, "r") as f:
+        assert h5py.check_string_dtype(f["col_attrs/cell_type"].dtype) is not None
+        assert _text(f["col_attrs/cell_type"]) == ["" if pd.isna(v) else v for v in ref.obs["cell_type"]]
+        assert _text(f["row_attrs/Gene"]) == list(ref.var["gene_symbols"])
+        assert _text(f["row_attrs/Accession"]) == list(ref.var_names)
+
+
+def test_a_store_without_x_writes_the_layer_named_and_leaves_x_out(tmp_path):
+    """F102: with --layer, X was listed as a layer to write even when the
+    store had none, and the write failed half way with HDF5's own error."""
+    counts = np.arange(12, dtype=np.float32).reshape(4, 3)
+    obj = ad.AnnData(
+        obs=pd.DataFrame(index=[f"c{i}" for i in range(4)]),
+        var=pd.DataFrame(index=[f"g{i}" for i in range(3)]),
+        layers={"counts": sparse.csr_matrix(counts), "spliced": counts * 2},
+    )
+    source = tmp_path / "nox.h5ad"
+    obj.write_h5ad(source)
+    ref = ad.read_h5ad(source)
+    assert ref.X is None
+
+    out = tmp_path / "out.loom"
+    result = _ok(source, "-o", out, "--layer", "counts")
+    assert "from layers/counts, layers: spliced;" in _out(result)
+    with h5py.File(out, "r") as f:
+        assert np.array_equal(f["matrix"][...], _dense(ref.layers["counts"]).T)
+        assert list(f["layers"]) == ["spliced"]
+        assert np.array_equal(f["layers/spliced"][...], _dense(ref.layers["spliced"]).T)
+
+    result = _convert(source, "-o", tmp_path / "plain.loom")
+    assert result.exit_code == 1
+    assert "This store has no X: name the matrix to write with --layer (there are counts, spliced)." in _out(result)
+    assert not (tmp_path / "plain.loom").exists()
+
+
+def test_a_layer_named_x_is_written_from_itself_and_x_beside_it(tmp_path):
+    """F102 (review): a layer named X was written from the top-level X,
+    and with --layer naming another matrix it was listed twice, failing
+    half way with HDF5's `name already exists`."""
+    obj = ad.AnnData(
+        X=np.ones((3, 2), dtype=np.float32),
+        obs=pd.DataFrame(index=["a", "b", "c"]),
+        var=pd.DataFrame(index=["g1", "g2"]),
+        layers={"X": np.full((3, 2), 7, dtype=np.float32), "counts": np.full((3, 2), 3, dtype=np.float32)},
+    )
+    source = tmp_path / "x.h5ad"
+    obj.write_h5ad(source)
+    ref = ad.read_h5ad(source)
+
+    plain = tmp_path / "plain.loom"
+    _ok(source, "-o", plain)
+    with h5py.File(plain, "r") as f:
+        assert np.array_equal(f["matrix"][...], _dense(ref.X).T)
+        assert np.array_equal(f["layers/X"][...], _dense(ref.layers["X"]).T)
+
+    named = tmp_path / "counts.loom"
+    result = _ok(source, "-o", named, "--layer", "counts")
+    assert "X is written as layers/X_1: a layer is already named 'X'." in _out(result)
+    with h5py.File(named, "r") as f:
+        assert np.array_equal(f["matrix"][...], _dense(ref.layers["counts"]).T)
+        assert sorted(f["layers"]) == ["X", "X_1"]
+        assert np.array_equal(f["layers/X"][...], _dense(ref.layers["X"]).T)
+        assert np.array_equal(f["layers/X_1"][...], _dense(ref.X).T)
+
+
+def test_columns_named_like_a_looms_own_attributes_are_left_out_with_a_warning(tmp_path):
+    """F103: an obs column named CellID, and var columns named Gene or
+    Accession beside the columns those are written from, were dropped
+    without a word, though the docs promise a warning."""
+    obj = ad.AnnData(
+        X=np.ones((3, 2), dtype=np.float32),
+        obs=pd.DataFrame({"CellID": ["x", "y", "z"], "n": [1, 2, 3]}, index=["a", "b", "c"]),
+        var=pd.DataFrame(
+            {"gene_symbols": ["S1", "S2"], "Gene": ["T1", "T2"], "gene_ids": ["E1", "E2"], "Accession": ["Z1", "Z2"]},
+            index=["g1", "g2"],
+        ),
+    )
+    source, out = tmp_path / "clash.h5ad", tmp_path / "clash.loom"
+    obj.write_h5ad(source)
+    ref = ad.read_h5ad(source)
+    text = _out(_ok(source, "-o", out))
+    assert "Not written: obs column 'CellID' -- col_attrs/CellID is the cell names." in text
+    assert "Not written: var column 'Gene' -- row_attrs/Gene is the gene names." in text
+    assert "Not written: var column 'Accession' -- row_attrs/Accession is the gene ids." in text
+    with h5py.File(out, "r") as f:
+        assert _text(f["col_attrs/CellID"]) == list(ref.obs_names)
+        assert list(f["col_attrs/n"][...]) == list(ref.obs["n"])
+        assert _text(f["row_attrs/Gene"]) == list(ref.var["gene_symbols"])
+        assert _text(f["row_attrs/Accession"]) == list(ref.var["gene_ids"])
+        assert sorted(f["row_attrs"]) == ["Accession", "Gene"]
+
+
+@pytest.mark.parametrize("extra", [[], ["--scope"]], ids=["plain", "scope-without-clusterings"])
+def test_an_obs_column_and_an_obsm_entry_named_clusterid_keep_the_column(tmp_path, extra):
+    """F104: ClusterID was left unclaimed for SCope to decide, even in a
+    plain export, so an obsm entry of that name was written beside the obs
+    column, and the second write failed with the output half written."""
+    obj = ad.AnnData(
+        X=np.ones((3, 2), dtype=np.float32),
+        obs=pd.DataFrame({"ClusterID": [4, 5, 6]}, index=["a", "b", "c"]),
+        var=pd.DataFrame(index=["g1", "g2"]),
+        obsm={"ClusterID": np.zeros((3, 3))},
+    )
+    source, out = tmp_path / "cid.h5ad", tmp_path / "cid.loom"
+    obj.write_h5ad(source)
+    text = _out(_ok(source, "-o", out, *extra))
+    assert "Not written: obsm/ClusterID -- col_attrs/ClusterID is obs column 'ClusterID'." in text
+    with h5py.File(out, "r") as f:
+        assert list(f["col_attrs/ClusterID"][...]) == list(ad.read_h5ad(source).obs["ClusterID"])
+
+
+def test_with_clusterings_clusterid_is_scopes_and_an_obsm_entry_of_that_name_is_left_out(tmp_path):
+    """F104, with --scope: ClusterID is the first clustering's, so neither
+    the obs column nor the obsm entry of that name is written."""
+    obj = ad.AnnData(
+        X=np.ones((3, 2), dtype=np.float32),
+        obs=pd.DataFrame({"ClusterID": [4, 5, 6], "leiden": pd.Categorical(["x", "y", "x"])}, index=["a", "b", "c"]),
+        var=pd.DataFrame(index=["g1", "g2"]),
+        obsm={"ClusterID": np.zeros((3, 3))},
+    )
+    source, out = tmp_path / "cid.h5ad", tmp_path / "cid.loom"
+    obj.write_h5ad(source)
+    text = _out(_ok(source, "-o", out, "--scope", "--clusterings", "leiden"))
+    assert "obs column 'ClusterID' is written afresh from the first clustering, 'leiden'." in text
+    assert "Not written: obsm/ClusterID -- col_attrs/ClusterID is SCope's first clustering." in text
+    with h5py.File(out, "r") as f:
+        assert list(f["col_attrs/ClusterID"][...]) == list(ad.read_h5ad(source).obs["leiden"].cat.codes)
+
+
 # ---------------------------------------------------------------------------
 # looms other tools write, as found on real files
 
@@ -383,3 +630,75 @@ def test_baysor_names_genes_by_name(tmp_path):
     result = _ok(truth.path, "-o", out)
     assert "genes are named by 'Name'" in _out(result)
     assert list(_read(out).var_names) == truth.gene_names
+
+
+def test_the_loom_page_lists_every_attribute_names_are_looked_for_in():
+    """F153: the page's flag table left out some of the attributes a loom's
+    cells and genes are named from, so a file named by `barcodes` or
+    `gene_ids` seemed to need a flag."""
+    from adata.conversion import loom
+
+    page = (Path(__file__).parents[1] / "docs/reference/formats/loom.md").read_text()
+    rows = {line.split("|")[1].strip(): line for line in page.splitlines() if line.startswith("| `--")}
+    for flag, names in (
+        ("`--obs-names-attr`", loom.OBS_NAMES),
+        ("`--var-names-attr`", loom.GENE_IDS + loom.GENE_SYMBOLS),
+    ):
+        missing = [name for name in names if f"`{name}`" not in rows[flag]]
+        assert not missing, f"{flag} does not list {missing}"
+
+
+_CHECK_FIXED_EXPORTS = r"""
+import json, sys, warnings
+warnings.filterwarnings("ignore")
+import numpy as np, pandas as pd, anndata as ad
+from loompy.loom_validator import LoomValidator
+
+problems = []
+dense = lambda m: m.toarray() if hasattr(m, "toarray") else np.asarray(m)
+for source, loom, matrix in zip(*[iter(sys.argv[1:])] * 3):
+    src = ad.read_h5ad(source)
+    validator = LoomValidator()
+    if not validator.validate(loom):
+        problems.append(f"{loom}: validator: {validator.errors}")
+    got = ad.io.read_loom(loom)
+    ref = src.X if matrix == "X" else src.layers[matrix.split("/", 1)[1]]
+    if not np.array_equal(dense(got.X), dense(ref).astype(np.float32)):
+        problems.append(f"{loom}: X differs from {matrix}")
+    if list(got.obs_names) != list(src.obs_names):
+        problems.append(f"{loom}: obs_names differ")
+    for column in src.obs.columns:
+        if column == "CellID":
+            continue
+        want = ["" if pd.isna(v) else str(v) for v in src.obs[column]]
+        if column not in got.obs or list(got.obs[column].astype(str)) != want:
+            problems.append(f"{loom}: obs[{column!r}] differs")
+print("RESULT " + json.dumps(problems))
+"""
+
+
+@pytest.mark.integration
+@pytest.mark.timeout(1800)
+def test_loompy_validates_and_anndata_reads_the_looms_the_audit_fixes_write(tmp_path):
+    """F008, F102, F103, F104 against loompy's validator and anndata.read_loom:
+    an anndata 0.7 store's labels, a store without X, and names that clash."""
+    from tests.test_external_readers import _run
+
+    legacy = _legacy_h5ad(tmp_path / "legacy.h5ad")
+    nox, clash, cid = tmp_path / "nox.h5ad", tmp_path / "clash.h5ad", tmp_path / "cid.h5ad"
+    counts = np.arange(12, dtype=np.float32).reshape(4, 3)
+    ad.AnnData(obs=pd.DataFrame(index=[f"c{i}" for i in range(4)]), var=pd.DataFrame(index=["g0", "g1", "g2"]),
+               layers={"counts": sparse.csr_matrix(counts)}).write_h5ad(nox)
+    ad.AnnData(X=np.ones((3, 2), dtype=np.float32),
+               obs=pd.DataFrame({"CellID": ["x", "y", "z"]}, index=["a", "b", "c"]),
+               var=pd.DataFrame({"gene_symbols": ["S1", "S2"], "Gene": ["T1", "T2"]}, index=["g1", "g2"])
+               ).write_h5ad(clash)
+    ad.AnnData(X=np.ones((3, 2), dtype=np.float32), obs=pd.DataFrame({"ClusterID": [4, 5, 6]}, index=["a", "b", "c"]),
+               var=pd.DataFrame(index=["g1", "g2"]), obsm={"ClusterID": np.zeros((3, 3))}).write_h5ad(cid)
+    args = []
+    for source, matrix in ((legacy, "X"), (nox, "layers/counts"), (clash, "X"), (cid, "X")):
+        out = source.with_suffix(".loom")
+        _ok(source, "-o", out, *(["--layer", matrix.split("/", 1)[1]] if matrix != "X" else []))
+        args += [str(source), str(out), matrix]
+    problems = _run(["anndata", "loompy", "scipy"], _CHECK_FIXED_EXPORTS, *args)
+    assert problems == [], problems

@@ -52,10 +52,11 @@ class TestIndicesFromNameSet:
             names_ds = f["obs"]["obs_names"]
             keep = {"cell_1", "cell_3", "cell_5"}
 
-            indices, missing = indices_from_name_set(names_ds, keep)
+            indices, missing, repeated = indices_from_name_set(names_ds, keep)
             assert len(indices) == 3
             assert set(indices) == {0, 2, 4}
             assert len(missing) == 0
+            assert repeated == 0
 
     def test_indices_from_name_set_some_missing(self, sample_h5ad_file):
         """Test with some missing names."""
@@ -63,7 +64,7 @@ class TestIndicesFromNameSet:
             names_ds = f["obs"]["obs_names"]
             keep = {"cell_1", "cell_99", "cell_3"}
 
-            indices, missing = indices_from_name_set(names_ds, keep)
+            indices, missing, repeated = indices_from_name_set(names_ds, keep)
             assert len(indices) == 2
             assert set(indices) == {0, 2}
             assert missing == {"cell_99"}
@@ -74,7 +75,7 @@ class TestIndicesFromNameSet:
             names_ds = f["obs"]["obs_names"]
             keep = {"nonexistent_1", "nonexistent_2"}
 
-            indices, missing = indices_from_name_set(names_ds, keep)
+            indices, missing, repeated = indices_from_name_set(names_ds, keep)
             assert len(indices) == 0
             assert missing == {"nonexistent_1", "nonexistent_2"}
 
@@ -93,10 +94,31 @@ class TestIndicesFromNameSet:
             names_ds = f["obs"]["obs_names"]
             keep = {f"cell_{i}" for i in [0, 100, 500, 999]}
 
-            indices, missing = indices_from_name_set(names_ds, keep, chunk_size=100)
+            indices, missing, repeated = indices_from_name_set(names_ds, keep, chunk_size=100)
             assert len(indices) == 4
             assert set(indices) == {0, 100, 500, 999}
             assert len(missing) == 0
+            assert repeated == 0
+
+    def test_a_repeated_name_is_found_in_every_chunk(self, temp_dir):
+        """F014: the search stopped once every name had been seen, so a
+        name repeated in a later chunk was not found there."""
+        file_path = temp_dir / "repeats.h5ad"
+        names = [f"cell_{i % 300}" for i in range(1000)]
+        with h5py.File(file_path, "w") as f:
+            obs = f.create_group("obs")
+            obs.attrs["_index"] = "obs_names"
+            obs.create_dataset("obs_names", data=np.array(names, dtype="S"))
+
+        keep = {"cell_7", "cell_299", "absent"}
+        with h5py.File(file_path, "r") as f:
+            indices, missing, repeated = indices_from_name_set(
+                f["obs"]["obs_names"], keep, chunk_size=100
+            )
+        expected = [i for i, name in enumerate(names) if name in keep]
+        assert indices.tolist() == expected
+        assert missing == {"absent"}
+        assert repeated == 2
 
 
 class TestSubsetAxisGroup:

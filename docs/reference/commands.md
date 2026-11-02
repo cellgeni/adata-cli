@@ -94,6 +94,17 @@ adata subset data.h5ad --inplace --obs barcodes.txt
 `raw/` is carried over and matched against its **own** var axis, which usually
 holds more genes than the main object.
 
+A name list keeps every row with a listed name, as anndata's
+`obs_names.isin(names)` does: after a `concat` without `--index-unique` a
+barcode names one cell per sample, and all of them are kept. `subset` says
+how many of the names matched more than one row.
+
+Every element is narrowed as anndata's subsetting narrows it: layers, `obsp`
+and `varp` on both their axes, `obsm` and `varm` arrays of any rank on their
+first, and `obsm` and `varm` dataframes as `obs` and `var` are. A store
+holding something `subset` cannot narrow, such as an awkward array in
+`obsm`, is refused before anything is written.
+
 A categorical obs or var column keeps only the categories its rows use, as
 anndata's own subsetting keeps them (on an axis kept whole too), and
 `uns["<column>_colors"]` keeps the colours of those categories. `split`
@@ -262,9 +273,16 @@ adata split data.h5ad --by cluster -o out/ --min-size 50
 | `--zarr-format` | Zarr version to write; defaults to the source's |
 | `--no-space-check` | Write even if the disk looks too small; see [Writing outputs](#writing-outputs) |
 
-Labels are sanitised for use as filenames; collisions get a numeric suffix,
-and so do labels that differ only in case (`B`, `b_1`), which would be one
-file on macOS and Windows.
+Labels are sanitised for use as filenames, and a label that is a safe
+filename already keeps it. Collisions get a numeric suffix, and so do labels
+that differ only in case (`B`, `b_1`), which would be one file on macOS and
+Windows: `CD4`, `CD4_1` and `CD4+` give `CD4`, `CD4_1` and `CD4_2`.
+`convert --split-feature-types` and `--all-samples` name their outputs the
+same way.
+Rows whose value is missing (NaN too) go to a store of their own, `NA`, apart
+from rows labelled `NA` or with an empty string (`NA_1`, ...). The manifest
+lists a missing value as empty, as it lists an empty label; their stores
+tell them apart.
 Every store is written beside its destination and moved into place only once
 all of them are complete, and the manifest is written last, so a split that
 fails leaves no partial stores. An output that would land on the input is
