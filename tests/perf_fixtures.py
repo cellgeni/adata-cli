@@ -146,12 +146,15 @@ ZARR31_DENSE_CHUNK = (16, 8)
 ZARR31_ELEMENT_CHUNK = 245
 
 
-def zarr31_layout(path: Path, key: str = "X") -> Path:
+def zarr31_layout(
+    path: Path, key: str = "X", dense_chunks: Tuple[int, int] = ZARR31_DENSE_CHUNK
+) -> Path:
     """Rewrite `key` of a Zarr v3 store in anndata 0.13's layout under zarr
     3.1: a dense matrix in inner chunks of (16, 8) and shards of 4,096
     rows across every column, a sparse one's `data` and `indices` in chunks
     of 245 elements and a shard of the whole array. Values and attributes
-    are kept."""
+    are kept. `dense_chunks` gives a dense matrix other inner chunks, in the
+    same shards."""
     import zarr
 
     def whole(n: int, c: int) -> int:
@@ -166,7 +169,7 @@ def zarr31_layout(path: Path, key: str = "X") -> Path:
         array = parent[member]
         values, attrs = array[...], dict(array.attrs)
         if array.ndim == 2:
-            chunks = ZARR31_DENSE_CHUNK
+            chunks = dense_chunks
             shards = (whole(min(array.shape[0], 4096), chunks[0]),
                       whole(array.shape[1], chunks[1]))
         else:

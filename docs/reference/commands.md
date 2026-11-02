@@ -304,10 +304,10 @@ all of them are complete, and the manifest is written last, so a split that
 fails leaves no partial stores. An output that would land on the input is
 refused, on a case-insensitive filesystem too (a label `A` beside `a.h5ad`).
 
-Each matrix is read once for up to 128 HDF5 outputs (or as many Zarr
-outputs as a quarter of the open-file limit allows): an open HDF5 file costs
-about 0.6 MB however little it holds, so with more groups than that, the
-matrices are read once per 128.
+Each matrix is read once for up to 128 outputs: an open HDF5 file costs
+about 0.6 MB however little it holds, and each output holds rows to write
+its shards and chunks whole. With more groups than that, the matrices are
+read once per 128.
 
 ## `concat`
 
@@ -623,18 +623,23 @@ whole one at a time:
   once, whole. A shard is rewritten in full for a write of any part of it,
   so writing one a `--chunk` block at a time took hundreds of times longer.
   To write a shard whole, the command holds its rows: a shard, or chunk,
-  whose rows across the matrix come to more than 64 MiB is cut along its
-  rows to fit (anndata aims at 1 GB shards). `split` shares 256 MiB among
-  the outputs it writes at once, so with many groups their shards and
-  chunks are cut further.
+  whose rows across the matrix come to more than 8 MiB is cut along its
+  rows to fit (anndata aims at 1 GB shards). While zarr encodes a unit it
+  holds about four times that again, so this costs up to about 40 MB.
+  `split` shares 128 MiB among the outputs it writes at once, so with many
+  groups their shards and chunks are cut further. A Zarr output of a store
+  with no chunks of its own (a contiguous h5ad X) takes zarr's own chunks,
+  cut the same way.
 - Zarr v2 has no shards: written from a sharded store, a shard becomes the
   chunk. An HDF5 output of a sharded store lets HDF5 choose its chunks,
   rather than taking the shard's inner chunk.
 - A dense matrix is read in whole chunks of the source: `--chunk` rows
   rounded up to whole chunk heights, up to 32 MiB a read (more if
-  `--chunk` asks for more). Where one chunk height across every column is
-  over that, as for chunks of (n_obs, 8), a read takes a band of columns,
-  whole chunks at a time.
+  `--chunk` asks for more), in `subset`, `split`, `concat`, `recast`,
+  `convert` and `export array` alike. Where one chunk height across every
+  column is over that, as for chunks of (n_obs, 8), `subset`, `split` and
+  `convert` read a band of columns, whole chunks at a time; `concat`,
+  `recast` and `export` read `--chunk` rows, as before.
 - A sparse matrix in `subset` and `split` is read about as many entries a
   block as `--chunk` rows hold on average, in either layout; a column of a
   CSC matrix holding more, a gene expressed in every cell, is read in parts.

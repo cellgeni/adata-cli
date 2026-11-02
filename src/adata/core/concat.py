@@ -54,6 +54,7 @@ from adata.elements.write import (
 from adata.elements.strings import is_string_dtype
 from adata.storage import (
     RowWriter,
+    row_bands,
     copy_tree,
     create_dataset,
     dataset_create_kwargs,
@@ -956,8 +957,7 @@ def _concat_dense(
         gaps = targets.size < n_cols
         n_src_rows = source.shape[0]
 
-        for start in range(0, n_src_rows, chunk_rows):
-            end = min(start + chunk_rows, n_src_rows)
+        for start, end in row_bands(source, chunk_rows):
             block = (np.full((end - start, n_cols), fill_value, dtype=dtype) if gaps
                      else np.empty((end - start, n_cols), dtype=dtype))
             block[:, targets] = np.asarray(source[start:end, :])[:, keep]
@@ -1322,8 +1322,7 @@ def _concat_obsm(
 
     writer = RowWriter(out)
     for source in inputs.each(path):
-        for start in range(0, source.shape[0], chunk_rows):
-            end = min(start + chunk_rows, source.shape[0])
+        for start, end in row_bands(source, chunk_rows):
             writer.write(source[start:end, ...])
     writer.flush()
     return True

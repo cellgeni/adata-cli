@@ -566,6 +566,15 @@ def high_water():
     return value if sys.platform == "darwin" else value * 1024  # Linux: KiB
 
 argv, report = json.loads(sys.argv[1]), sys.argv[2]
+# The open-file limit a cluster or a container gives, not macOS's 256: the
+# limits it sets (outputs open at once) are what a guard measures.
+soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+want = 65536 if hard == resource.RLIM_INFINITY else min(hard, 65536)
+if soft != resource.RLIM_INFINITY and soft < want:
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+    except (ValueError, OSError):
+        pass
 from adata.cli import app
 
 before = high_water()

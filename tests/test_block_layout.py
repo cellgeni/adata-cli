@@ -188,11 +188,16 @@ def test_outputs_keep_the_sources_inner_chunks_and_shards(tmp_path, command, lay
         for name, array in _arrays(group).items():
             want = source[name]
             assert array.chunks == want.chunks, (path.name, name)
-            shards = tuple(
-                min(s, max(c, -(-n // c) * c)) if array.ndim > 1 or name == "X" else s
-                for s, c, n in zip(want.shards, want.chunks, array.shape)
-            )
-            assert array.shards == shards, (path.name, name, array.shards, shards)
+            # The source's, clamped to the output in whole chunks: a dense
+            # matrix to its shape, a sparse one's arrays to the most entries
+            # its majors hold, which a selection of minors can leave above
+            # the entries it keeps (CSC, selecting cells).
+            for s, c, n, got in zip(want.shards, want.chunks, array.shape, array.shards):
+                fitted = min(s, max(c, -(-n // c) * c))
+                if array.ndim == 1 and layout == "csc" and command in ("subset", "split"):
+                    assert fitted <= got <= s and got % c == 0, (path.name, name, got)
+                else:
+                    assert got == fitted, (path.name, name, got, fitted)
             files = [f for f in (path / name).rglob("*")
                      if f.is_file() and f.name not in ("zarr.json", ".zarray", ".zattrs")]
             assert len(files) <= 4, f"{name} of {path.name} is {len(files)} files"
@@ -390,3 +395,31 @@ def test_a_shard_index_is_read_once_and_the_cache_is_bounded(tmp_path, monkeypat
     assert read_in_blocks() == 1
     monkeypatch.setattr(storage, "SHARD_INDEX_CACHE_BYTES", 0)
     assert read_in_blocks() > 10, "a cache too small for an index keeps none"
+
+
+def test_the_shard_index_cache_is_one_budget_across_stores(tmp_path, monkeypatch):
+    """From the review: each open store kept up to 64 MiB of indexes, and
+    concat holds up to 64 inputs open, so the cache grew with the number of
+    inputs. One budget is shared now, and a store's indexes go with it."""
+    import gc
+
+    import adata.storage as storage
+    from adata.storage import open_store
+
+    _, src = _sharded_counts(tmp_path, "csr")
+    with open_store(src, "r") as store:
+        store.root["X/data"][0:10]
+    one = storage._SHARD_INDEX_STATE["bytes"]
+    assert one > 0
+    del store
+    gc.collect()
+    assert storage._SHARD_INDEX_STATE["bytes"] == 0, "a closed store's indexes stay"
+
+    monkeypatch.setattr(storage, "SHARD_INDEX_CACHE_BYTES", 2 * one)
+    stores = [open_store(src, "r") for _ in range(5)]
+    for store in stores:
+        store.root["X/data"][0:10]
+        store.root["X/indices"][0:10]
+    assert 0 < storage._SHARD_INDEX_STATE["bytes"] <= 2 * one
+    for store in stores:
+        store.close()

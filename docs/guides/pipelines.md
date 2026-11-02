@@ -132,9 +132,10 @@ bounded:
 
 - A read takes whole chunks of the source, up to 32 MiB.
 - An output is written a whole shard or chunk at a time, so its rows are
-  held until one is full: at most 64 MiB, and 256 MiB across the outputs
-  `split` writes at once.
-- `split` holds up to 128 HDF5 outputs open, about 0.6 MB each.
+  held until one is full: at most 8 MiB, and 128 MiB across the outputs
+  `split` writes at once. Encoding a shard holds about four times its
+  size again, one shard at a time.
+- `split` writes up to 128 outputs a pass, an HDF5 one about 0.6 MB open.
 
 See [Writing outputs](../reference/commands.md#writing-outputs).
 [Benchmarks](../reference/benchmarks.md) gives peak memory per command on a

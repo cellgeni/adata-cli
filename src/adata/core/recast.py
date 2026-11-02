@@ -41,6 +41,8 @@ from adata.core.csr_build import (
 from adata.core.subset import _sparse_dataset
 from adata.storage import (
     RowWriter,
+    backend_chunks,
+    row_bands,
     copy_attrs,
     create_dataset,
     dataset_create_kwargs,
@@ -163,8 +165,9 @@ def check_cast(
         np.iinfo(target) if target.kind in "iu" else None
     )
 
-    for start in range(0, n, step):
-        block = np.asarray(dataset[start : min(start + step, n)])
+    # In whole chunks of it: the check reads every value, as the cast does.
+    for start, end in row_bands(dataset, step) if shape else ():
+        block = np.asarray(dataset[start:end])
         report.total += block.size
         if block.size == 0:
             continue
@@ -683,8 +686,14 @@ def _densify_rows(
     """Densify a CSR matrix `chunk_rows` rows at a time, with `attrs`."""
     n_rows, n_cols = src.shape
     backend = "zarr" if is_zarr_group(dst_parent) else "hdf5"
+    # zarr's own chunks, cut to what `RowWriter` holds, so each is written
+    # once: --chunk rows into chunks 12,500 tall encoded 13 times the matrix.
+    kw = fit_chunks(
+        backend_chunks(dst_parent, {}, (n_rows, n_cols), data_dtype), (n_rows, n_cols),
+        backend=backend, itemsize=np.dtype(data_dtype).itemsize,
+    )
     dst = create_dataset(
-        dst_parent, name, shape=(n_rows, n_cols), dtype=data_dtype
+        dst_parent, name, shape=(n_rows, n_cols), dtype=data_dtype, **kw
     )
     copy_attrs(attrs, dst.attrs, target_backend=backend)
     spec.set_encoding(dst, spec.ARRAY)
@@ -696,6 +705,7 @@ def _densify_rows(
     indptr = np.asarray(src.obj["indptr"][...], dtype=np.int64)
     indices, values = src.obj["indices"], src.obj["data"]
 
+    writer = RowWriter(dst)
     for lo in range(0, n_rows, chunk_rows):
         hi = min(lo + chunk_rows, n_rows)
         start, end = int(indptr[lo]), int(indptr[hi])
@@ -711,7 +721,8 @@ def _densify_rows(
             # Plain assignment keeps whichever came last, so a
             # non-canonical input silently changed value on densifying.
             np.add.at(block, (major, minor), data)
-        dst[lo:hi, :] = block
+        writer.write(block)
+    writer.flush()
 
 
 def sparsify(
@@ -825,8 +836,7 @@ def _sparsify_rows(
     pointer_limit = int(np.iinfo(offsets_within).max)
     nnz = 0
 
-    for lo in range(0, n_rows, chunk_rows):
-        hi = min(lo + chunk_rows, n_rows)
+    for lo, hi in row_bands(src.obj, chunk_rows):
         # Cast before looking for nonzeros: a lossy cast turns 0.3 into 0,
         # and finding the nonzeros first stored those as explicit zeros
         # (F121), 616 entries where scipy has 194.
@@ -948,8 +958,7 @@ def cast_dense(
     # A whole shard at a time: a block of --chunk rows rewrote the source's
     # shard once a block, 537 MB encoded for 4.4 MB written (F036).
     writer = RowWriter(dst)
-    for lo in range(0, n_rows, chunk_rows):
-        hi = min(lo + chunk_rows, n_rows)
+    for lo, hi in row_bands(src.obj, chunk_rows):
         writer.write(np.asarray(src.obj[lo:hi, :]).astype(data_dtype, copy=False))
     writer.flush()
 

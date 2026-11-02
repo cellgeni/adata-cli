@@ -373,12 +373,13 @@ should scale with, scale only that, and hold everything else fixed.
 | `recast --dtype` (dense), a skewed transpose | n_obs; h5ad, sharded Zarr v3 | the **largest read** set by the chunk |
 | CSC `--layout dense`, dense `--layout csc` | n_obs; h5ad | the **largest read** set by the chunk, and memory per row |
 | `subset`, `split`, `concat`, `recast`, `convert` into anndata 0.13's shards | Zarr v3 as zarr 3.1 wrote it | each shard **encoded once** |
-| dense `subset` | tall gzip chunks, zarr's own chunks | each chunk **decoded once** |
+| dense `subset`, `concat`, `recast`, `export array` | tall gzip chunks, zarr's own chunks | each chunk **decoded once** |
+| `subset` into a sharded output | 1 MiB units; dense, CSR | **peak allocation** a few units, not the shard |
 | `split` into chunked HDF5 | eight groups | each output chunk **encoded once** |
 | `subset`, `concat` of a sharded store | Zarr v3 as zarr 3.1 wrote it | each shard index **fetched once** |
 | sparse `subset` | n_obs; CSR, CSC, a gene in every cell | the **largest read** about `--chunk` rows of entries |
 | `convert` of a matrix chunked (n_obs, 8) | n_obs | the **largest read** a tile within the budget |
-| `split` | 128 against 512 groups | **resident memory** flat past 128 HDF5 outputs |
+| `split` | 128 against 512 groups | **resident memory** flat past 128 outputs a pass |
 
 The `slow` marker is on the guards that build a 65,536-row store or run `peak_rss`;
 they still gate merges, and `-m "not slow"` skips them locally. `perf` is on the

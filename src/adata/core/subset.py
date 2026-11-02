@@ -35,6 +35,7 @@ from adata.storage import (
     RowWriter,
     create_dataset,
     copy_attrs,
+    backend_chunks,
     copy_tree,
     cut_unit,
     dataset_create_kwargs,
@@ -490,7 +491,17 @@ def fan_out_dense_matrix(
             src, target_backend=target_backend, dst_parent=dst_parent
         )
         budget = share if share is not None else WRITE_UNIT_BYTES
-        kw = fit_chunks(kw, shape, backend=target_backend, itemsize=itemsize, unit_bytes=budget)
+        if src.dtype.kind not in ("O", "T"):
+            kw = backend_chunks(dst_parent, kw, shape, src.dtype)
+        # One band of tiles covering every row (chunks of (n_obs, 8)) gives
+        # each tile writer whole columns of chunks at once: nothing is held,
+        # and the chunks need no cut. Otherwise a unit's rows across the
+        # output are what its writers hold together.
+        kw = fit_chunks(
+            kw, shape, backend=target_backend,
+            itemsize=None if width is not None and band >= n_obs else itemsize,
+            unit_bytes=budget,
+        )
         if width is not None and kw.get("shards"):
             kw["shards"] = tile_shards(kw["chunks"], kw["shards"], width, rows=False)
         dst = create_dataset(
@@ -558,6 +569,7 @@ class _SparseOutput:
         remap: Optional[np.ndarray],
         n_major: int,
         share: Optional[int] = None,
+        size: Optional[int] = None,
     ) -> None:
         self.group = dst_parent.create_group(name)
         copy_attrs(src.attrs, self.group.attrs, target_backend=_target_backend(dst_parent))
@@ -576,11 +588,11 @@ class _SparseOutput:
         width = data_dtype.itemsize + index_dtype.itemsize
         self.data = _growable_like(
             self.group, "data", data_dtype, src["data"],
-            share=max(1, share * data_dtype.itemsize // width),
+            share=max(1, share * data_dtype.itemsize // width), size=size,
         )
         self.indices = _growable_like(
             self.group, "indices", index_dtype, src["indices"],
-            share=max(1, share * index_dtype.itemsize // width),
+            share=max(1, share * index_dtype.itemsize // width), size=size,
         )
         self.selection = major_idx
         self.remap = remap
@@ -761,6 +773,7 @@ def fan_out_sparse_matrix(
     n_major, n_minor = (n_rows, n_cols) if csr else (n_cols, n_rows)
 
     outputs: List[_SparseOutput] = []
+    lengths = np.diff(indptr)
     for target in targets:
         # A fourth element names this target's matrix, where it differs
         # from `name`: one read can then fill X and a layer alike.
@@ -783,9 +796,12 @@ def fan_out_sparse_matrix(
                 _minor_remap(minor_keep, n_minor),
                 n_major,
                 share,
+                # The most entries it can hold: its majors' entries.
+                int(lengths.sum()) if major_idx is None else int(lengths[major_idx].sum()),
             )
         )
 
+    del lengths
     budget = sparse_block_entries(n_rows, int(indptr[-1]) if indptr.size else 0, chunk_rows)
     for first, stop, lo, hi in _sparse_blocks(
         indptr, budget, [out.selection for out in outputs]
@@ -840,7 +856,8 @@ def _sparse_dataset(
     kw = dataset_create_kwargs(template, target_backend=backend, dst_parent=group)
     # A unit cut to what `RowWriter` holds: writers fill these a block at
     # a time, and anndata's shard of a whole array may be a gigabyte.
-    kw = fit_chunks(kw, (n,), backend=backend, itemsize=np.dtype(dtype).itemsize)
+    kw = fit_chunks(kw, (n,), backend=backend, itemsize=np.dtype(dtype).itemsize,
+                    unit_bytes=WRITE_UNIT_BYTES // 2)
     if compression is not None:
         kw = with_compression(
             kw, compression, shape=(n,), dtype=dtype, backend=backend,
@@ -859,6 +876,7 @@ def _growable_like(
     *,
     compression: Optional[str] = None,
     share: Optional[int] = None,
+    size: Optional[int] = None,
 ) -> RowWriter:
     """Like `_sparse_dataset`, but extensible for a size not yet known: a
     `RowWriter` that grows it, appended to with `_append`. Flush it once the
@@ -869,7 +887,10 @@ def _growable_like(
     `indices` were written uncompressed whatever the input. They dropped its
     shard too, and kept the inner chunk: 245 elements, a file each, under
     anndata 0.13 (F033). The shard is kept now, cut to `share` bytes (by
-    default `WRITE_UNIT_BYTES`), and written whole.
+    default half of `WRITE_UNIT_BYTES`: `data` and `indices` come as a
+    pair), and written whole. `size`, an upper bound on the entries it will
+    hold, clamps the shard (and the chunk) to it: an output of a few
+    thousand entries carried the source's shard of millions, and its index.
     """
     backend = _target_backend(group)
     kw = dataset_create_kwargs(template, target_backend=backend, dst_parent=group)
@@ -882,7 +903,13 @@ def _growable_like(
     kw["chunks"] = (int(chunks[0]),) if chunks else (1 << 16,)
     if kw.get("shards"):
         kw["shards"] = (int(kw["shards"][0]),)
-    budget = WRITE_UNIT_BYTES if share is None else share
+    if size is not None and size > 0:
+        step = min(kw["chunks"][0], int(size))
+        kw["chunks"] = (step,)
+        if kw.get("shards"):
+            kw["shards"] = (max(step, min(kw["shards"][0], -(-int(size) // step) * step)),)
+            kw["shards"] = ((kw["shards"][0] // step) * step,)
+    budget = WRITE_UNIT_BYTES // 2 if share is None else share
     kw = cut_unit(kw, (0,), np.dtype(dtype).itemsize, budget)
     if is_zarr_group(group):
         ds = group.create_array(name, shape=(0,), dtype=dtype, **kw)
@@ -1465,14 +1492,15 @@ def _open_output_limit() -> int:
 #: rather than running out of file descriptors.
 MAX_OPEN_OUTPUTS = _open_output_limit()
 
-#: How many HDF5 outputs a pass holds open, whatever the descriptor limit
-#: allows. An open HDF5 file costs about 0.6 MB however it is opened -- the
-#: library's own per-file structures; a chunk cache or a smaller metadata
-#: cache changes nothing -- so with a container's high limit, 1,024 outputs
-#: a pass took RSS to about 1 GB, following the number of groups rather than
-#: --chunk (F079). 128 holds that near 80 MB, for a pass more per 128
-#: groups. Zarr outputs hold no descriptor and no such cost.
-MAX_OPEN_HDF5_OUTPUTS = 128
+#: How many outputs a pass writes, whatever the descriptor limit allows. An
+#: open HDF5 file costs about 0.6 MB however it is opened -- the library's
+#: own per-file structures; a chunk cache or a smaller metadata cache
+#: changes nothing -- so with a container's high limit, 1,024 outputs a pass
+#: took RSS to about 1 GB, following the number of groups rather than
+#: --chunk (F079). And every output's units are cut to its share of
+#: `WRITE_BUFFER_BYTES`, a row or two each at 1,024 of them. 128 holds the
+#: files near 80 MB and a share at 1 MiB, for a pass more per 128 groups.
+MAX_OUTPUTS_PER_PASS = 128
 
 
 def split_h5ad(
@@ -1493,9 +1521,7 @@ def split_h5ad(
         with open_store(file, "r") as probe:
             zarr_format = probe.zarr_format
 
-    per_pass = MAX_OPEN_OUTPUTS
-    if any(detect_backend(Path(path)) == "hdf5" for path, _, _ in outputs):
-        per_pass = min(per_pass, MAX_OPEN_HDF5_OUTPUTS)
+    per_pass = min(MAX_OPEN_OUTPUTS, MAX_OUTPUTS_PER_PASS)
     for start in range(0, len(outputs), per_pass):
         batch = outputs[start : start + per_pass]
         with ExitStack() as stack:
