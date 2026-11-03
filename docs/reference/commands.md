@@ -93,7 +93,7 @@ adata subset data.h5ad --inplace --obs barcodes.txt
 | `--inplace` | Replace the source; the new store is written beside it first |
 | `--obs` / `--var` | File of names to keep, one per line |
 | `--obs-query`, `-q` / `--var-query` | Keep rows matching an [expression](query.md) |
-| `--chunk`, `-C` | Row chunk size for dense matrices (at least 1) |
+| `--chunk`, `-C` | Rows per block, of a dense or a sparse matrix (at least 1) |
 | `--zarr-format` | Zarr version to write; defaults to the source's |
 | `--no-space-check` | Write even if the disk looks too small; see [Writing outputs](#writing-outputs) |
 
@@ -294,7 +294,7 @@ adata split data.h5ad --by cluster -o out/ --min-size 50
 | `--suffix` | Output extension, which picks the backend (`.zarr` for Zarr); defaults to the source's, `.h5ad` or `.zarr` |
 | `--dry-run` | Print the plan without writing |
 | `--manifest / --no-manifest` | Write a CSV listing the outputs (default on) |
-| `--chunk`, `-C` | Row chunk size for dense matrices (at least 1) |
+| `--chunk`, `-C` | Rows per block, of a dense or a sparse matrix (at least 1) |
 | `--zarr-format` | Zarr version to write; defaults to the source's |
 | `--no-space-check` | Write even if the disk looks too small; see [Writing outputs](#writing-outputs) |
 
@@ -312,6 +312,11 @@ Every store is written beside its destination and moved into place only once
 all of them are complete, and the manifest is written last, so a split that
 fails leaves no partial stores. An output that would land on the input is
 refused, on a case-insensitive filesystem too (a label `A` beside `a.h5ad`).
+
+Each matrix is read once for up to 128 outputs: an open HDF5 file costs
+about 0.6 MB however little it holds, and each output holds rows to write
+its shards and chunks whole. With more groups than that, the matrices are
+read once per 128.
 
 ## `concat`
 
@@ -659,6 +664,39 @@ skips it.
 
 **`--chunk` is at least 1** wherever it appears. A zero or negative value is
 a usage error (exit 2), where it used to write an all-zero dense matrix.
+
+**Outputs keep the source's chunks and shards**, and are read and written a
+whole one at a time:
+
+- A Zarr v3 output keeps the source's shards and the inner chunks inside
+  them, each clamped to the output. Until 0.17.6, `subset`, `split` and
+  `concat` dropped the shard of a sparse matrix and kept its inner chunk:
+  under anndata 0.13 that is 245 elements, a file each.
+- Each shard, or each chunk of a Zarr or chunked HDF5 output, is written
+  once, whole. A shard is rewritten in full for a write of any part of it,
+  so writing one a `--chunk` block at a time took hundreds of times longer.
+  To write a shard whole, the command holds its rows: a shard, or chunk,
+  whose rows across the matrix come to more than 8 MiB is cut along its
+  rows to fit (anndata aims at 1 GB shards). While zarr encodes a unit it
+  holds about four times that again, so this costs up to about 40 MB.
+  `split` shares 128 MiB among the outputs it writes at once, so with many
+  groups their shards and chunks are cut further. A Zarr output of a store
+  with no chunks of its own (a contiguous h5ad X) takes zarr's own chunks,
+  cut the same way.
+- Zarr v2 has no shards: written from a sharded store, a shard becomes the
+  chunk. An HDF5 output of a sharded store lets HDF5 choose its chunks,
+  rather than taking the shard's inner chunk.
+- A dense matrix is read in whole chunks of the source: `--chunk` rows
+  rounded up to whole chunk heights, up to 32 MiB a read (more if
+  `--chunk` asks for more), in `subset`, `split`, `concat`, `recast`,
+  `convert` and `export array` alike. Where one chunk height across every
+  column is over that, as for chunks of (n_obs, 8), `subset`, `split` and
+  `convert` read a band of columns, whole chunks at a time; `concat`,
+  `recast` and `export` read `--chunk` rows, as before.
+- A sparse matrix in `subset` and `split` is read about as many entries a
+  block as `--chunk` rows hold on average, in either layout; a column of a
+  CSC matrix holding more, a gene expressed in every cell, is read in parts.
+- A Zarr v3 shard's index is read once per command, not once a read.
 
 ## Zarr format selection
 

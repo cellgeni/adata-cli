@@ -124,8 +124,21 @@ most data:
 | `import array` | 1,048,576 | elements |
 
 A dense block holds `--chunk` × n_var values, so lower it for very wide dense
-matrices. It must be at least 1; zero or a negative value is a usage error. Sparse matrices stream in blocks too. obs and var columns are read
+matrices. It must be at least 1; zero or a negative value is a usage error. Sparse matrices stream in blocks too: in `subset` and `split`, about as
+many entries a block as `--chunk` rows hold. obs and var columns are read
 whole, which is what grows with the number of cells.
+
+Three things are set by the store's layout rather than by `--chunk`, each
+bounded:
+
+- A read takes whole chunks of the source, up to 32 MiB.
+- An output is written a whole shard or chunk at a time, so its rows are
+  held until one is full: at most 8 MiB, and 128 MiB across the outputs
+  `split` writes at once. Encoding a shard holds about four times its
+  size again, one shard at a time.
+- `split` writes up to 128 outputs a pass, an HDF5 one about 0.6 MB open.
+
+See [Writing outputs](../reference/commands.md#writing-outputs).
 [Benchmarks](../reference/benchmarks.md) gives peak memory per command on a
 50,000 × 20,000 store, measured on every release: between 70 and 330 MB in
 0.16.1. A request of 1 to 2 GB leaves room for larger stores.

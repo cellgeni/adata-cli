@@ -371,7 +371,7 @@ def subset(
         help="Keep var matching an expression, e.g. \"highly_variable == True\"",
     ),
     chunk_rows: int = _chunk_option(
-        1024, "Row chunk size for dense matrices", "--chunk-rows", "-r"
+        1024, "Rows per block, of a dense or a sparse matrix", "--chunk-rows", "-r"
     ),
     zarr_format: Optional[int] = typer.Option(
         None,
@@ -1193,7 +1193,7 @@ def split(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Show what would be written without writing it"
     ),
-    chunk_rows: int = _chunk_option(1024, "Row chunk size for dense matrices"),
+    chunk_rows: int = _chunk_option(1024, "Rows per block, of a dense or a sparse matrix"),
     zarr_format: Optional[int] = typer.Option(
         None,
         "--zarr-format",

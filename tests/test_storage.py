@@ -463,13 +463,40 @@ def test_subsetting_a_sharded_v3_store(temp_dir, target):
         assert np.array_equal(store.root["X"][...], expected)
 
 
-def test_fitting_a_chunk_drops_an_incompatible_shard():
+def test_fitting_a_chunk_keeps_its_shard_in_whole_chunks():
+    """F033: a clamped chunk dropped the shard, so an output of anndata
+    0.13's sharded layout kept only its 1 KB inner chunks, a file each.
+    The shard is clamped with the chunk now, to a whole number of them."""
     kept = fit_chunks({"chunks": (4, 2), "shards": (8, 4)}, (100, 100), backend="zarr")
     assert kept["shards"] == (8, 4), "an unclamped chunk keeps its shard"
 
-    dropped = fit_chunks({"chunks": (4, 2), "shards": (8, 4)}, (3, 4), backend="zarr")
-    assert dropped["chunks"] == (3, 2)
-    assert "shards" not in dropped
+    clamped = fit_chunks({"chunks": (4, 2), "shards": (8, 4)}, (3, 4), backend="zarr")
+    assert clamped["chunks"] == (3, 2)
+    assert clamped["shards"] == (3, 4)
+
+    # A shard larger than the array is clamped to it, in whole chunks.
+    fitted = fit_chunks({"chunks": (4, 2), "shards": (64, 4)}, (10, 4), backend="zarr")
+    assert fitted["shards"] == (12, 4)
+
+
+def test_fitting_cuts_a_unit_too_large_to_hold_along_its_rows():
+    """A shard whose rows across the array come to more than the write
+    budget is cut to fewer whole inner chunks; one inner chunk too many
+    for it is cut too, and so is an unsharded chunk."""
+    kw = {"chunks": (16, 8), "shards": (4096, 64)}
+    cut = fit_chunks(kw, (8192, 64), backend="zarr", itemsize=4, unit_bytes=64 * 4 * 160)
+    assert cut["chunks"] == (16, 8)
+    assert cut["shards"] == (160, 64)
+
+    tight = fit_chunks(kw, (8192, 64), backend="zarr", itemsize=4, unit_bytes=64 * 4 * 10)
+    assert tight["chunks"] == (10, 8) and tight["shards"] == (10, 64)
+
+    plain = fit_chunks({"chunks": (1000, 8)}, (8192, 64), backend="hdf5", itemsize=4,
+                       unit_bytes=64 * 4 * 100)
+    assert plain["chunks"] == (100, 8)
+
+    within = fit_chunks(kw, (8192, 64), backend="zarr", itemsize=4)
+    assert within == kw, "a unit within the budget is kept as it is"
 
 
 def test_fitting_handles_one_dimensional_chunks():

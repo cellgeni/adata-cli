@@ -275,7 +275,18 @@ def test_a_dense_source_whose_nonzeros_overflow_the_offsets_is_refused(
     removes the half-written output."""
     from tests.perf_counters import count_io
 
+    from adata.storage import copy_attrs, create_dataset, open_store
+
     source_path = _put(new_store, np.ones((300, 200), dtype="float32"))
+    # Chunks 16 rows tall, as --chunk: reads take whole chunks of the source
+    # (F061), so a source held in one chunk is read in one piece.
+    with open_store(source_path, "a") as store:
+        root = store.root
+        values, attrs = root["X"][...], dict(root["X"].attrs)
+        del root["X"]
+        rechunked = create_dataset(root, "X", data=values, chunks=(16, 200))
+        copy_attrs(attrs, rechunked.attrs,
+                   target_backend="zarr" if source_path.suffix == ".zarr" else "hdf5")
     out = _output(source_path)
 
     with count_io() as io, pytest.raises(ValueError, match="cannot hold this matrix's offsets"):

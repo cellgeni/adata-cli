@@ -158,7 +158,13 @@ before changing anything that writes:
   `open_store`; without it zarr-python writes v3, upgrading a v2 input.
   `concat` uses the version its Zarr inputs share.
 - **Outputs keep the source's index dtypes, chunking and compression.**
-  Changing them is `recast`'s job, or an explicit flag's.
+  Changing them is `recast`'s job, or an explicit flag's. Zarr v3 shards are
+  kept too: `fit_chunks` clamps them with the chunk, and given `itemsize`
+  cuts a unit too large to hold along its rows.
+- **A streamed output is written through `storage.RowWriter`**, flushed after
+  the last block. A write to part of a Zarr shard rewrites the whole shard,
+  and Zarr keeps no chunk cache, so a `--chunk` block written straight into
+  the array costs a whole unit a block.
 - **Memory is set by `--chunk`.** Loading a whole matrix or column is a
   regression unless it is behind an explicit `--in-memory`. `--chunk` is
   defined once in `cli.py` (`_chunk_option`, with `min=1`); reuse it.
@@ -195,15 +201,15 @@ before changing anything that writes:
   a row in [Testing](reference/testing.md)'s map.
 
 ```bash
-uv run pytest -m "not integration" --cov=adata --cov-fail-under=90   # CI's coverage floor
-uv run pytest -m perf                                                # the complexity guards
+uv run pytest -m "not integration and not perf" --cov=adata --cov-fail-under=90  # CI's coverage job
+uv run pytest -m perf                                                # the cost guards, CI's own job
 ADATA_REQUIRE_VERSION_FIXTURES=1 uv run pytest tests/test_anndata_versions.py -m integration
 ```
 
 `integration` tests need the network on their first run, to build their
 environments. CI runs the unit suite on Python 3.12 and 3.13 and again at
-each dependency's floor, the anndata-release and external-reader tests as
-jobs of their own, a lint of the workflows and a build and smoke test of the
+each dependency's floor, the cost guards, the anndata-release and
+external-reader tests as jobs of their own, a lint of the workflows and a build and smoke test of the
 image. It also installs the package alone from a fresh resolution, without
 the lock, imports every module and runs `convert`, so a module-level import
 of something undeclared fails there. Don't import click, which typer 0.26

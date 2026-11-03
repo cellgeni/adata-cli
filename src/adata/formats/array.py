@@ -24,7 +24,7 @@ from adata.elements.read import decode_str_array
 from adata.elements.write import write_dense, write_mapping, write_scalar
 from adata.formats.common import _get_encoding_type, _resolve, stdout_reader_may_stop
 from adata.formats.validate import check_target, validate_dimensions
-from adata.storage import create_dataset, is_dataset, is_group, is_zarr_group
+from adata.storage import create_dataset, is_dataset, is_group, is_zarr_group, row_bands
 from adata.elements.strings import is_string_dtype
 from adata.util.markup import literal
 
@@ -32,11 +32,17 @@ from adata.util.markup import literal
 IMPORT_CHUNK_ELEMENTS = 1 << 20
 
 
-def _row_blocks(shape: Tuple[int, ...], chunk_elements: int) -> Iterator[Tuple[int, int]]:
-    """[start, end) row ranges of about `chunk_elements` elements each."""
+def _row_blocks(
+    shape: Tuple[int, ...], chunk_elements: int, array: Any = None
+) -> Iterator[Tuple[int, int]]:
+    """[start, end) row ranges of about `chunk_elements` elements each; of
+    `array`, rounded to whole chunks of it (`storage.row_bands`)."""
     n = int(shape[0])
     row = int(np.prod(shape[1:])) if len(shape) > 1 else 1
     step = max(1, int(chunk_elements) // max(1, row))
+    if array is not None:
+        yield from row_bands(array, step)
+        return
     for start in range(0, n, step):
         yield start, min(start + step, n)
 
@@ -185,7 +191,7 @@ def export_npy(
             fh.write(convert(None, None).tobytes())
         else:
             n = shape[0]
-            for start, end in _row_blocks(shape, chunk_elements):
+            for start, end in _row_blocks(shape, chunk_elements, values):
                 if progress:
                     progress.update(f"[magenta]Exporting {literal(obj)}: {start}-{end} of {n}...[/]")
                 fh.write(convert(start, end).tobytes())

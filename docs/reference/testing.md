@@ -12,7 +12,7 @@ redirect_from:
 uv sync --extra dev
 uv run pytest                      # everything
 uv run pytest -m "not integration" # no environment building, ~2.5 min
-uv run pytest -m perf              # just the tracing complexity guards
+uv run pytest -m perf              # just the cost guards
 uv run pytest -m integration       # anndata releases, scanpy and PyTables
 ```
 
@@ -21,9 +21,10 @@ the names GitHub shows:
 
 | Job | What it runs |
 |---|---|
-| `tests (py3.12)`, `tests (py3.13)` | The unit suite, `-m "not integration"`, with a **90% coverage floor** |
+| `tests (py3.12)`, `tests (py3.13)` | The unit suite, `-m "not integration and not perf"`, with a **90% coverage floor** |
+| `cost guards (py3.12)`, `cost guards (py3.13)` | The cost guards, `-m perf`, in parallel with the unit suite: what each operation reads, writes and holds, counted (see below) |
 | `fresh install, no lock` | The package alone from a fresh resolution, without `uv.lock`, as `pip install pyadata-cli` would install it: every module imported on the base dependencies, `adata convert` with and without click beside typer, and the docs-accuracy suite with no click installed |
-| `tests at the dependency floors (py3.12)`, `(py3.13)` | The unit suite once more, with each direct dependency at the lowest version `pyproject.toml` allows, after checking that each one is at its floor and imports |
+| `tests at the dependency floors (py3.12)`, `(py3.13)` | The unit suite and the cost guards once more, with each direct dependency at the lowest version `pyproject.toml` allows, after checking that each one is at its floor and imports |
 | `anndata 0.8-0.13 compatibility` | `test_anndata_versions.py`: every anndata release from 0.7.8 to 0.13 (see below) |
 | `10x h5 against scanpy and PyTables` | `test_external_readers.py`: every converter checked by the reader people use for that format, not only 10x's (see the table below) |
 | `workflow lint` | [actionlint](https://github.com/rhysd/actionlint) and [zizmor](https://docs.zizmor.sh) over the workflows |
@@ -104,6 +105,7 @@ inside every release before PyPI has it.
 | `test_release_pipeline.py` | The workflows and the Dockerfile: which jobs publish in each kind of run, which hold a write token and what they run, pinned actions and base image, no untrusted value pasted into a script, each Python leg on its own Python |
 | `test_docs_are_accurate.py` | The docs against the code: every `adata ...` line in the README, the site and the `--help` examples uses real commands and options; each command has a section in the reference; links resolve; every page has its front matter; every test file is in this table |
 | `test_subset_oracle.py` | `subset` and `split` against anndata's `adata[obs, var]`, element by element: X, every layer layout, obsm and varm of any rank and as dataframes, obsp, varp, raw; on HDF5, Zarr v2 and Zarr v3 |
+| `test_block_layout.py` | Outputs keep their source's chunks and shards and are written a whole unit at a time, and still equal anndata's own subsetting, on HDF5, Zarr v2, Zarr v3 and anndata 0.13's sharded layout under zarr 3.1, at blocks small enough to cross every boundary |
 | `test_subset_selection.py`, `test_select.py`, `test_split_names.py` | Name lists that repeat a name, queries on every column layout against pandas, missing labels apart from empty ones, and output names that never share a file |
 | `test_subset.py`, `test_export.py`, `test_import.py`, `test_info_read.py`, `test_zarr.py`, `test_query.py` | Per-feature unit tests |
 
@@ -194,6 +196,7 @@ shard rewritten on every block, so `IOCounts` also counts bytes:
 | `decoded_bytes` | bytes of every whole chunk the reads touched | reads that decode a chunk to use a row of it |
 | `written_bytes`, `largest_write` | bytes handed to writes | |
 | `encoded_bytes` | bytes of every whole chunk the writes touched, and every whole shard of a sharded Zarr array | writes smaller than the unit, each rewriting all of it |
+| `written_by_name`, `encoded_by_name` | the two above, per array | a writer's own output apart from its scratch |
 | `store_get_bytes`, `store_set_bytes` | bytes Zarr's store fetched and stored | |
 
 Decoded and encoded bytes are a model worked out from the selection, the chunk
@@ -301,10 +304,13 @@ path handles well. A CSC densify holding n_obs x `--chunk` values, a dense cast
 check reading the whole matrix and a transpose stepping by the average major
 all passed them. `tests/perf_fixtures.py` builds stores the way users have
 them -- every layout, written by anndata as h5ad, Zarr v2 and anndata 0.13's
-default sharded Zarr v3 (inner chunks of a few hundred bytes in shards of the
-whole array) -- and `test_peak_memory_is_a_small_share_of_the_input` runs
+default sharded Zarr v3 -- and `test_peak_memory_is_a_small_share_of_the_input` runs
 `recast` (each dtype and layout change), `subset` and `concat` over each
-layout, growing n_obs and then n_var.
+layout, growing n_obs and then n_var. zarr 3.4 gives anndata's shards inner
+chunks of about a megabyte; `zarr31_layout` rewrites a store's X as zarr 3.1
+laid it out, inner chunks of a kilobyte in shards of the whole array, which
+is what users' stores hold and where a read or write that splits a unit
+costs most.
 
 A growth ratio cannot be the claim along n_var: widen a matrix and a block of
 `--chunk` rows widens with it, as fast as the input, so a ratio cannot tell it
@@ -315,8 +321,8 @@ bounded paths came to at most 0.21. Growing n_obs, `--chunk` is 256 rows, so a
 block of `--chunk` columns over every row (CSC densify before F030) is plain.
 Each fixture is built once and shared by the commands.
 
-The known gap is marked `xfail` with its owner: sparse `subset` (F032, B6b),
-strict, so the fix has to flip it.
+Sparse `subset` was the known gap, read 4,096 majors a block whatever
+`--chunk` said (F032); 0.17.6 closed it, and `GRID_GAPS` is empty.
 
 The recast guards beside it pin each block in bytes, on h5ad and sharded Zarr
 v3 (Zarr v2 is covered by the correctness tests): the cast
@@ -393,10 +399,19 @@ should scale with, scale only that, and hold everything else fixed.
 | `recast` (every dtype and layout change), `subset`, `concat` | n_obs, n_var; CSR, CSC, dense | **peak memory** a small share of the input |
 | `recast --dtype` (dense), a skewed transpose | n_obs; h5ad, sharded Zarr v3 | the **largest read** set by the chunk |
 | CSC `--layout dense`, dense `--layout csc` | n_obs; h5ad | the **largest read** set by the chunk, and memory per row |
+| `subset`, `split`, `concat`, `recast`, `convert` into anndata 0.13's shards | Zarr v3 as zarr 3.1 wrote it | each shard **encoded once** |
+| dense `subset`, `concat`, `recast`, `export array` | tall gzip chunks, zarr's own chunks | each chunk **decoded once** |
+| `subset` into a sharded output | 1 MiB units; dense, CSR | **peak allocation** a few units, not the shard |
+| `split` into chunked HDF5 | eight groups | each output chunk **encoded once** |
+| `subset`, `concat` of a sharded store | Zarr v3 as zarr 3.1 wrote it | each shard index **fetched once** |
+| sparse `subset` | n_obs; CSR, CSC, a gene in every cell | the **largest read** about `--chunk` rows of entries |
+| `convert` of a matrix chunked (n_obs, 8) | n_obs | the **largest read** a tile within the budget |
+| `split` | 128 against 512 groups | **resident memory** flat past 128 outputs a pass |
 
 The `slow` marker is on the guards that build a 65,536-row store or run `peak_rss`;
-they still gate merges, and `-m "not slow"` skips them locally. `perf` is on the
-tracing guards.
+they still gate merges, and `-m "not slow"` skips them locally. `perf` is on
+every guard in the file, and on the few beside the code they guard; CI runs
+them as a job of their own, beside the unit suite's coverage job.
 
 h5py 3.15 kept 32 to 160 bytes of every dataset read, write and `.shape` for good, so
 any long streaming loop grew with its block count;
@@ -572,7 +587,7 @@ ADATA_SKIP_VERSION_FIXTURES=1 uv run pytest
 ## Coverage
 
 ```bash
-uv run pytest -m "not integration" --cov=adata --cov-report=term-missing
+uv run pytest -m "not integration and not perf" --cov=adata --cov-report=term-missing
 ```
 
 The floor is 90%. What remains uncovered is mostly defensive `except` branches

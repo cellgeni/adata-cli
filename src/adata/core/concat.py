@@ -53,6 +53,8 @@ from adata.elements.write import (
 )
 from adata.elements.strings import is_string_dtype
 from adata.storage import (
+    RowWriter,
+    row_bands,
     copy_tree,
     create_dataset,
     dataset_create_kwargs,
@@ -878,6 +880,8 @@ def _concat_sparse(
         # rather than hold both: 8 bytes a row more at the peak.
         del src_indptr
 
+    out_indices.flush()
+    out_data.flush()
     _write_indptr(group, indptr, pointer_dtype, inputs.get(0, path)["indptr"])
 
 
@@ -903,8 +907,10 @@ def _layout_like(src: Any, dst_parent: Any, shape: Tuple[int, ...], dtype: Any) 
     compression, the chunks fitted to its own shape, as every copied
     dataset's are kept."""
     backend = "zarr" if is_zarr_group(dst_parent) else "hdf5"
+    # A unit cut to what `RowWriter` holds, for the writers that fill it a
+    # block of rows at a time.
     kw = fit_chunks(dataset_create_kwargs(src, target_backend=backend, dst_parent=dst_parent),
-                    shape, backend=backend)
+                    shape, backend=backend, itemsize=np.dtype(dtype).itemsize or None)
     if np.dtype(dtype) != np.dtype(src.dtype):
         # The source's fill value is of its own dtype, not the output's.
         kw.pop("fillvalue", None)
@@ -942,7 +948,9 @@ def _concat_dense(
                          **_layout_like(inputs.get(0, path), dst_parent, shape, dtype))
     spec.set_encoding(out, spec.ARRAY)
 
-    row_offset = 0
+    # Whole shards (or chunks) at a time: a block of --chunk rows into the
+    # first input's shard rewrote it once a block (F036).
+    writer = RowWriter(out)
     for i, col_map in enumerate(col_maps):
         source = inputs.get(i, path)
         keep = col_map >= 0
@@ -950,14 +958,12 @@ def _concat_dense(
         gaps = targets.size < n_cols
         n_src_rows = source.shape[0]
 
-        for start in range(0, n_src_rows, chunk_rows):
-            end = min(start + chunk_rows, n_src_rows)
+        for start, end in row_bands(source, chunk_rows):
             block = (np.full((end - start, n_cols), fill_value, dtype=dtype) if gaps
                      else np.empty((end - start, n_cols), dtype=dtype))
             block[:, targets] = np.asarray(source[start:end, :])[:, keep]
-            out[row_offset + start : row_offset + end, :] = block
-
-        row_offset += n_src_rows
+            writer.write(block)
+    writer.flush()
 
 
 @contextmanager
@@ -1142,6 +1148,8 @@ def _concat_csc(
                 _append(out_indices, rows.astype(index_dtype, copy=False))
                 _append(out_data, values)
 
+    out_indices.flush()
+    out_data.flush()
     _write_indptr(group, indptr, pointer_dtype, inputs.get(0, path)["indptr"])
 
 
@@ -1313,12 +1321,11 @@ def _concat_obsm(
                          **_layout_like(inputs.get(0, path), dst_parent, shape, dtype))
     spec.set_encoding(out, spec.ARRAY)
 
-    offset = 0
+    writer = RowWriter(out)
     for source in inputs.each(path):
-        for start in range(0, source.shape[0], chunk_rows):
-            end = min(start + chunk_rows, source.shape[0])
-            out[offset + start : offset + end, ...] = source[start:end, ...]
-        offset += source.shape[0]
+        for start, end in row_bands(source, chunk_rows):
+            writer.write(source[start:end, ...])
+    writer.flush()
     return True
 
 
@@ -1417,8 +1424,10 @@ def _write_varm_array(parent: Any, name: str, obj: Any, take: np.ndarray, block_
     out = create_dataset(parent, name, shape=shape, dtype=obj.dtype,
                          **_layout_like(obj, parent, shape, obj.dtype))
     spec.set_encoding(out, spec.STRING_ARRAY if text else spec.ARRAY)
+    writer = RowWriter(out)
     for start in range(0, len(take), block_rows):
-        out[start:start + block_rows, ...] = aligned_rows(obj, take[start:start + block_rows])
+        writer.write(aligned_rows(obj, take[start:start + block_rows]))
+    writer.flush()
 
 
 def _entries_on(obj: Any, col_map: np.ndarray, entries: int) -> Iterator[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
@@ -1504,8 +1513,10 @@ def _write_pairwise(
         out = create_dataset(parent, name, shape=(n, n), dtype=obj.dtype,
                              **_layout_like(obj, parent, (n, n), obj.dtype))
         spec.set_encoding(out, spec.STRING_ARRAY if is_string_dtype(obj.dtype) else spec.ARRAY)
+        writer = RowWriter(out)
         for start in range(0, n, block_rows):
-            out[start:start + block_rows, :] = aligned_rows(obj, take[start:start + block_rows])[:, take]
+            writer.write(aligned_rows(obj, take[start:start + block_rows])[:, take])
+        writer.flush()
         return
     enc = spec.encoding_type(obj)
     if enc not in spec.SPARSE_TYPES:
