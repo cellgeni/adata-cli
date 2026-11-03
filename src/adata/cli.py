@@ -1373,7 +1373,7 @@ def export_sparse(
     ),
     chunk_elements: int = _chunk_option(
         1_000,
-        "Number of rows/columns (depends on compression format) to process per chunk",
+        "Rows of a CSR matrix, or columns of a CSC one, per block",
     ),
     in_memory: bool = typer.Option(
         False,
@@ -1428,7 +1428,7 @@ def export_dict(
         help="Maximum array elements for JSON export",
     ),
     include_attrs: bool = typer.Option(
-        False, "--include-attrs", help="Include HDF5 attributes in JSON export"
+        False, "--include-attrs", help="Include the elements' attributes in the JSON"
     ),
 ) -> None:
     """
@@ -1545,15 +1545,15 @@ def import_dataframe(
     auto_categorical: bool = typer.Option(
         True,
         "--auto-categorical/--no-auto-categorical",
-        help="Infer categoricals from low-cardinality string columns",
+        help="Make text columns that repeat a value categoricals, as anndata does",
     ),
 ) -> None:
     """
     Import a CSV file as a dataframe.
 
-    String columns with few distinct values become categoricals; pass
-    --no-auto-categorical to keep them as plain strings, or --categorical to
-    force specific ones.
+    A text column that repeats a value becomes a categorical, as anndata
+    makes it; pass --no-auto-categorical to keep text as plain strings, or
+    --categorical to force specific columns.
 
     Examples:
         adata import dataframe data.h5ad obs cells.csv -o out.h5ad -i cell_id
