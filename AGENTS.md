@@ -35,8 +35,8 @@ uv sync --extra dev                                   # set up
 uv run adata --help                                   # run the CLI from source
 uv run pytest -m "not integration"                    # unit suite, ~2.5 min; what CI gates on
 uv run pytest tests/test_recast.py::test_inplace_replaces_the_source   # one test
-uv run pytest -m "not integration" --cov=adata --cov-fail-under=90     # CI's coverage floor
-uv run pytest -m perf                                 # tracing complexity guards only
+uv run pytest -m "not integration and not perf" --cov=adata --cov-fail-under=90  # CI's coverage job
+uv run pytest -m perf                                 # the cost guards, CI's own job
 ADATA_REQUIRE_VERSION_FIXTURES=1 uv run pytest tests/test_anndata_versions.py -m integration
 uv run python -m benchmarks.run --tier smoke --case concat-inner --out results.json
 uv run python -m benchmarks.report results.json
@@ -46,7 +46,9 @@ Test markers:
 - `integration` tests build uv environments with real anndata releases (0.7.8
   to 0.13) and the oracles (scanpy, PyTables and others), all pinned exactly
   in `tests/reference_stores.py`, so they need the network on the first run.
-- `perf` tests are slow, but CI runs them in the main job.
+- `perf` marks the cost guards (all of `tests/test_performance.py`, and a
+  few beside the code they guard). CI runs them as a job of their own,
+  beside the unit suite's coverage job, and a release needs both.
 
 CI also installs the package from a fresh resolution, without the lock,
 imports every module on the base dependencies alone, and runs `convert`.
@@ -191,7 +193,14 @@ These are easy to break without any test noticing straight away:
   - Commands read the source's version from `Store.zarr_format`.
   - `concat` uses the version its Zarr inputs share.
 - **Outputs keep the source's index dtypes, chunking and compression.**
-  Changing them is `recast`'s job, or that of an explicit flag.
+  Changing them is `recast`'s job, or that of an explicit flag. Zarr v3
+  shards are kept too: `fit_chunks` clamps them with the chunk, and given
+  `itemsize` cuts a unit too large to hold along its rows.
+- **Write a streamed output through `storage.RowWriter`**, and `flush()` it
+  after the last block. A write to part of a Zarr shard rewrites the whole
+  shard, and to part of a chunk Zarr keeps no cache, so writing a `--chunk`
+  block at a time straight into the array costs a unit per block.
+  `_growable_like` returns one for a sparse matrix's `data` and `indices`.
 
 ## Tests
 

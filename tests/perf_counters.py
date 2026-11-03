@@ -112,6 +112,10 @@ class IOCounts:
     #: The largest read per dataset, in bytes and in elements.
     largest_by_name: Dict[str, int] = field(default_factory=dict)
     largest_elements_by_name: Dict[str, int] = field(default_factory=dict)
+    #: Bytes written, and whole units encoded, per array: a writer's own
+    #: output apart from its scratch.
+    written_by_name: Dict[str, int] = field(default_factory=dict)
+    encoded_by_name: Dict[str, int] = field(default_factory=dict)
 
     @property
     def elements(self) -> int:
@@ -412,9 +416,13 @@ def count_io() -> Iterator[IOCounts]:
 
     def _write(array: Any, key: Any, value: Any) -> None:
         given = _nbytes(value)
+        encoded = cache.cost(array, key, given, write=True)
         counts.written_bytes += given
         counts.largest_write = max(counts.largest_write, given)
-        counts.encoded_bytes += cache.cost(array, key, given, write=True)
+        counts.encoded_bytes += encoded
+        name = str(getattr(array, "name", None) or getattr(array, "path", None) or "/")
+        counts.written_by_name[name] = counts.written_by_name.get(name, 0) + given
+        counts.encoded_by_name[name] = counts.encoded_by_name.get(name, 0) + encoded
 
     def h5_wrapper(self: Any, key: Any) -> Any:
         result = h5_get(self, key)
@@ -558,6 +566,15 @@ def high_water():
     return value if sys.platform == "darwin" else value * 1024  # Linux: KiB
 
 argv, report = json.loads(sys.argv[1]), sys.argv[2]
+# The open-file limit a cluster or a container gives, not macOS's 256: the
+# limits it sets (outputs open at once) are what a guard measures.
+soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+want = 65536 if hard == resource.RLIM_INFINITY else min(hard, 65536)
+if soft != resource.RLIM_INFINITY and soft < want:
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+    except (ValueError, OSError):
+        pass
 from adata.cli import app
 
 before = high_water()

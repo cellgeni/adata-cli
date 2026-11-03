@@ -333,6 +333,8 @@ class CsrAppender:
     def finish(self) -> int:
         from adata.core.subset import _sparse_dataset
 
+        self.data.flush()
+        self.indices.flush()
         dtype = np.int32 if self.nnz <= INT32_MAX else np.int64
         template = self.templates[2]
         if template is not None and np.dtype(template.dtype).itemsize > np.dtype(dtype).itemsize:

@@ -12,13 +12,13 @@ redirect_from:
 uv sync --extra dev
 uv run pytest                      # everything
 uv run pytest -m "not integration" # no environment building, ~2.5 min
-uv run pytest -m perf              # just the tracing complexity guards
+uv run pytest -m perf              # just the cost guards
 uv run pytest -m integration       # anndata releases, scanpy and PyTables
 ```
 
 CI runs the unit suite on Python 3.12 and 3.13 with a **90% coverage floor**,
-and the anndata compatibility suite and the 10x external-reader suite as
-separate jobs. A fresh-install job installs the package alone from a fresh
+and the cost guards (`-m perf`), the anndata compatibility suite and the 10x
+external-reader suite as separate jobs. A fresh-install job installs the package alone from a fresh
 resolution, without `uv.lock`, as `pip install pyadata-cli` would. It
 imports every module on the base dependencies alone, runs `adata convert`
 with and without click beside typer, and runs the docs-accuracy suite with no
@@ -169,6 +169,7 @@ shard rewritten on every block, so `IOCounts` also counts bytes:
 | `decoded_bytes` | bytes of every whole chunk the reads touched | reads that decode a chunk to use a row of it |
 | `written_bytes`, `largest_write` | bytes handed to writes | |
 | `encoded_bytes` | bytes of every whole chunk the writes touched, and every whole shard of a sharded Zarr array | writes smaller than the unit, each rewriting all of it |
+| `written_by_name`, `encoded_by_name` | the two above, per array | a writer's own output apart from its scratch |
 | `store_get_bytes`, `store_set_bytes` | bytes Zarr's store fetched and stored | |
 
 Decoded and encoded bytes are a model worked out from the selection, the chunk
@@ -276,10 +277,13 @@ path handles well. A CSC densify holding n_obs x `--chunk` values, a dense cast
 check reading the whole matrix and a transpose stepping by the average major
 all passed them. `tests/perf_fixtures.py` builds stores the way users have
 them -- every layout, written by anndata as h5ad, Zarr v2 and anndata 0.13's
-default sharded Zarr v3 (inner chunks of a few hundred bytes in shards of the
-whole array) -- and `test_peak_memory_is_a_small_share_of_the_input` runs
+default sharded Zarr v3 -- and `test_peak_memory_is_a_small_share_of_the_input` runs
 `recast` (each dtype and layout change), `subset` and `concat` over each
-layout, growing n_obs and then n_var.
+layout, growing n_obs and then n_var. zarr 3.4 gives anndata's shards inner
+chunks of about a megabyte; `zarr31_layout` rewrites a store's X as zarr 3.1
+laid it out, inner chunks of a kilobyte in shards of the whole array, which
+is what users' stores hold and where a read or write that splits a unit
+costs most.
 
 A growth ratio cannot be the claim along n_var: widen a matrix and a block of
 `--chunk` rows widens with it, as fast as the input, so a ratio cannot tell it
@@ -290,8 +294,8 @@ bounded paths came to at most 0.21. Growing n_obs, `--chunk` is 256 rows, so a
 block of `--chunk` columns over every row (CSC densify before F030) is plain.
 Each fixture is built once and shared by the commands.
 
-The known gap is marked `xfail` with its owner: sparse `subset` (F032, B6b),
-strict, so the fix has to flip it.
+Sparse `subset` was the known gap, read 4,096 majors a block whatever
+`--chunk` said (F032); 0.17.6 closed it, and `GRID_GAPS` is empty.
 
 The recast guards beside it pin each block in bytes, on h5ad and sharded Zarr
 v3 (Zarr v2 is covered by the correctness tests): the cast
@@ -368,10 +372,19 @@ should scale with, scale only that, and hold everything else fixed.
 | `recast` (every dtype and layout change), `subset`, `concat` | n_obs, n_var; CSR, CSC, dense | **peak memory** a small share of the input |
 | `recast --dtype` (dense), a skewed transpose | n_obs; h5ad, sharded Zarr v3 | the **largest read** set by the chunk |
 | CSC `--layout dense`, dense `--layout csc` | n_obs; h5ad | the **largest read** set by the chunk, and memory per row |
+| `subset`, `split`, `concat`, `recast`, `convert` into anndata 0.13's shards | Zarr v3 as zarr 3.1 wrote it | each shard **encoded once** |
+| dense `subset`, `concat`, `recast`, `export array` | tall gzip chunks, zarr's own chunks | each chunk **decoded once** |
+| `subset` into a sharded output | 1 MiB units; dense, CSR | **peak allocation** a few units, not the shard |
+| `split` into chunked HDF5 | eight groups | each output chunk **encoded once** |
+| `subset`, `concat` of a sharded store | Zarr v3 as zarr 3.1 wrote it | each shard index **fetched once** |
+| sparse `subset` | n_obs; CSR, CSC, a gene in every cell | the **largest read** about `--chunk` rows of entries |
+| `convert` of a matrix chunked (n_obs, 8) | n_obs | the **largest read** a tile within the budget |
+| `split` | 128 against 512 groups | **resident memory** flat past 128 outputs a pass |
 
 The `slow` marker is on the guards that build a 65,536-row store or run `peak_rss`;
-they still gate merges, and `-m "not slow"` skips them locally. `perf` is on the
-tracing guards.
+they still gate merges, and `-m "not slow"` skips them locally. `perf` is on
+every guard in the file, and on the few beside the code they guard; CI runs
+them as a job of their own, beside the unit suite's coverage job.
 
 h5py 3.15 kept 32 to 160 bytes of every dataset read, write and `.shape` for good, so
 any long streaming loop grew with its block count;
@@ -547,7 +560,7 @@ ADATA_SKIP_VERSION_FIXTURES=1 uv run pytest
 ## Coverage
 
 ```bash
-uv run pytest -m "not integration" --cov=adata --cov-report=term-missing
+uv run pytest -m "not integration and not perf" --cov=adata --cov-report=term-missing
 ```
 
 The floor is 90%. What remains uncovered is mostly defensive `except` branches

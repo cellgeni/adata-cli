@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Iterable, Iterator, Optional, Sequence
 import shutil
 import warnings
 
@@ -125,12 +125,116 @@ def detect_backend(path: Path) -> str:
 #: followed the number of outputs, eight times faster. 1 MiB, as before.
 HDF5_CHUNK_CACHE = 1 << 20
 
+#: Bytes of Zarr shard indexes kept, across every store opened for reading
+#: (see `_shard_index_cache`): 16 bytes an inner chunk, so the index of a
+#: 1 GB shard of 1 KB chunks, as anndata 0.13 wrote with zarr 3.1, is 16 MB.
+#: One budget for the process: concat holds up to 64 inputs open.
+SHARD_INDEX_CACHE_BYTES = 64 * 1024 * 1024
+
+#: The shard indexes kept, least recently used first: `(store, key,
+#: length)` to bytes, `store` a number each wrapped store takes once.
+_SHARD_INDEXES: "dict" = {}
+_SHARD_INDEX_STATE = {"bytes": 0, "next": 0}
+
+
+def _drop_shard_index(slot: tuple) -> None:
+    value = _SHARD_INDEXES.pop(slot, None)
+    if value is not None:
+        _SHARD_INDEX_STATE["bytes"] -= len(value)
+
+
+def _forget_shard_indexes(store_id: int) -> None:
+    """Drop what a store kept, once nothing can read through it again.
+
+    A finalizer, so it can run in the middle of anything, zarr's own thread
+    included: it walks a copy of the keys, and pops what is still there.
+    """
+    for slot in [slot for slot in list(_SHARD_INDEXES) if slot[0] == store_id]:
+        _drop_shard_index(slot)
+
+
+def _shard_index_cache(store: Any) -> Any:
+    """`store`, keeping the shard indexes read through it (F062).
+
+    zarr-python reads a shard's index again for every read of part of the
+    shard: 16 bytes an inner chunk, about 1 MB for a 64 MB shard of anndata
+    0.13's 1 KB chunks. A command streaming such an array a block at a
+    time read the whole index once a block, so the bytes read grew with
+    the square of the array: subset of an anndata-default store read 4.2
+    times the store, concat 27.7 times. A store opened for reading cannot
+    change underneath, so each index is read once and kept, least recently
+    used first out, up to `SHARD_INDEX_CACHE_BYTES` across every store
+    (not each: concat holds up to 64 open). Each wrapped store keys its own
+    entries, which go when it does, so a store written again at the same
+    path is never read through an older one's indexes.
+
+    The index is the one read zarr makes by suffix (its default
+    `index_location`, and anndata's). Inner chunks are read by range, and
+    passed through.
+    """
+    import weakref
+
+    try:
+        from zarr.abc.store import SuffixByteRequest
+        from zarr.storage import WrapperStore
+    except ImportError:  # pragma: no cover - a zarr without either
+        return store
+
+    class ShardIndexCache(WrapperStore):
+        def __init__(self, inner: Any) -> None:
+            super().__init__(inner)
+            self._id = _SHARD_INDEX_STATE["next"]
+            _SHARD_INDEX_STATE["next"] += 1
+            weakref.finalize(self, _forget_shard_indexes, self._id)
+
+        def _with_store(self, inner: Any) -> Any:
+            return type(self)(inner)
+
+        def _lookup(self, key: str, byte_range: Any) -> tuple:
+            if not isinstance(byte_range, SuffixByteRequest):
+                return None, None
+            slot = (self._id, key, int(byte_range.suffix))
+            value = _SHARD_INDEXES.pop(slot, None)
+            if value is not None:
+                _SHARD_INDEXES[slot] = value  # now the most recently used
+            return slot, value
+
+        def _keep(self, slot: tuple, value: Any) -> None:
+            size = len(value)
+            if size > SHARD_INDEX_CACHE_BYTES or slot in _SHARD_INDEXES:
+                return
+            _SHARD_INDEXES[slot] = value
+            _SHARD_INDEX_STATE["bytes"] += size
+            while _SHARD_INDEX_STATE["bytes"] > SHARD_INDEX_CACHE_BYTES and _SHARD_INDEXES:
+                _drop_shard_index(next(iter(list(_SHARD_INDEXES))))
+
+        async def get(self, key: str, prototype: Any, byte_range: Any = None) -> Any:
+            slot, value = self._lookup(key, byte_range)
+            if value is not None:
+                return value
+            value = await self._store.get(key, prototype, byte_range)
+            if slot is not None and value is not None:
+                self._keep(slot, value)
+            return value
+
+        def get_sync(self, key: str, *, prototype: Any = None, byte_range: Any = None) -> Any:
+            slot, value = self._lookup(key, byte_range)
+            if value is not None:
+                return value
+            value = super().get_sync(key, prototype=prototype, byte_range=byte_range)
+            if slot is not None and value is not None:
+                self._keep(slot, value)
+            return value
+
+    return ShardIndexCache(store)
+
 
 def open_store(
     path: Path,
     mode: str,
     zarr_format: Optional[int] = None,
     require_anndata: bool = True,
+    chunk_cache: int = HDF5_CHUNK_CACHE,
 ) -> Store:
     """Open a store, auto-detecting the backend from `path`.
 
@@ -142,6 +246,10 @@ def open_store(
     Set `require_anndata=False` for format-agnostic commands such as `ls`,
     which are expected to open plain HDF5 and Zarr stores and should not warn
     about a missing AnnData root.
+
+    `chunk_cache` is the bytes of chunk cache an HDF5 store keeps for each
+    dataset; a writer holding many outputs at once, which writes whole
+    chunks through `RowWriter`, needs none.
     """
     path = Path(path)
     backend = detect_backend(path)
@@ -157,8 +265,15 @@ def open_store(
             # snapshot, so members added through it are invisible even to the
             # handle that created them.
             kwargs["use_consolidated"] = False
+            target: Any = str(path)
+        elif path.is_dir():
+            from zarr.storage import LocalStore
 
-        root = zarr.open_group(str(path), mode=mode, **kwargs)
+            target = _shard_index_cache(LocalStore(str(path), read_only=True))
+        else:
+            target = str(path)
+
+        root = zarr.open_group(target, mode=mode, **kwargs)
         if writable:
             ensure_anndata_root_attrs(root)
         elif require_anndata:
@@ -170,7 +285,7 @@ def open_store(
             zarr_format=zarr_format_of(root),
             consolidate=writable,
         )
-    root = h5py.File(path, mode, rdcc_nbytes=HDF5_CHUNK_CACHE)
+    root = h5py.File(path, mode, rdcc_nbytes=chunk_cache)
     if mode not in ("w", "w-", "x"):
         # Anything opened for its contents, read or appended to (--inplace).
         try:
@@ -493,7 +608,12 @@ def dataset_create_kwargs(
         kw_target = zarr_format_of(dst_parent)
     kw: dict = {}
     chunks = getattr(src, "chunks", None)
-    if chunks is not None:
+    shards = getattr(src, "shards", None) if is_zarr_array(src) else None
+    if chunks is not None and not (shards and target_backend == "hdf5"):
+        # A shard's inner chunk is a unit of compression inside a file, a
+        # kilobyte under anndata 0.13 on zarr 3.1: as the chunk of an HDF5
+        # dataset it made 16,327 chunks where anndata's own h5ad has 512,
+        # and a file twice the size (F033). HDF5 picks its own instead.
         kw["chunks"] = chunks
     if target_backend == "hdf5" and is_hdf5_dataset(src):
         if src.compression is not None:
@@ -550,9 +670,16 @@ def dataset_create_kwargs(
             if filters and not _is_string_src(src):
                 kw["filters"] = filters
 
-        shards = src.shards
         if shards is not None and target_format == 3:
             kw["shards"] = shards
+        elif shards is not None and target_format == 2:
+            # v2 has no shards: the shard itself is the chunk, as F033 asks,
+            # rather than thousands of inner-chunk files. Cut along rows to
+            # a write unit, as a shard would be (`fit_chunks`).
+            kw["chunks"] = cut_unit(
+                {"chunks": tuple(shards)}, tuple(shards),
+                int(src.dtype.itemsize) or VLEN_ELEMENT_BYTES, WRITE_UNIT_BYTES,
+            )["chunks"]
 
         fill_value = src.fill_value
         # A record's fill is a value of its fields, which change type when
@@ -729,7 +856,94 @@ def _zarr_is_compressed(src: Any) -> bool:
     return bool(src.compressors)
 
 
-def fit_chunks(kw: dict, shape: Sequence[int], *, backend: str) -> dict:
+#: The most one output holds to write a whole unit -- a shard, or a chunk
+#: that a write of part of would decode and encode again -- at once
+#: (`RowWriter`), a sparse matrix's `data` and `indices` together. A unit
+#: whose rows across the array's width come to more is cut along its rows
+#: when the output is created (`fit_chunks`): anndata 0.13 aims at 1 GB
+#: shards, which a writer filling them from blocks of --chunk rows would
+#: otherwise hold, or rewrite once a block. While zarr encodes a unit it
+#: holds about four times as much again, so 8 MiB costs about 40 MB at most
+#: (64 MiB cost about 300 MB).
+WRITE_UNIT_BYTES = 8 * 1024 * 1024
+
+#: The most one pass writing several outputs at once (`split`) holds to
+#: write whole units, across all of them: each output's units are cut to a
+#: share of it (`write_share`).
+WRITE_BUFFER_BYTES = 128 * 1024 * 1024
+
+
+def write_share(outputs: int) -> int:
+    """Bytes each of `outputs` written in one pass may hold for a unit."""
+    return max(1, min(WRITE_UNIT_BYTES, WRITE_BUFFER_BYTES // max(1, outputs)))
+
+
+def _prod(values: Sequence[int]) -> int:
+    total = 1
+    for v in values:
+        total *= max(1, int(v))
+    return total
+
+
+def cut_unit(kw: dict, shape: Sequence[int], itemsize: int, budget: int) -> dict:
+    """`kw` with its write unit -- the shard, or else the chunk -- cut along
+    its rows so that the unit's rows across `shape`'s width fit `budget`.
+
+    A shard keeps a whole number of its inner chunks, and its inner chunk is
+    cut too only when one inner chunk's rows are already over the budget.
+    """
+    chunks = kw.get("chunks")
+    if not isinstance(chunks, (tuple, list)) or not chunks:
+        return kw
+    shards = kw.get("shards")
+    shards = list(shards) if isinstance(shards, (tuple, list)) and shards else None
+    chunks = list(chunks)
+    row = max(1, int(itemsize)) * _prod(shape[1:])
+    unit = shards[0] if shards else chunks[0]
+    if unit * row <= budget:
+        return kw
+    limit = max(1, budget // row)
+    if shards and chunks[0] <= limit:
+        shards[0] = (limit // chunks[0]) * chunks[0]
+    elif shards:
+        chunks[0] = shards[0] = limit
+    else:
+        chunks[0] = limit
+    kw = dict(kw)
+    kw["chunks"] = tuple(chunks)
+    if shards:
+        kw["shards"] = tuple(shards)
+    return kw
+
+
+def backend_chunks(parent: Any, kw: dict, shape: Sequence[int], dtype: Any) -> dict:
+    """`kw` with the chunks a Zarr array would take by default made explicit,
+    where nothing gave it any (a contiguous h5ad source), so `fit_chunks`
+    can cut them. zarr's own choice for a wide matrix can span thousands of
+    rows across every column, more than a writer may hold to write it whole.
+    zarr is asked on an array of the same shape in memory."""
+    if not is_zarr_group(parent) or kw.get("chunks") or not shape or 0 in tuple(shape):
+        return kw
+    try:
+        from zarr.storage import MemoryStore
+
+        probe = zarr.create_array(
+            store=MemoryStore(), shape=tuple(int(n) for n in shape), dtype=np.dtype(dtype),
+            zarr_format=zarr_format_of(parent) or 3,
+        )
+        return {**kw, "chunks": tuple(int(c) for c in probe.chunks)}
+    except Exception:  # pragma: no cover - a dtype zarr cannot probe
+        return kw
+
+
+def fit_chunks(
+    kw: dict,
+    shape: Sequence[int],
+    *,
+    backend: str,
+    itemsize: Optional[int] = None,
+    unit_bytes: Optional[int] = None,
+) -> dict:
     """Make a forwarded chunk shape legal for a dataset of `shape`.
 
     h5py rejects a chunk larger than the dataset, so a chunked source copied
@@ -738,10 +952,16 @@ def fit_chunks(kw: dict, shape: Sequence[int], *, backend: str) -> dict:
     its own chunking, which it does whenever compression asks for one. Zarr
     accepts a chunk larger than its array, so there it only has to shrink.
 
-    Zarr additionally requires a shard to be a whole number of chunks, so a
-    clamped chunk invalidates the source's shard geometry. Sharding is a
-    storage-layout choice rather than data, so it is dropped and left to the
-    backend rather than recomputed into something arbitrary.
+    A Zarr shard is kept, clamped to the array as its chunk is, in whole
+    chunks. Dropping it once a chunk was clamped left anndata 0.13's 1 KB
+    inner chunks as the output's chunks, a file each: 4,083 files for one
+    array of 4M nonzeros, where the source has 3 (F033). A shard larger
+    than the whole output is no use either: a writer has to hold all of it.
+
+    Given the dtype's `itemsize`, a write unit (the shard, or the chunk)
+    whose rows across the array come to more than `unit_bytes` -- by default
+    `WRITE_UNIT_BYTES` -- is cut along its rows (`_cut_rows`), for an output
+    written a block at a time through `RowWriter`.
     """
     chunks = kw.get("chunks")
     if not isinstance(chunks, (tuple, list)) or not chunks:
@@ -759,12 +979,26 @@ def fit_chunks(kw: dict, shape: Sequence[int], *, backend: str) -> dict:
         min(c, dims[i]) if i < len(dims) and dims[i] > 0 else c
         for i, c in enumerate(original)
     )
-    if clamped == original:
-        return kw
+    shards = kw.get("shards")
+    fitted_shards = None
+    if isinstance(shards, (tuple, list)) and shards:
+        fitted = []
+        for i, (s, c) in enumerate(zip(shards, clamped)):
+            s = int(s)
+            if i < len(dims) and dims[i] > 0:
+                s = min(s, -(-dims[i] // c) * c)
+            fitted.append(max(c, (s // c) * c))
+        fitted_shards = tuple(fitted)
 
-    kw = dict(kw)
-    kw["chunks"] = clamped
-    kw.pop("shards", None)
+    if clamped != original or (fitted_shards is not None and fitted_shards != tuple(shards)):
+        kw = dict(kw)
+        kw["chunks"] = clamped
+        if fitted_shards is not None:
+            kw["shards"] = fitted_shards
+    if itemsize is not None:
+        kw = cut_unit(
+            kw, shape, itemsize, WRITE_UNIT_BYTES if unit_bytes is None else unit_bytes
+        )
     return kw
 
 
@@ -970,6 +1204,224 @@ def _chunk_step(
     return min(step, n_rows)
 
 
+def decode_chunks(array: Any) -> Optional[tuple]:
+    """The unit a read of `array` decodes whole: its chunk, the inner chunk
+    of a sharded Zarr array, or None for a contiguous one."""
+    chunks = getattr(array, "chunks", None)
+    return tuple(int(c) for c in chunks) if chunks else None
+
+
+def read_blocks(
+    shape: Sequence[int],
+    chunks: Optional[Sequence[int]],
+    itemsize: int,
+    *,
+    rows: int,
+    budget: int,
+) -> tuple:
+    """How to read an array in whole chunks: `(band, width)`.
+
+    `band` is the rows per read, `rows` rounded to whole chunk heights, and
+    as many of them as `budget` bytes allow when `rows` is more. A read of
+    part of a chunk decodes all of it, so blocks of --chunk rows decoded a
+    chunk 50,000 rows tall fifty times at --chunk 1024 (F061). `width` is
+    None to read whole rows; when one chunk height across every column is
+    over `budget` -- chunks of (n_obs, 8), or zarr's own guess for a wide
+    matrix -- it is the columns per read, a whole number of chunks, and a
+    band is one chunk height (F081). A single chunk over `budget` is read
+    whole: reading it in parts would decode it once a part.
+    """
+    if not shape:
+        return 1, None
+    n_rows = max(1, int(shape[0]))
+    height = int(chunks[0]) if chunks else 1
+    row = max(1, int(itemsize)) * _prod(shape[1:])
+    band = -(-max(1, int(rows)) // height) * height
+    if band * row > budget:
+        band = max(height, (budget // row) // height * height)
+    band = min(band, -(-n_rows // height) * height)
+    if height * row <= budget or len(shape) < 2 or not chunks or len(chunks) < 2:
+        return band, None
+    across = int(chunks[1])
+    column = height * max(1, int(itemsize)) * _prod(shape[2:])
+    width = max(across, (budget // column) // across * across)
+    return height, (None if width >= int(shape[1]) else width)
+
+
+def tile_shards(
+    chunks: Sequence[int], shards: Sequence[int], width: int, *, rows: bool = True
+) -> tuple:
+    """A shard written whole by tiles of one chunk height and `width`
+    columns (`read_blocks`): one chunk tall (unless `rows` is False, for a
+    writer that buffers its rows), and a whole number of chunks that divides
+    the tile's width. A taller or wider shard was rewritten once for each
+    tile that wrote part of it."""
+    shards = [int(s) for s in shards]
+    if rows:
+        shards[0] = int(chunks[0])
+    across = min(shards[1], width)
+    if width % across:
+        across = int(chunks[1])
+    shards[1] = across
+    return tuple(shards)
+
+
+def row_bands(array: Any, rows: int) -> Iterator[tuple]:
+    """`[start, end)` row ranges for reading `array` whole rows at a time:
+    `rows` rounded to whole chunk heights of it, within the larger of `rows`
+    rows and `TARGET_READ_BYTES` (`read_blocks`). Where a chunk height
+    across the array is over that, `rows` as they are, as before: a reader
+    of whole rows cannot take tiles.
+
+    Blocks of --chunk rows split a chunk taller than --chunk across reads,
+    each decoding all of it: concat and recast decoded a gzip matrix in
+    chunks of (n_obs, 8) 15 times over, `export array` 11 (F061)."""
+    shape = tuple(array.shape)
+    if not shape:
+        return
+    rows = max(1, int(rows))
+    dtype = getattr(array, "dtype", None)
+    itemsize = VLEN_ELEMENT_BYTES if _is_vlen(dtype) else int(dtype.itemsize)
+    band, width = read_blocks(
+        shape, decode_chunks(array), itemsize, rows=rows,
+        budget=max(rows * itemsize * _prod(shape[1:]), TARGET_READ_BYTES),
+    )
+    step = rows if width is not None else band
+    for start in range(0, int(shape[0]), step):
+        yield start, min(start + step, int(shape[0]))
+
+
+def write_unit_rows(ds: Any) -> int:
+    """Rows a write to `ds` should cover, in multiples of, for each unit it
+    stores -- a Zarr shard, or a chunk -- to be encoded once.
+
+    A sharded Zarr array rewrites a whole shard for a write of any part of
+    it, and Zarr keeps no cache, so a write of part of a chunk decodes and
+    encodes the chunk again. HDF5's chunk cache can hold a part-written chunk
+    for the next write, but only while every chunk across the array fits
+    in it, and not at all in a store opened without one. A contiguous
+    dataset, or a scalar, has no unit.
+    """
+    shape = getattr(ds, "shape", None)
+    if not shape:
+        return 1
+    if is_zarr_array(ds):
+        shards = getattr(ds, "shards", None)
+        if shards:
+            return int(shards[0])
+    chunks = getattr(ds, "chunks", None)
+    return int(chunks[0]) if chunks else 1
+
+
+class RowWriter:
+    """Write the rows of `ds` in order, each unit of it once.
+
+    Rows are buffered until they reach the end of a unit (`write_unit_rows`)
+    and written in whole units, so a writer filling an output a block of
+    --chunk rows at a time no longer rewrites a shard -- 1 GB, by anndata
+    0.13's default -- once a block (F031, F036), nor decodes and encodes a
+    chunk once a block of `split`'s many outputs (F060).
+
+    It holds one unit's rows, in a buffer filled in place, plus the block it
+    is given; whole units within a block are written from the block itself.
+    `fit_chunks` cuts a unit to fit its budget when the output is created.
+    Gathering a list of blocks and joining them, as it first did, held the
+    unit twice over at each write, and zarr holds the shard it encodes on
+    top of that: a 64 MiB unit cost about 300 MB.
+
+    `grow` extends a 1-D array of unknown length (a sparse matrix's `data`
+    or `indices`) as it goes. `cols`, a `(start, stop)`, writes only those
+    columns, for a writer given a band of columns at a time. A unit whose
+    rows (in those columns) come to more than `budget` -- one the backend
+    chose, where `fit_chunks` cut none -- is not held: rows are written as
+    they come, as they were before. Call `flush` after the last rows: what
+    is still buffered is written then, and nothing before.
+    """
+
+    def __init__(
+        self, ds: Any, *, grow: bool = False, start: int = 0,
+        cols: Optional[tuple] = None, budget: Optional[int] = None,
+    ) -> None:
+        self.ds = ds
+        self.grow = grow
+        self.cols = None if cols is None else slice(int(cols[0]), int(cols[1]))
+        self.unit = max(1, write_unit_rows(ds))
+        shape = tuple(ds.shape)
+        width = (int(cols[1]) - int(cols[0])) if cols is not None else (
+            shape[1] if len(shape) > 1 else 1
+        )
+        row = (int(getattr(ds.dtype, "itemsize", 0) or VLEN_ELEMENT_BYTES)
+               * max(1, width) * _prod(shape[2:]))
+        if self.unit * row > (WRITE_UNIT_BYTES if budget is None else budget):
+            self.unit = 1
+        self.written = int(start)
+        self.buffer: Optional[np.ndarray] = None
+        self.filled = 0
+
+    @property
+    def dtype(self) -> Any:
+        return self.ds.dtype
+
+    @property
+    def rows(self) -> int:
+        """Rows given so far, written or not."""
+        return self.written + self.filled
+
+    def write(self, values: Any) -> None:
+        values = np.asarray(values)
+        if not values.shape or values.shape[0] == 0:
+            return
+        if self.unit == 1:
+            self._put(values)
+            return
+        at = 0
+        if self.filled:
+            # Complete the unit already begun.
+            at = self._buffer(values[: self.unit - self.filled])
+            if self.filled == self.unit:
+                self._put(self.buffer)
+                self.filled = 0
+        whole = (values.shape[0] - at) // self.unit * self.unit
+        if whole:
+            # Whole units in the block go from the block itself.
+            self._put(values[at : at + whole])
+            at += whole
+        if at < values.shape[0]:
+            self._buffer(values[at:])
+
+    def flush(self) -> None:
+        if self.filled:
+            self._put(self.buffer[: self.filled])
+            self.filled = 0
+        self.buffer = None
+
+    def _buffer(self, values: np.ndarray) -> int:
+        """Copy `values` into the unit's buffer; how many rows that took."""
+        buffer = self.buffer
+        if buffer is None or buffer.shape[1:] != values.shape[1:]:
+            buffer = np.empty((self.unit,) + values.shape[1:], dtype=values.dtype)
+        elif buffer.dtype != values.dtype:
+            # Text read a block at a time can come wider in a later block.
+            buffer = buffer.astype(np.result_type(buffer.dtype, values.dtype))
+        self.buffer = buffer
+        n = values.shape[0]
+        buffer[self.filled : self.filled + n] = values
+        self.filled += n
+        return n
+
+    def _put(self, values: np.ndarray) -> None:
+        end = self.written + values.shape[0]
+        if self.grow and self.ds.shape[0] < end:
+            self.ds.resize((end,) + tuple(self.ds.shape[1:]))
+        if values.ndim == 1:
+            self.ds[self.written:end] = values
+        elif self.cols is not None:
+            self.ds[self.written:end, self.cols, ...] = values
+        else:
+            self.ds[self.written:end, ...] = values
+        self.written = end
+
+
 def copy_dataset(
     src: Any, dst_group: Any, name: str, *, compression: Optional[str] = None,
     skip_attrs: Sequence[str] = (),
@@ -1008,18 +1460,41 @@ def copy_dataset(
 
     shape = tuple(src.shape)
     zformat = zarr_format_of(dst_group)
+    element_bytes = (
+        _sample_element_bytes(src, shape[0]) if shape and _is_vlen(src.dtype)
+        else VLEN_ELEMENT_BYTES
+    )
+    itemsize = element_bytes if _is_vlen(src.dtype) else int(src.dtype.itemsize)
+    chunks = decode_chunks(src)
+    band, width = (
+        read_blocks(
+            shape, chunks, itemsize,
+            rows=_chunk_step(shape, chunks, src.dtype, element_bytes),
+            budget=TARGET_READ_BYTES,
+        )
+        if shape else (1, None)
+    )
     kw = dataset_create_kwargs(src, target_backend=target_backend, zarr_format=zformat)
     if compression is not None:
         kw = with_compression(
             kw, compression, shape=shape, dtype=src.dtype,
             backend=target_backend, zarr_format=zformat,
         )
+    if not _is_vlen(src.dtype):
+        kw = backend_chunks(dst_group, kw, shape, src.dtype)
+    # Tiles are written where they belong, whole chunks at a time, so only
+    # whole rows need a unit cut to what `RowWriter` may hold.
+    kw = fit_chunks(
+        kw, shape, backend=target_backend, itemsize=None if width is not None else itemsize
+    )
+    if width is not None and kw.get("shards"):
+        kw["shards"] = tile_shards(kw["chunks"], kw["shards"], width)
     ds = create_dataset(
         dst_group,
         name,
         shape=shape,
         dtype=target_dtype(src.dtype, target_backend, zformat),
-        **fit_chunks(kw, shape, backend=target_backend),
+        **kw,
     )
     attrs = src.attrs if not skip_attrs else {
         k: v for k, v in src.attrs.items() if k not in skip_attrs
@@ -1030,17 +1505,23 @@ def copy_dataset(
         ds[()] = src[()]
         return ds
 
-    element_bytes = (
-        _sample_element_bytes(src, shape[0]) if _is_vlen(src.dtype)
-        else VLEN_ELEMENT_BYTES
-    )
-    step = _chunk_step(shape, getattr(src, "chunks", None), src.dtype, element_bytes)
-    for start in range(0, shape[0], step):
-        end = min(start + step, shape[0])
-        if len(shape) == 1:
-            ds[start:end] = src[start:end]
-        else:
-            ds[start:end, ...] = src[start:end, ...]
+    if width is not None:
+        # One chunk height across every column is over the budget: whole
+        # chunks a band of columns at a time, written where they belong.
+        # Read whole rows, a column-chunked (n_obs, 8) array was read in
+        # one piece, the whole matrix (F081).
+        for start in range(0, shape[0], band):
+            end = min(start + band, shape[0])
+            for left in range(0, shape[1], width):
+                right = min(left + width, shape[1])
+                ds[start:end, left:right, ...] = src[start:end, left:right, ...]
+        return ds
+
+    writer = RowWriter(ds)
+    for start in range(0, shape[0], band):
+        end = min(start + band, shape[0])
+        writer.write(src[start:end] if len(shape) == 1 else src[start:end, ...])
+    writer.flush()
     return ds
 
 
@@ -1152,12 +1633,13 @@ def _copy_records(
             k: v for k, v in src.attrs.items() if k not in skip_attrs
         }
         copy_attrs(attrs, ds.attrs, target_backend=target_backend)
+        if shape == ():
+            ds[()] = as_records(read(blocks[0]), dtype)
+            return ds
+        writer = RowWriter(ds)
         for block in blocks:
-            values = as_records(read(block), dtype)
-            if shape == ():
-                ds[()] = values
-            else:
-                ds[block[0]:block[1]] = values
+            writer.write(as_records(read(block), dtype))
+        writer.flush()
     return ds
 
 

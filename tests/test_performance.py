@@ -67,6 +67,10 @@ from tests.perf_counters import (
     count_lines,
 )
 
+#: Every guard here is a `perf` test: CI runs them as a job of their own,
+#: beside the unit suite and its coverage, so neither waits on the other.
+pytestmark = pytest.mark.perf
+
 ad = pytest.importorskip("anndata", reason="anndata builds the fixtures")
 pd = pytest.importorskip("pandas")
 sparse = pytest.importorskip("scipy.sparse")
@@ -2420,13 +2424,10 @@ GRID_COMMANDS = {
 }
 
 #: Known gaps, each owned by another batch, and whether the fix must flip it.
-_F032 = "F032: sparse subset blocks are 4,096 majors, whatever --chunk (B6b, #97)"
-GRID_GAPS = {
-    ("subset", "csr", "n_obs"): (_F032, True),
-    ("subset", "csr", "n_var"): (_F032, True),
-    ("subset", "csc", "n_obs"): (_F032, True),
-    ("subset", "csc", "n_var"): (_F032, True),
-}
+#: Sparse subset was one (F032): its blocks were 4,096 majors, whatever
+#: --chunk said, 3 to 5 times the input added per byte; a block holds about
+#: --chunk rows' entries now, in either layout (B6b, #97).
+GRID_GAPS: dict = {}
 
 
 def _grid_cases():
@@ -2499,25 +2500,29 @@ def test_a_dense_cast_check_reads_a_block_of_rows_not_the_matrix(tmp_path, fmt):
     """F029: `recast --dtype` on a dense matrix read `dataset[0:1048576]` --
     every row and column -- to check the cast, then made two more copies,
     whatever --chunk said: 1,500,000 elements in one read of a 3000 x 500
-    matrix at --chunk 100. The largest read is --chunk rows now."""
+    matrix at --chunk 100. The largest read is --chunk rows now, or one
+    chunk height of the source where that is taller, since a read of part
+    of a chunk decodes all of it (F061): anndata's Zarr v3 chunks grow with
+    the matrix, to about a megabyte, so at this size they are half of it."""
+    import zarr
+
     from tests.perf_fixtures import matrix_store
 
-    def measure(n: int) -> int:
-        # Narrow, and 256-row blocks: on sharded Zarr each block still
-        # rewrites the whole shard (F036, B6b), which is slow, not wrong.
+    rows = 256
+    for n in (1024, 8192):
         source = matrix_store(tmp_path, n_obs=n, n_var=16, layout="dense", fmt=fmt)
+        height = (zarr.open_group(str(source), mode="r")["X"].chunks[0]
+                  if fmt != "h5ad" else 1)
         out = tmp_path / f"o{n}{source.suffix}"
         with count_io() as io:
-            _recast(source, out, dtype="float64", chunk_rows=256)
+            _recast(source, out, dtype="float64", chunk_rows=rows)
         assert io.read_bytes >= n * 16 * 4, "the matrix was read"
         largest = _largest_matrix_read(io)
-        assert largest > 0, "no read of X was seen: the names no longer match"
-        return largest
-
-    assert_independent_of(
-        measure, what=f"the largest read of recast --dtype ({fmt})", axis="n_obs",
-        sizes=(1024, 8192),
-    )
+        bound = -(-rows // height) * height * 16 * 4
+        assert 0 < largest <= bound, (
+            f"recast --dtype ({fmt}) of {n:,} rows read {largest:,} bytes of X at "
+            f"once against {bound:,} for --chunk {rows} in chunks {height} tall"
+        )
 
 
 # h5ad only: what a row costs is the algorithm's, and Zarr v3's reads are
@@ -2640,4 +2645,346 @@ def test_a_dense_cast_adds_a_block_of_resident_memory_not_the_matrix(tmp_path):
     assert_memory_is_a_fraction_of_the_input(
         measure, lambda n: n * 256 * 4, what="recast --dtype of a dense X (RSS)",
         axis="n_obs", sizes=(8192, 65536),
+    )
+
+
+# ---------------------------------------------------------------------------
+# blocks and shards: reads and writes line up with the store's own units
+#
+# anndata 0.13 writes Zarr v3 sharded: under zarr 3.1, inner chunks of about
+# a kilobyte inside shards of a whole array (`zarr31_layout`). A read of
+# part of a shard fetched the shard's index again; a write of part of one
+# rewrote all of it; a read of part of a chunk decoded all of it. Each guard
+# names what it measures in whole units, so a block that splits a unit shows
+# as bytes decoded or encoded many times over, without a clock.
+
+#: Rows of the stores below, and --chunk: blocks far smaller than a unit.
+UNIT_ROWS, UNIT_CHUNK = 4096, 256
+
+
+def _x_amplification(io, *, encoded: bool = True) -> float:
+    """Bytes of X's own arrays encoded per byte written to them: 1.0 when
+    every shard or chunk is written once. Not obs, var or a scratch."""
+    def of_x(name: str) -> bool:
+        parts = name.strip("/").split("/")
+        return "X" in parts and not any(p.startswith("__") for p in parts)
+
+    names = [n for n in io.written_by_name if of_x(n)]
+    written = sum(io.written_by_name[n] for n in names)
+    assert written > 0, f"no write to X was seen: {sorted(io.written_by_name)}"
+    return sum(io.encoded_by_name[n] for n in names) / written
+
+
+#: Sharded stores, built once per module and shared: no guard writes to its
+#: source, and building one is most of a guard's time.
+_SHARDED: dict = {}
+
+
+@pytest.fixture(scope="module")
+def sharded_dir(tmp_path_factory):
+    yield tmp_path_factory.mktemp("sharded")
+    _SHARDED.clear()
+
+
+def _sharded(directory: Path, layout: str, n_obs: int = UNIT_ROWS, n_var: int = 64,
+             groups: int = 0, tag: str = "s") -> Path:
+    from tests.perf_fixtures import matrix_store, zarr31_layout
+
+    key = (layout, n_obs, n_var, groups, tag)
+    if key not in _SHARDED:
+        _SHARDED[key] = zarr31_layout(matrix_store(
+            directory / "-".join(map(str, key)), n_obs=n_obs, n_var=n_var, layout=layout,
+            fmt="zarr3", groups=groups, tag=tag))
+    return _SHARDED[key]
+
+
+def _split(source: Path, out: Path, chunk_rows: int = UNIT_CHUNK) -> None:
+    from adata.commands.split import split_store
+
+    split_store(source, "grp", out, QUIET, manifest=False, chunk_rows=chunk_rows)
+
+
+def _twice(source: Path) -> List[Path]:
+    """`source` and a copy of it, for concat, whose inputs need names of
+    their own."""
+    import shutil
+
+    copy = source.with_name(f"b{source.name}")
+    if not copy.exists():
+        (shutil.copytree if source.is_dir() else shutil.copy)(source, copy)
+    return [source, copy]
+
+
+def _subset(source: Path, out: Path, chunk_rows: int = UNIT_CHUNK, **kw) -> None:
+    subset_h5ad(source, out, None, None, console=QUIET,
+                obs_query=kw.pop("obs_query", "col >= 0"), chunk_rows=chunk_rows, **kw)
+
+
+@pytest.mark.parametrize("command,layout", [
+    ("subset", "dense"),
+    ("split", "dense"),
+    ("concat", "dense"),
+    ("recast --dtype", "dense"),
+    ("recast --indices-dtype", "csr"),
+    ("recast --layout csc", "csr"),
+    ("convert", "dense"),
+])
+def test_a_sharded_output_is_written_a_whole_shard_at_a_time(
+    sharded_dir, tmp_path, monkeypatch, command, layout
+):
+    """F031, F036: an output keeping anndata 0.13's shard was written a
+    --chunk block at a time, and zarr rewrites a whole shard for a write of
+    part of it: 15 times the bytes for subset and concat, 121 for split
+    (eight groups, each given a few rows a block), 15 for recast --dtype,
+    138 for a transpose. Each shard is written once now (`RowWriter`).
+
+    A transpose's own scratch is another matter (a follow-up); only X's
+    arrays are counted. `convert` copies in reads of `TARGET_READ_BYTES`,
+    made small here so that a read is smaller than a shard."""
+    import adata.storage as storage
+
+    source = _sharded(sharded_dir, layout, groups=8 if command == "split" else 0)
+    out = tmp_path / "out.zarr"
+    with count_io() as io:
+        if command == "subset":
+            _subset(source, out)
+        elif command == "split":
+            _split(source, tmp_path / "parts")
+        elif command == "concat":
+            concat_on_disk(_twice(source), out, QUIET, chunk_rows=UNIT_CHUNK,
+                           index_unique="-")
+        elif command == "recast --dtype":
+            _recast(source, out, dtype="float64", chunk_rows=UNIT_CHUNK)
+        elif command == "recast --indices-dtype":
+            _recast(source, out, indices_dtype="int64", chunk=4096)
+        elif command == "recast --layout csc":
+            _recast(source, out, layout="csc", chunk=4096)
+        else:
+            from adata.commands.convert import convert_store
+
+            monkeypatch.setattr(storage, "TARGET_READ_BYTES", 64 * 1024)
+            convert_store(source, out, QUIET)
+    amplification = _x_amplification(io)
+    assert amplification <= 1.25, (
+        f"{command} of a sharded {layout} X encoded {amplification:.1f} times the "
+        "bytes it wrote to X: shards are being rewritten once a block"
+    )
+
+
+@pytest.mark.parametrize("command,fmt,n_obs,chunks", [
+    ("subset", "h5ad", 8192, (8192, 8)),
+    ("subset", "zarr2", 32768, None),
+    ("concat", "h5ad", 8192, (8192, 8)),
+    ("recast --dtype", "h5ad", 8192, (8192, 8)),
+    ("recast --layout csr", "h5ad", 8192, (8192, 8)),
+    ("export array", "h5ad", 8192, (8192, 8)),
+], ids=["subset-tall-h5ad", "subset-zarr2-default", "concat-tall-h5ad",
+        "recast-dtype-tall-h5ad", "recast-csr-tall-h5ad", "export-array-tall-h5ad"])
+def test_a_dense_read_decodes_each_source_chunk_once(tmp_path, command, fmt, n_obs, chunks):
+    """F061: blocks of --chunk rows were not aligned to the source's chunk
+    height, so every chunk was decoded once a block: 15 times the matrix
+    for gzip chunks of (n_obs, 8) at 16,384 rows (60 at 65,536), 7 for
+    zarr's own chunks (8192, 16), 29 at 262,144 rows. subset, concat,
+    recast and `export array` alike. Blocks are whole chunk heights now,
+    within the read budget."""
+    from adata.commands.export import export_npy
+    from tests.perf_fixtures import matrix_store
+
+    source = matrix_store(tmp_path, n_obs=n_obs,
+                          n_var=64, layout="dense", fmt=fmt, density=0.5,
+                          dense_chunks=chunks, compression="gzip" if chunks else None)
+    out = tmp_path / f"o{source.suffix}"
+    with count_io() as io:
+        if command == "subset":
+            _subset(source, out, chunk_rows=1024)
+        elif command == "concat":
+            concat_on_disk(_twice(source), out, QUIET, chunk_rows=1024, index_unique="-")
+        elif command == "recast --dtype":
+            _recast(source, out, dtype="float64", chunk_rows=1024)
+        elif command == "recast --layout csr":
+            _recast(source, out, layout="csr", chunk_rows=1024)
+        else:
+            export_npy(source, "X", tmp_path / "x.npy", 64 * 1024, QUIET)
+    x = [n for n in io.by_name if n.strip("/") == "X"]
+    assert io.read_bytes >= n_obs * 64 * 4, "the matrix was read"
+    assert io.read_amplification <= 1.25, (
+        f"{command} decoded {io.read_amplification:.1f} times the bytes it read "
+        f"({fmt}, X read as {x}): a block splits the source's chunks"
+    )
+
+
+def test_split_writes_each_output_chunk_once(tmp_path):
+    """F060: split's outputs keep the source's chunk height, and each got a
+    share of every --chunk block: 32 rows a block into chunks 512 rows tall,
+    across 128 chunks of columns, more than HDF5's chunk cache holds, so
+    each chunk was decoded and encoded 16 times. Each output is written
+    whole chunk heights at a time now."""
+    from tests.perf_fixtures import matrix_store
+
+    source = matrix_store(tmp_path, n_obs=4096, n_var=1024, layout="dense", density=0.5,
+                          groups=8, dense_chunks=(512, 8), compression="gzip")
+    with count_io() as io:
+        _split(source, tmp_path / "parts")
+    amplification = _x_amplification(io)
+    assert amplification <= 1.25, (
+        f"split encoded {amplification:.1f} times the bytes it wrote to X"
+    )
+
+
+@pytest.mark.parametrize("command,layout", [("subset", "dense"), ("concat", "csr")])
+def test_a_sharded_source_is_read_with_its_shard_index_once(sharded_dir, tmp_path, command, layout):
+    """F062: zarr reads a shard's index again for every read of part of the
+    shard, 16 bytes an inner chunk, so a store read a block at a time read
+    the whole index once a block: subset fetched 2.3 times the dense X's
+    bytes from the store, concat several times. Indexes are kept for the
+    life of the open store now."""
+    source = _sharded(sharded_dir, layout, n_obs=4 * UNIT_ROWS if layout == "csr" else UNIT_ROWS)
+    stored = sum(f.stat().st_size for f in source.rglob("*") if f.is_file())
+    inputs = _twice(source) if command == "concat" else [source]
+    with count_io() as io:
+        if command == "subset":
+            _subset(source, tmp_path / "o.h5ad")
+        else:
+            concat_on_disk(inputs, tmp_path / "o.h5ad", QUIET,
+                           chunk_rows=UNIT_CHUNK, index_unique="-")
+    fetched = io.store_get_bytes / (len(inputs) * stored)
+    assert fetched <= 1.3, (
+        f"{command} fetched {fetched:.2f} times the store's bytes on disk: shard "
+        "indexes are being read again for every block"
+    )
+
+
+@pytest.mark.parametrize("layout", ["csr", "csc"])
+def test_a_sparse_subset_reads_a_block_set_by_the_chunk(tmp_path, layout):
+    """F032: sparse subset read 4,096 majors a block, whatever --chunk said:
+    of a CSC matrix, 4,096 genes across every cell, a block growing with
+    n_obs (26,214 entries at 4,096 cells, 209,715 at 32,768, at --chunk
+    64). A block holds about --chunk rows' entries now."""
+    from tests.perf_fixtures import matrix_store
+
+    rows = 64
+
+    def measure(n: int) -> int:
+        source = matrix_store(tmp_path, n_obs=n, n_var=64, layout=layout)
+        with count_io() as io:
+            _subset(source, tmp_path / f"o{n}.h5ad", chunk_rows=rows)
+        largest = _largest_matrix_read(io, elements=True)
+        # --chunk rows of entries, at the matrix's mean per row (6.4).
+        bound = rows * 7
+        assert 0 < largest <= bound, (
+            f"a {layout} subset of {n:,} cells read {largest:,} entries at once "
+            f"against {bound:,} for --chunk {rows}"
+        )
+        return largest
+
+    assert_independent_of(measure, what=f"the largest read of a {layout} subset",
+                          axis="n_obs", sizes=(4096, 32768))
+
+
+def test_a_gene_in_every_cell_is_read_in_parts(tmp_path):
+    """F032, its other half: a major holding more entries than a block --
+    a gene expressed in every cell, read whole -- grew with n_obs however
+    small the block. It is read in parts of a block now."""
+    from tests.perf_fixtures import matrix_store, skewed_matrix
+
+    n = 16384
+    matrix = skewed_matrix(n, 64, layout="csc")
+    source = matrix_store(tmp_path, n_obs=n, n_var=64, layout="csc", matrix=matrix, tag="skew")
+    with count_io() as io:
+        _subset(source, tmp_path / "o.h5ad", chunk_rows=16)
+    # --chunk rows of entries, at the matrix's mean per row.
+    bound = 16 * -(-matrix.nnz // n)
+    assert bound < n, "a dense gene holds more than a block"
+    largest = _largest_matrix_read(io, elements=True)
+    assert 0 < largest <= bound, f"read {largest:,} entries at once against {bound:,}"
+
+
+def test_copying_a_column_chunked_matrix_reads_tiles_not_the_matrix(tmp_path, monkeypatch):
+    """F081: `copy_dataset` read whole rows, at least one chunk height, so a
+    matrix chunked (n_obs, 8) was read in one piece, the whole matrix,
+    whatever the read budget. Past the budget it reads tiles of whole
+    chunks now: within the budget, or one chunk where a chunk alone is
+    over it. `TARGET_READ_BYTES` is made small rather than the matrix
+    large."""
+    import h5py
+    import zarr
+
+    import adata.storage as storage
+    from adata.commands.convert import convert_store
+    from tests.perf_fixtures import matrix_store
+
+    budget = 256 * 1024
+    monkeypatch.setattr(storage, "TARGET_READ_BYTES", budget)
+    for n in (4096, 16384):
+        source = matrix_store(tmp_path, n_obs=n, n_var=64, layout="dense", density=0.5,
+                              dense_chunks=(n, 8))
+        out = tmp_path / f"o{n}.zarr"
+        with count_io() as io:
+            convert_store(source, out, QUIET)
+        largest, chunk = _largest_matrix_read(io), n * 8 * 4
+        assert 0 < largest <= max(budget, chunk), (
+            f"convert of a (n_obs, 8)-chunked X of {n:,} rows read {largest:,} bytes "
+            f"at once against a budget of {budget:,} and chunks of {chunk:,}"
+        )
+        with h5py.File(source, "r") as handle:
+            assert np.array_equal(zarr.open_group(str(out))["X"][...], handle["X"][...])
+
+
+@pytest.mark.parametrize("layout,n_obs,n_var,density", [
+    ("dense", 4096, 1024, 0.5), ("csr", 2048, 2048, 0.25),
+])
+def test_writing_whole_units_holds_a_few_units_not_the_shard(
+    tmp_path, monkeypatch, layout, n_obs, n_var, density
+):
+    """F031, F036, and the review of their fix: writing a shard whole holds
+    its rows, so memory is set by the unit (`WRITE_UNIT_BYTES`), not by the
+    source's shard of the whole array. Gathering blocks in a list and
+    joining them held each unit twice over, and a sparse output gave its
+    `data` and `indices` a budget each: 335 MB to subset a 16M-entry CSR at
+    64 MiB units, against 50 MB before. Here the unit is 512 KiB, and the
+    source a shard of the whole array, 16 MB dense (inner chunks 16 rows
+    tall, so a read is a few rows) or 8 MB of entries in anndata's own
+    layout: main held the shard or, for CSR, the matrix (F032)."""
+    import adata.core.subset as subset
+    import adata.storage as storage
+    from tests.perf_fixtures import matrix_store, zarr31_layout
+
+    unit = 1 << 19
+    monkeypatch.setattr(storage, "WRITE_UNIT_BYTES", unit, raising=False)
+    monkeypatch.setattr(subset, "WRITE_UNIT_BYTES", unit, raising=False)
+    source = matrix_store(tmp_path, n_obs=n_obs, n_var=n_var, layout=layout,
+                          fmt="zarr3", density=density)
+    if layout == "dense":
+        zarr31_layout(source, dense_chunks=(16, 256))
+    with count_allocations() as peak:
+        _subset(source, tmp_path / "o.zarr", chunk_rows=64)
+    # The unit, zarr's own copies while it encodes one, and a block.
+    assert peak[0] <= 10 * unit, (
+        f"subset of a sharded {layout} X peaked at {peak[0] / 1e6:.1f} MB with "
+        f"{unit / 1e6:.1f} MB units: more than a few units are held"
+    )
+
+
+@pytest.mark.slow
+def test_split_memory_stops_growing_with_the_group_count(tmp_path):
+    """F079: split held up to 1,024 HDF5 outputs open in a pass, about 0.6 MB
+    each however they are opened (HDF5's own structures for a file), so
+    RSS followed the group count, not --chunk: 136 MB at 128 groups, 423 MB
+    at 512 (here, 138 against 320 MB at 320). A pass writes at most 128
+    outputs now. `peak_rss` raises the
+    open-file limit, as a cluster sets it, so macOS's 256 does not cap the
+    outputs first."""
+    from tests.perf_counters import peak_rss
+    from tests.perf_fixtures import matrix_store
+
+    def measure(groups: int) -> int:
+        source = matrix_store(tmp_path / str(groups), n_obs=16384, n_var=64, layout="csr",
+                              groups=groups)
+        return peak_rss(["split", source, "--by", "grp", "-o", tmp_path / f"p{groups}",
+                         "--no-manifest"]).added
+
+    few, many = measure(128), measure(320)
+    assert many <= few + 32e6, (
+        f"split into 320 groups added {many / 1e6:.0f} MB of RSS against "
+        f"{few / 1e6:.0f} MB into 128: memory follows the number of groups"
     )
