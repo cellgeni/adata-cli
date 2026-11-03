@@ -465,6 +465,20 @@ with `export dataframe`, which writes them as empty fields.
 `export dict` writes NaN and infinite values as `null`, since JSON has no
 number for them, and says how many it wrote.
 
+`export image` keeps the values as they are. Whole numbers from 0 to 255
+are an 8-bit image, whatever their dtype. One channel of `uint16`, or of
+whole numbers up to 65,535, is a 16-bit image as `.png` or `.tiff`, the
+formats that keep 16 bits; a colour image keeps 8 bits a channel. Floats
+from 0 to 1 are a normalised image, scaled up to 0-255; booleans become 0
+and 255. Values an image cannot keep (negative, too large for the format,
+not finite) are refused, naming their range, rather than clipped.
+`--scale` stretches them onto 0-255 instead, the smallest to 0 and the
+largest to 255, with anything not finite at 0:
+
+```bash
+adata export image data.h5ad uns/spatial/morphology -o morphology.png --scale
+```
+
 A file output is written beside its destination and renamed into place once
 complete, so an export that fails or is refused leaves an existing file as it
 was. An output that names the input store, lies inside a Zarr input, or names

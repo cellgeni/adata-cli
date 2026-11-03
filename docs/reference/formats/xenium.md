@@ -30,7 +30,9 @@ adata convert xenium_bundle -o region1.h5ad --feature-type "Gene Expression"
 
 Xenium ships `analysis/` packed as `analysis.tar.gz`. When it has not been
 unpacked, the three tables above are copied out of it, by name, into a
-temporary folder beside the output, removed when the conversion ends. A cell an
+temporary folder beside the output (in the nearest of its folders that
+exists, when the output goes into a new one), removed when the conversion
+ends. A cell an
 analysis table lacks is left empty (no cluster, NaN), with a warning
 giving the count.
 

@@ -64,7 +64,10 @@ missing, and text as fixed-width unicode.
 ## Metadata and images
 
 `export dict` writes a group or scalar as JSON, and `export image` writes a
-2-D or 3-D array as PNG, JPEG or TIFF, such as a Visium tissue image:
+2-D or 3-D array as PNG, JPEG or TIFF, such as a Visium tissue image. It
+keeps the values, a 16-bit image as a 16-bit PNG or TIFF, and refuses ones
+an image cannot hold unless `--scale` stretches them onto 0-255 (see
+[`export`](../reference/commands.md#export)):
 
 ```bash
 adata export dict data.h5ad uns/neighbors -o neighbors.json

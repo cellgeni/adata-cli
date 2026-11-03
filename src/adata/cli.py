@@ -1445,21 +1445,30 @@ def export_image(
         "-o",
         help="Output image file (.png, .jpg, .tiff); defaults to PNG on stdout",
     ),
+    scale: bool = typer.Option(
+        False,
+        "--scale",
+        help="Stretch the values onto 0-255 (smallest to 0, largest to 255), "
+        "for values an image cannot keep as they are",
+    ),
 ) -> None:
     """
     Export an image-like array to PNG/JPG/TIFF format.
 
     The array should be 2D (H,W) or 3D (H,W,C) with C in {1,3,4}. The
     format follows the output's extension; without --output the image goes
-    to stdout as PNG.
+    to stdout as PNG. Values are kept as they are: one channel of 16 bits
+    as a 16-bit PNG or TIFF. Values an image cannot keep are refused, not
+    clipped; --scale stretches them onto 0-255.
 
     Examples:
         adata export image data.h5ad uns/spatial/image -o tissue.png
         adata export image data.h5ad uns/spatial/image > tissue.png
+        adata export image data.h5ad uns/spatial/morphology -o morphology.png --scale
     """
 
     try:
-        export_image_cmd(file=file, obj=entry, out=output, console=console)
+        export_image_cmd(file=file, obj=entry, out=output, console=console, scale=scale)
     except Exception as e:
         console.print(f"[bold red]Error:[/] {escape(str(e))}")
         raise typer.Exit(code=1)

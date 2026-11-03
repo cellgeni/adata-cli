@@ -141,6 +141,48 @@ def test_the_analysis_is_read_from_the_archive_xenium_ships_it_in(tmp_path):
     np.testing.assert_allclose(adata.obsm["X_umap"], truth.umap)
 
 
+@pytest.mark.parametrize("suffix", [".h5ad", ".zarr"])
+def test_a_packed_analysis_converts_into_a_folder_that_does_not_exist_yet(tmp_path, suffix):
+    """F112: the archive was unpacked beside the output while planning,
+    before anything had made the output's folder, so the conversion failed
+    with '[Errno 2] No such file or directory: .../.adata-xenium-...', a
+    path the user never chose. Other conversions make the folder, and this
+    one now does too: the archive is unpacked in the nearest folder that
+    exists, and nothing is left there."""
+    truth = write_xenium_bundle(tmp_path / "xenium")
+    shutil.make_archive(str(truth.bundle / "analysis"), "gztar", truth.bundle, "analysis")
+    shutil.rmtree(truth.bundle / "analysis")
+    out = tmp_path / "new" / "deeper" / f"out{suffix}"
+
+    result = _ok(truth.bundle, "-o", out)
+
+    assert "analysis: clusters, X_umap" in _out(result)
+    adata = _read(out)
+    assert adata.obs["graphclust"].astype(object).fillna("").tolist() == list(truth.clusters)
+    np.testing.assert_allclose(adata.obsm["X_umap"], truth.umap)
+    assert not list(tmp_path.rglob(".adata-xenium-*")), "the unpacked tables are left behind"
+
+
+def test_an_archive_that_cannot_be_unpacked_beside_the_output_is_refused_by_name(tmp_path, monkeypatch):
+    """F112: a folder that cannot take the unpacked tables is named, with
+    why, rather than as a bare Errno about a temporary path."""
+    import tempfile
+
+    truth = write_xenium_bundle(tmp_path / "xenium")
+    shutil.make_archive(str(truth.bundle / "analysis"), "gztar", truth.bundle, "analysis")
+    shutil.rmtree(truth.bundle / "analysis")
+
+    def unwritable(*args, **kwargs):
+        raise PermissionError(13, "Permission denied", str(kwargs.get("dir")))
+
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", unwritable)
+    out = tmp_path / "new" / "out.h5ad"
+    message = _refused(truth.bundle, "-o", out)
+    assert "Cannot unpack analysis.tar.gz in" in message and "Permission denied" in message
+    assert "Errno" not in message
+    assert not out.parent.exists()
+
+
 def test_an_archive_cannot_write_outside_its_temporary_folder(tmp_path):
     """Members are copied to paths built from the names this wants, never
     extracted where the archive says."""
