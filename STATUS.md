@@ -89,7 +89,13 @@ Steps:
     PyTables" and its `compatibility` job "anndata 0.8-0.13", though the
     first checks every converter's reader and the second reads 0.7.8 too.
     Renaming a job changes its required-check name, so it waits for the
-    repository settings (B10).
+    repository settings (B10). `test_concat_versions.py` is an
+    `integration` test no CI job runs (B10).
+  - `test_write_safety.py::test_export_writes_to_devices_and_pipes_as_they_are`
+    failed once in a dozen local runs on macOS: its FIFO reader stayed
+    blocked with no writer left. The reader thread is not a daemon, so it
+    also kept pytest from exiting; a daemon thread would at least let the
+    run end (B10).
 - From wave 2 of the audit fixes:
   - CI: a Python 3.14 leg; Dependabot for the pinned actions, uv and base
     image (the pinned actions run on Node 20, which GitHub is retiring); the
