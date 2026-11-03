@@ -67,6 +67,10 @@ from tests.perf_counters import (
     count_lines,
 )
 
+#: Every guard here is a `perf` test: CI runs them as a job of their own,
+#: beside the unit suite and its coverage, so neither waits on the other.
+pytestmark = pytest.mark.perf
+
 ad = pytest.importorskip("anndata", reason="anndata builds the fixtures")
 pd = pytest.importorskip("pandas")
 sparse = pytest.importorskip("scipy.sparse")
@@ -2671,12 +2675,27 @@ def _x_amplification(io, *, encoded: bool = True) -> float:
     return sum(io.encoded_by_name[n] for n in names) / written
 
 
-def _sharded(tmp_path: Path, layout: str, n_obs: int = UNIT_ROWS, n_var: int = 64,
+#: Sharded stores, built once per module and shared: no guard writes to its
+#: source, and building one is most of a guard's time.
+_SHARDED: dict = {}
+
+
+@pytest.fixture(scope="module")
+def sharded_dir(tmp_path_factory):
+    yield tmp_path_factory.mktemp("sharded")
+    _SHARDED.clear()
+
+
+def _sharded(directory: Path, layout: str, n_obs: int = UNIT_ROWS, n_var: int = 64,
              groups: int = 0, tag: str = "s") -> Path:
     from tests.perf_fixtures import matrix_store, zarr31_layout
 
-    return zarr31_layout(matrix_store(tmp_path, n_obs=n_obs, n_var=n_var, layout=layout,
-                                      fmt="zarr3", groups=groups, tag=tag))
+    key = (layout, n_obs, n_var, groups, tag)
+    if key not in _SHARDED:
+        _SHARDED[key] = zarr31_layout(matrix_store(
+            directory / "-".join(map(str, key)), n_obs=n_obs, n_var=n_var, layout=layout,
+            fmt="zarr3", groups=groups, tag=tag))
+    return _SHARDED[key]
 
 
 def _split(source: Path, out: Path, chunk_rows: int = UNIT_CHUNK) -> None:
@@ -2710,7 +2729,9 @@ def _subset(source: Path, out: Path, chunk_rows: int = UNIT_CHUNK, **kw) -> None
     ("recast --layout csc", "csr"),
     ("convert", "dense"),
 ])
-def test_a_sharded_output_is_written_a_whole_shard_at_a_time(tmp_path, monkeypatch, command, layout):
+def test_a_sharded_output_is_written_a_whole_shard_at_a_time(
+    sharded_dir, tmp_path, monkeypatch, command, layout
+):
     """F031, F036: an output keeping anndata 0.13's shard was written a
     --chunk block at a time, and zarr rewrites a whole shard for a write of
     part of it: 15 times the bytes for subset and concat, 121 for split
@@ -2722,7 +2743,7 @@ def test_a_sharded_output_is_written_a_whole_shard_at_a_time(tmp_path, monkeypat
     made small here so that a read is smaller than a shard."""
     import adata.storage as storage
 
-    source = _sharded(tmp_path, layout, groups=8 if command == "split" else 0)
+    source = _sharded(sharded_dir, layout, groups=8 if command == "split" else 0)
     out = tmp_path / "out.zarr"
     with count_io() as io:
         if command == "subset":
@@ -2811,13 +2832,13 @@ def test_split_writes_each_output_chunk_once(tmp_path):
 
 
 @pytest.mark.parametrize("command,layout", [("subset", "dense"), ("concat", "csr")])
-def test_a_sharded_source_is_read_with_its_shard_index_once(tmp_path, command, layout):
+def test_a_sharded_source_is_read_with_its_shard_index_once(sharded_dir, tmp_path, command, layout):
     """F062: zarr reads a shard's index again for every read of part of the
     shard, 16 bytes an inner chunk, so a store read a block at a time read
     the whole index once a block: subset fetched 2.3 times the dense X's
     bytes from the store, concat several times. Indexes are kept for the
     life of the open store now."""
-    source = _sharded(tmp_path, layout, n_obs=4 * UNIT_ROWS if layout == "csr" else UNIT_ROWS)
+    source = _sharded(sharded_dir, layout, n_obs=4 * UNIT_ROWS if layout == "csr" else UNIT_ROWS)
     stored = sum(f.stat().st_size for f in source.rglob("*") if f.is_file())
     inputs = _twice(source) if command == "concat" else [source]
     with count_io() as io:
@@ -2910,7 +2931,7 @@ def test_copying_a_column_chunked_matrix_reads_tiles_not_the_matrix(tmp_path, mo
 
 
 @pytest.mark.parametrize("layout,n_obs,n_var,density", [
-    ("dense", 4096, 2048, 0.5), ("csr", 2048, 2048, 0.25),
+    ("dense", 4096, 1024, 0.5), ("csr", 2048, 2048, 0.25),
 ])
 def test_writing_whole_units_holds_a_few_units_not_the_shard(
     tmp_path, monkeypatch, layout, n_obs, n_var, density
@@ -2920,15 +2941,15 @@ def test_writing_whole_units_holds_a_few_units_not_the_shard(
     source's shard of the whole array. Gathering blocks in a list and
     joining them held each unit twice over, and a sparse output gave its
     `data` and `indices` a budget each: 335 MB to subset a 16M-entry CSR at
-    64 MiB units, against 50 MB before. Here the unit is 1 MiB, and the
-    source a shard of the whole array, 32 MB dense (inner chunks 16 rows
+    64 MiB units, against 50 MB before. Here the unit is 512 KiB, and the
+    source a shard of the whole array, 16 MB dense (inner chunks 16 rows
     tall, so a read is a few rows) or 8 MB of entries in anndata's own
     layout: main held the shard or, for CSR, the matrix (F032)."""
     import adata.core.subset as subset
     import adata.storage as storage
     from tests.perf_fixtures import matrix_store, zarr31_layout
 
-    unit = 1 << 20
+    unit = 1 << 19
     monkeypatch.setattr(storage, "WRITE_UNIT_BYTES", unit, raising=False)
     monkeypatch.setattr(subset, "WRITE_UNIT_BYTES", unit, raising=False)
     source = matrix_store(tmp_path, n_obs=n_obs, n_var=n_var, layout=layout,
@@ -2949,7 +2970,8 @@ def test_split_memory_stops_growing_with_the_group_count(tmp_path):
     """F079: split held up to 1,024 HDF5 outputs open in a pass, about 0.6 MB
     each however they are opened (HDF5's own structures for a file), so
     RSS followed the group count, not --chunk: 136 MB at 128 groups, 423 MB
-    at 512. A pass writes at most 128 outputs now. `peak_rss` raises the
+    at 512 (here, 138 against 320 MB at 320). A pass writes at most 128
+    outputs now. `peak_rss` raises the
     open-file limit, as a cluster sets it, so macOS's 256 does not cap the
     outputs first."""
     from tests.perf_counters import peak_rss
@@ -2961,8 +2983,8 @@ def test_split_memory_stops_growing_with_the_group_count(tmp_path):
         return peak_rss(["split", source, "--by", "grp", "-o", tmp_path / f"p{groups}",
                          "--no-manifest"]).added
 
-    few, many = measure(128), measure(512)
+    few, many = measure(128), measure(320)
     assert many <= few + 32e6, (
-        f"split into 512 groups added {many / 1e6:.0f} MB of RSS against "
+        f"split into 320 groups added {many / 1e6:.0f} MB of RSS against "
         f"{few / 1e6:.0f} MB into 128: memory follows the number of groups"
     )

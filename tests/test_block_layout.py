@@ -140,8 +140,27 @@ def test_a_matrix_read_in_tiles_matches_anndata(tmp_path, monkeypatch):
 # outputs keep their source's layout (F033)
 
 
-def _sharded_counts(tmp_path: Path, layout: str, n_obs: int = 3000, n_var: int = 40,
+#: Sharded stores, each built once per module: no test writes to its source.
+_STORES: dict = {}
+
+
+@pytest.fixture(scope="module")
+def stores(tmp_path_factory):
+    yield tmp_path_factory.mktemp("stores")
+    _STORES.clear()
+
+
+def _sharded_counts(directory: Path, layout: str, n_obs: int = 3000, n_var: int = 40,
                     stem: str = "src") -> tuple:
+    key = (layout, n_obs, n_var, stem)
+    if key not in _STORES:
+        _STORES[key] = _build_counts(directory / "-".join(map(str, key)), layout, n_obs,
+                                     n_var, stem)
+    return _STORES[key]
+
+
+def _build_counts(directory: Path, layout: str, n_obs: int, n_var: int, stem: str) -> tuple:
+    directory.mkdir(parents=True, exist_ok=True)
     matrix = counts_matrix(n_obs, n_var, layout, density=0.2)
     obj = ad.AnnData(
         X=matrix,
@@ -150,7 +169,7 @@ def _sharded_counts(tmp_path: Path, layout: str, n_obs: int = 3000, n_var: int =
                          index=[f"c{i}" for i in range(n_obs)]),
         var=pd.DataFrame(index=[f"v{j}" for j in range(n_var)]),
     )
-    return obj, write_store(obj, tmp_path, "zarr31", stem)
+    return obj, write_store(obj, directory, "zarr31", stem)
 
 
 def _arrays(group: Any) -> dict:
@@ -162,12 +181,12 @@ def _arrays(group: Any) -> dict:
 
 @pytest.mark.parametrize("layout", ["csr", "csc", "dense"])
 @pytest.mark.parametrize("command", ["subset", "split", "concat", "recast"])
-def test_outputs_keep_the_sources_inner_chunks_and_shards(tmp_path, command, layout):
+def test_outputs_keep_the_sources_inner_chunks_and_shards(stores, tmp_path, command, layout):
     """F033: outputs of anndata 0.13's layout dropped the shard and kept the
     245-element inner chunk as their own, a file each: 4,083 files for one
     array the source holds in 3. Each output array has the source's inner
     chunk and shard now, the shard clamped to the output, in whole chunks."""
-    obj, src = _sharded_counts(tmp_path, layout)
+    obj, src = _sharded_counts(stores, layout)
     source = _arrays(zarr.open_group(str(src), mode="r"))
     if command == "subset":
         outputs = [tmp_path / "out.zarr"]
@@ -176,7 +195,7 @@ def test_outputs_keep_the_sources_inner_chunks_and_shards(tmp_path, command, lay
         ok("split", src, "--by", "group", "-o", tmp_path / "parts", "--no-manifest", "-C", 64)
         outputs = sorted((tmp_path / "parts").iterdir())
     elif command == "concat":
-        other = write_store(obj, tmp_path, "zarr31", "other")
+        _, other = _sharded_counts(stores, layout, stem="other")
         outputs = [tmp_path / "out.zarr"]
         ok("concat", src, other, "-o", outputs[0], "--index-unique", "-", "-C", 64)
     else:
@@ -210,13 +229,13 @@ def test_outputs_keep_the_sources_inner_chunks_and_shards(tmp_path, command, lay
         np.testing.assert_array_equal(got_x, want_x)
 
 
-def test_converting_a_sharded_store_to_h5ad_lets_hdf5_choose_its_chunks(tmp_path):
+def test_converting_a_sharded_store_to_h5ad_lets_hdf5_choose_its_chunks(stores, tmp_path):
     """F033: a shard's 245-element inner chunk became the HDF5 chunk, 16,327
     chunks where anndata's own h5ad has 512, and a file twice the size. HDF5
     picks the chunks now, and X takes what anndata's own takes."""
     import h5py
 
-    obj, src = _sharded_counts(tmp_path, "csr", n_obs=20_000, n_var=100)
+    obj, src = _sharded_counts(stores, "csr", n_obs=20_000, n_var=100)
     out = tmp_path / "out.h5ad"
     ok("convert", src, "-o", out)
     theirs = tmp_path / "theirs.h5ad"
@@ -232,10 +251,10 @@ def test_converting_a_sharded_store_to_h5ad_lets_hdf5_choose_its_chunks(tmp_path
     np.testing.assert_array_equal(read_anndata(out).X.toarray(), obj.X.toarray())
 
 
-def test_a_sharded_store_written_as_zarr_v2_takes_its_shard_as_the_chunk(tmp_path):
+def test_a_sharded_store_written_as_zarr_v2_takes_its_shard_as_the_chunk(stores, tmp_path):
     """F033: Zarr v2 has no shards, so `--zarr-format 2` kept only the inner
     chunk, a 245-element file each. The shard is the chunk now."""
-    obj, src = _sharded_counts(tmp_path, "csr")
+    obj, src = _sharded_counts(stores, "csr")
     out = tmp_path / "v2.zarr"
     ok("convert", src, "-o", out, "--zarr-format", "2")
     source = zarr.open_group(str(src), mode="r")
@@ -364,7 +383,7 @@ def test_sparse_blocks_cover_every_kept_major_once_within_the_budget(seed):
         np.testing.assert_array_equal(got[i][kept], sizes[kept])
 
 
-def test_a_shard_index_is_read_once_and_the_cache_is_bounded(tmp_path, monkeypatch):
+def test_a_shard_index_is_read_once_and_the_cache_is_bounded(stores, monkeypatch):
     """F062: each read of part of a shard fetched its index; a store opened
     for reading keeps the indexes now, up to `SHARD_INDEX_CACHE_BYTES`."""
     from zarr.abc.store import SuffixByteRequest
@@ -373,7 +392,7 @@ def test_a_shard_index_is_read_once_and_the_cache_is_bounded(tmp_path, monkeypat
     import adata.storage as storage
     from adata.storage import open_store
 
-    _, src = _sharded_counts(tmp_path, "csr")
+    _, src = _sharded_counts(stores, "csr")
     fetched = []
     original = LocalStore.get
 
@@ -397,7 +416,7 @@ def test_a_shard_index_is_read_once_and_the_cache_is_bounded(tmp_path, monkeypat
     assert read_in_blocks() > 10, "a cache too small for an index keeps none"
 
 
-def test_the_shard_index_cache_is_one_budget_across_stores(tmp_path, monkeypatch):
+def test_the_shard_index_cache_is_one_budget_across_stores(stores, monkeypatch):
     """From the review: each open store kept up to 64 MiB of indexes, and
     concat holds up to 64 inputs open, so the cache grew with the number of
     inputs. One budget is shared now, and a store's indexes go with it."""
@@ -406,7 +425,7 @@ def test_the_shard_index_cache_is_one_budget_across_stores(tmp_path, monkeypatch
     import adata.storage as storage
     from adata.storage import open_store
 
-    _, src = _sharded_counts(tmp_path, "csr")
+    _, src = _sharded_counts(stores, "csr")
     with open_store(src, "r") as store:
         store.root["X/data"][0:10]
     one = storage._SHARD_INDEX_STATE["bytes"]

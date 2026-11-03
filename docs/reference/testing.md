@@ -12,13 +12,13 @@ redirect_from:
 uv sync --extra dev
 uv run pytest                      # everything
 uv run pytest -m "not integration" # no environment building, ~2.5 min
-uv run pytest -m perf              # just the tracing complexity guards
+uv run pytest -m perf              # just the cost guards
 uv run pytest -m integration       # anndata releases, scanpy and PyTables
 ```
 
 CI runs the unit suite on Python 3.12 and 3.13 with a **90% coverage floor**,
-and the anndata compatibility suite and the 10x external-reader suite as
-separate jobs. A fresh-install job installs the package alone from a fresh
+and the cost guards (`-m perf`), the anndata compatibility suite and the 10x
+external-reader suite as separate jobs. A fresh-install job installs the package alone from a fresh
 resolution, without `uv.lock`, as `pip install pyadata-cli` would. It
 imports every module on the base dependencies alone, runs `adata convert`
 with and without click beside typer, and runs the docs-accuracy suite with no
@@ -382,8 +382,9 @@ should scale with, scale only that, and hold everything else fixed.
 | `split` | 128 against 512 groups | **resident memory** flat past 128 outputs a pass |
 
 The `slow` marker is on the guards that build a 65,536-row store or run `peak_rss`;
-they still gate merges, and `-m "not slow"` skips them locally. `perf` is on the
-tracing guards.
+they still gate merges, and `-m "not slow"` skips them locally. `perf` is on
+every guard in the file, and on the few beside the code they guard; CI runs
+them as a job of their own, beside the unit suite's coverage job.
 
 h5py 3.15 kept 32 to 160 bytes of every dataset read, write and `.shape` for good, so
 any long streaming loop grew with its block count;
@@ -559,7 +560,7 @@ ADATA_SKIP_VERSION_FIXTURES=1 uv run pytest
 ## Coverage
 
 ```bash
-uv run pytest -m "not integration" --cov=adata --cov-report=term-missing
+uv run pytest -m "not integration and not perf" --cov=adata --cov-report=term-missing
 ```
 
 The floor is 90%. What remains uncovered is mostly defensive `except` branches

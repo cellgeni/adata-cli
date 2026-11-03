@@ -35,8 +35,8 @@ uv sync --extra dev                                   # set up
 uv run adata --help                                   # run the CLI from source
 uv run pytest -m "not integration"                    # unit suite, ~2.5 min; what CI gates on
 uv run pytest tests/test_recast.py::test_inplace_replaces_the_source   # one test
-uv run pytest -m "not integration" --cov=adata --cov-fail-under=90     # CI's coverage floor
-uv run pytest -m perf                                 # tracing complexity guards only
+uv run pytest -m "not integration and not perf" --cov=adata --cov-fail-under=90  # CI's coverage job
+uv run pytest -m perf                                 # the cost guards, CI's own job
 ADATA_REQUIRE_VERSION_FIXTURES=1 uv run pytest tests/test_anndata_versions.py -m integration
 uv run python -m benchmarks.run --tier smoke --case concat-inner --out results.json
 uv run python -m benchmarks.report results.json
@@ -46,7 +46,9 @@ Test markers:
 - `integration` tests build uv environments with real anndata releases (0.7.8
   to 0.13) and the oracles (scanpy, PyTables and others), all pinned exactly
   in `tests/reference_stores.py`, so they need the network on the first run.
-- `perf` tests are slow, but CI runs them in the main job.
+- `perf` marks the cost guards (all of `tests/test_performance.py`, and a
+  few beside the code they guard). CI runs them as a job of their own,
+  beside the unit suite's coverage job, and a release needs both.
 
 CI also installs the package from a fresh resolution, without the lock,
 imports every module on the base dependencies alone, and runs `convert`.

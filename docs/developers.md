@@ -170,8 +170,8 @@ before changing anything that writes:
   page has the front matter the sidebar needs.
 
 ```bash
-uv run pytest -m "not integration" --cov=adata --cov-fail-under=90   # CI's coverage floor
-uv run pytest -m perf                                                # the complexity guards
+uv run pytest -m "not integration and not perf" --cov=adata --cov-fail-under=90  # CI's coverage job
+uv run pytest -m perf                                                # the cost guards, CI's own job
 ADATA_REQUIRE_VERSION_FIXTURES=1 uv run pytest tests/test_anndata_versions.py -m integration
 ```
 
