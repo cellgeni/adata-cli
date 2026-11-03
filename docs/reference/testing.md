@@ -16,18 +16,27 @@ uv run pytest -m perf              # just the tracing complexity guards
 uv run pytest -m integration       # anndata releases, scanpy and PyTables
 ```
 
-CI runs the unit suite on Python 3.12 and 3.13 with a **90% coverage floor**,
-and the anndata compatibility suite and the 10x external-reader suite as
-separate jobs. A fresh-install job installs the package alone from a fresh
-resolution, without `uv.lock`, as `pip install pyadata-cli` would. It
-imports every module on the base dependencies alone, runs `adata convert`
-with and without click beside typer, and runs the docs-accuracy suite with no
-click installed. The locked suite cannot see a dependency the lock brings in
-by accident: 0.7.0 to 0.17.2 imported click, which typer had stopped
-installing, so `convert` crashed on every fresh install. A floors job runs
-the unit suite once more, on both interpreters, with each direct dependency
-at the lowest version `pyproject.toml` allows, after checking that each one
-is at its floor and imports.
+CI (`.github/workflows/tests.yml`) runs these jobs on every pull request, under
+the names GitHub shows:
+
+| Job | What it runs |
+|---|---|
+| `tests (py3.12)`, `tests (py3.13)` | The unit suite, `-m "not integration"`, with a **90% coverage floor** |
+| `fresh install, no lock` | The package alone from a fresh resolution, without `uv.lock`, as `pip install pyadata-cli` would install it: every module imported on the base dependencies, `adata convert` with and without click beside typer, and the docs-accuracy suite with no click installed |
+| `tests at the dependency floors (py3.12)`, `(py3.13)` | The unit suite once more, with each direct dependency at the lowest version `pyproject.toml` allows, after checking that each one is at its floor and imports |
+| `anndata 0.8-0.13 compatibility` | `test_anndata_versions.py`: every anndata release from 0.7.8 to 0.13 (see below) |
+| `10x h5 against scanpy and PyTables` | `test_external_readers.py`: every converter checked by the reader people use for that format, not only 10x's (see the table below) |
+| `workflow lint` | [actionlint](https://github.com/rhysd/actionlint) and [zizmor](https://docs.zizmor.sh) over the workflows |
+| `container image` | Builds the Docker image and runs `.github/scripts/smoke-image.sh` against it |
+
+The last two jobs' names are older than what they check, and renaming a job
+renames the check a branch rule requires, so they stay. `test_concat_versions.py`
+is an `integration` test that no job runs; run it locally.
+
+The fresh-install job exists because the locked suite cannot see a
+dependency the lock brings in by accident: 0.7.0 to 0.17.2 imported click,
+which typer had stopped installing, so `convert` crashed on every fresh
+install.
 
 Each leg of the unit suite checks that it runs the Python it is named after
 before testing anything. uv takes its interpreter from `.python-version`
@@ -37,13 +46,10 @@ suite on 3.12; the workflow now sets `UV_PYTHON` for each leg.
 The workflows are tested too. Publishing, the image and the benchmark run
 only on a tag, so a pull request never runs them. `test_release_pipeline.py`
 reads them, works out which jobs publish in each kind of run, and runs their
-scripts against stand-ins. The `workflow lint` job runs
-[actionlint](https://github.com/rhysd/actionlint) and
-[zizmor](https://docs.zizmor.sh) over them on every pull request, though not
-inside a release, where an advisory published that day would stop it. The
-`container image` job builds the Docker image and runs
-`.github/scripts/smoke-image.sh` against it, on every pull request and inside
-every release before PyPI has it.
+scripts against stand-ins. The `workflow lint` job runs on every pull
+request, though not inside a release, where an advisory published that day
+would stop it. The `container image` job runs on every pull request and
+inside every release before PyPI has it.
 
 ## How the suite is organised
 
@@ -51,7 +57,11 @@ every release before PyPI has it.
 |---|---|
 | `test_elements.py` | The element layer — encodings, string dtypes, readers and writers — run against HDF5, Zarr v2 and Zarr v3 |
 | `test_storage.py` | Backend detection, copying, Zarr versions, consolidated metadata |
+| `test_storage_root_attrs.py` | The root's AnnData attributes: written when a store is opened for writing, and a warning on reading a store that lacks them, though not for anndata 0.7's layout, which never had them |
+| `test_staging.py` | `util/staging.py` on its own: write beside and rename into place, several outputs together, a failed swap put back, leftovers refused rather than deleted |
+| `test_write_safety.py` | Every way a command used to destroy or corrupt a store while reporting success, or leave a half-written one: outputs that alias the input, failed selections, `--inplace`, failed closes, a full disk, two runs on one output, SIGTERM |
 | `test_formats.py` | `.npy`, `.mtx`, image and JSON export/import, including their failure modes |
+| `test_cli_output.py` | What the CLI prints: names, labels and paths with square brackets as the store spells them, a failure as one plain `Error:` line in a log file, help text that keeps its brackets, `main(argv)` |
 | `test_validate.py` | Dimension validation for every axis-bearing path, including `raw/` |
 | `test_invariants.py` | Relationships that must hold for any data: subsetting everything is the identity, split partitions exactly, concat undoes split |
 | `test_anndata_roundtrip.py` | anndata writes the fixtures, reads back our output |
@@ -61,6 +71,11 @@ every release before PyPI has it.
 | `test_convert.py` | `convert` between every backend pair, read back by anndata; its refusals, staging, and the forwarding of recast's old flags |
 | `test_recast.py` | `recast` against scipy: casts, transposes, density changes and every refusal |
 | `test_recast_streaming.py` | `recast` on HDF5, Zarr v2 and Zarr v3 in blocks of a few rows and entries: every layout to every other, every dtype in every layout, matrices at any depth, index ranges with and without `--force`; against scipy and read back by anndata |
+| `test_concat_correctness.py` | `concat` against `anndata.concat`, on inputs whose encodings each test sets: plain strings, nullable columns, legacy categoricals, missing values, joins and merges |
+| `test_concat_scale.py` | `concat` on the paths that scale, against `anndata.concat`: CSC matrices rebuilt through buckets on disk, and more inputs than can be open at once |
+| `test_concat_versions.py` | `concat` outputs read back by the anndata release that wrote the inputs, 0.8 to 0.13 (`integration`) |
+| `test_subset_fan_out.py` | The streamed sparse writers of `subset`, `split` and `concat`: index dtypes and compression kept as the source has them, and `split` reading each matrix once for all groups; against anndata and scipy |
+| `test_scatter.py` | `core/scatter.py`: rows read in one order written in another through scratch |
 | `test_tenx.py` | 10x HDF5 import and export against Cell Ranger-shaped fixtures (v2, v3, multimodal, probe-based): mapping, filters, round trips, refusals |
 | `test_mtx.py` | 10x / STARsolo MTX folders against hand-written fixtures (Cell Ranger 2 and 3, STARsolo, velocyto, GEO prefixes): mapping, entry orders, refusals that leave nothing, round trips |
 | `test_cellbender.py` | CellBender 0.2 and 0.3+ output, full and filtered: each latent at its barcode, `--min-cell-probability`, `--raw` alignment, refusals |
@@ -68,7 +83,12 @@ every release before PyPI has it.
 | `test_loom.py` | loom import and export against loompy- and velocyto-shaped fixtures (spec 2 and 3): X choice, names, attributes, graphs, `--dense`, round trips |
 | `test_text.py` | Text matrices in every layout anndata's `read_text` tells apart (corner, short and comment headers, no header, no row names), each delimiter, gzip, `--transpose` CSR and dense, dtypes, refusals by line, small blocks |
 | `test_hdf5.py` | One dataset of a plain HDF5 file: the listing without `--key`, `read_hdf`'s `row_names` / `col_names` and other names, `--transpose` CSR and dense, slabs of chunks, `--from hdf5` on `.h5` |
+| `test_dense.py` | `conversion/dense.py`, which the loom and HDF5 importers read a dense matrix through: datasets chunked every way that changes how it reads them, on each output backend, read back by anndata |
 | `test_cistopic.py` | pycisTopic pickles read through the allowlist: a CistopicObject's matrices, frames, model and projections, an imputed-features pickle, a pickle naming `os.system` refused unrun, the missing-extra hint |
+| `test_pickled.py` | The restricted unpickler against crafted pickles that name only allowlisted globals, each loaded in a child process so a crash cannot take the run down |
+| `test_visium.py` | Space Ranger output: standard Visium (Space Ranger 1 to 4) laid out as `squidpy.read.visium` lays it out, Visium HD bins at each size, segmented cells, Space Ranger's analysis, images, refusals |
+| `test_xenium.py` | Xenium bundles (XOA 1 to 4): the cell table in or out of the matrix's order, cells the matrix lacks, Xenium's analysis with gaps |
+| `test_geojson.py` | `formats/geojson.py`: Space Ranger 4's cell outlines read a feature at a time, centroids and areas against shapely |
 | `test_pandas_frame.py` | Each pandas dtype written as anndata writes it, on every backend |
 | `test_concat_axis_elements.py` | `concat` on obsm dataframes and varm, against `anndata.concat` for each join and merge strategy |
 | `test_legacy_copies.py` | anndata 0.7's dataframes (categoricals as codes with an object reference into `__categories`) copied by `subset` (h5ad and Zarr), `convert` to Zarr v2/v3 and a MuData import: written as current `categorical` groups in a 0.2.0 frame, read back by anndata with their categories |
@@ -77,10 +97,11 @@ every release before PyPI has it.
 | `test_scope.py` | SCope looms, read as pySCENIC's `export2loom` writes them and written with `--scope` (round trips, plain AnnData, refusals, markers): regulons as dataframes, embeddings and clusterings named from `MetaData`, plain or compressed `MetaData`, region looms, R's logicals and factors, renamed fields, small blocks |
 | `test_table.py` | The streaming CSV reader against pandas: column types, quoting, row subsets, blocks, refusals |
 | `test_mtx_codec.py`, `test_csr_build.py` | The streaming Matrix Market reader and writer against scipy, and the bucket sort they and `recast` share |
-| `test_external_readers.py` | 10x conversions, HDF5 and MTX, Parse runs and looms, checked by scanpy (Parse's own recipe for Parse), anndata with loompy (the pySCENIC tutorial's recipe for SCope looms), anndata's `read_csv`, `read_text` and `read_hdf`, a pandas 1.5 pycisTopic pickle read back there, mudata (a file it writes read as it reads it; ours read by it), and PyTables in their own uv environments (`integration`) |
+| `test_external_readers.py` | Every converter checked by the reader people use, each in its own uv environment pinned in `reference_stores.ORACLES` (`integration`): 10x HDF5 and MTX and CellBender by scanpy, and our 10x export by PyTables; Parse runs by Parse's own scanpy recipe; looms by anndata with loompy (the pySCENIC tutorial's recipe for SCope looms); anndata's `read_csv`, `read_text` and `read_hdf`; a pandas 1.5 pycisTopic pickle read back there; mudata (a file it writes read as it reads it; ours read by it); Visium by squidpy, Visium HD by scanpy with pandas and pyarrow, its segmented cells by 10x's geopandas recipe, Xenium by 10x's scanpy recipe; scanpy's `rank_genes_groups` through every conversion |
 | `test_performance.py` | Complexity guards -- what an operation costs, not how long it takes (see below); its fixtures are in `perf_fixtures.py` |
 | `test_benchmark_harness.py` | That the benchmark's measurement is trustworthy, and that each run compares with the release before it |
 | `test_release_pipeline.py` | The workflows and the Dockerfile: which jobs publish in each kind of run, which hold a write token and what they run, pinned actions and base image, no untrusted value pasted into a script, each Python leg on its own Python |
+| `test_docs_are_accurate.py` | The docs against the code: every `adata ...` line in the README, the site and the `--help` examples uses real commands and options; each command has a section in the reference; links resolve; every page has its front matter; every test file is in this table |
 | `test_subset_oracle.py` | `subset` and `split` against anndata's `adata[obs, var]`, element by element: X, every layer layout, obsm and varm of any rank and as dataframes, obsp, varp, raw; on HDF5, Zarr v2 and Zarr v3 |
 | `test_subset_selection.py`, `test_select.py`, `test_split_names.py` | Name lists that repeat a name, queries on every column layout against pandas, missing labels apart from empty ones, and output names that never share a file |
 | `test_subset.py`, `test_export.py`, `test_import.py`, `test_info_read.py`, `test_zarr.py`, `test_query.py` | Per-feature unit tests |
@@ -101,9 +122,12 @@ def test_something(new_store):
 ```
 
 For CLI surfaces, use the module-level `CliRunner` and assert on
-`result.stdout + (result.stderr or "")`, since status goes to stderr. Strip
-ANSI before matching message text — Rich also wraps long lines, so collapse
-whitespace.
+`result.stdout` for results and `result.stderr` for status and errors. Off a
+terminal, as under `CliRunner`, Rich writes no colour codes and keeps each
+stderr message on one line, but `FORCE_COLOR` in the environment brings the
+codes back and help text and stdout's trees still wrap at Rich's width: strip
+ANSI and collapse whitespace before matching text, as the `_out(result)`
+helpers of the CLI test files do.
 
 ## Performance
 

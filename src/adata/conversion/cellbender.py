@@ -38,6 +38,7 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 import h5py
 import numpy as np
 from rich.console import Console
+from rich.markup import escape
 
 from adata.conversion import tenx
 from adata.conversion.base import ConversionPlan, Converter, Options
@@ -579,7 +580,7 @@ class CellbenderImport(Converter):
                 )
 
             if detail.raw is not None:
-                with console.status(f"[cyan]Reading the raw counts of {detail.raw.path.name}...[/]"):
+                with console.status(f"[cyan]Reading the raw counts of {escape(detail.raw.path.name)}...[/]"):
                     _write_raw(
                         detail.raw, roots, detail.targets, n_out, matrix.n_features, group,
                     )

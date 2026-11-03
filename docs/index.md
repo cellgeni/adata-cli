@@ -73,8 +73,9 @@ Status goes to stderr and data to stdout, so every command pipes cleanly.
   (Cell Ranger, STARsolo, velocyto), Visium and Xenium spatial outputs with
   their coordinates and images, CellBender output, Parse Biosciences runs,
   looms (velocyto's and SCope's), text tables, plain HDF5 matrices,
-  pycisTopic pickles and MuData. CI checks them against the readers people
-  use for them: scanpy, squidpy, loompy, anndata, mudata.
+  pycisTopic pickles and MuData are read; 10x HDF5 and MTX, loom and MuData
+  are written too. CI checks them against the readers people use for them:
+  scanpy, squidpy, loompy, anndata, mudata.
 - **Outputs that keep the source's choices**: Zarr version, index dtypes,
   chunking and compression carry over unless a flag changes them.
 - **Outputs that appear whole or not at all**: every store is written beside

@@ -16,6 +16,7 @@ from typing import Any, Callable, Iterator, Optional, Tuple
 import h5py
 import numpy as np
 from rich.console import Console
+from rich.markup import escape
 
 from adata.formats.array import IMPORT_CHUNK_ELEMENTS, import_npy
 from adata.formats.dataframe import import_dataframe
@@ -46,13 +47,13 @@ def _copy_source(
     if src_backend == dst_backend:
         copy_path(file, temp)
         if not inplace:
-            console.print(f"[dim]Copied {file} → {output}[/]")
+            console.print(f"[dim]Copied {escape(str(file))} → {escape(str(output))}[/]")
         return
 
     with open_store(file, "r") as src_store, open_store(temp, "w") as dst_store:
         copy_store_contents(src_store.root, dst_store.root)
     console.print(
-        f"[dim]Converted {file} ({src_backend}) → {output} ({dst_backend})[/]"
+        f"[dim]Converted {escape(str(file))} ({src_backend}) → {escape(str(output))} ({dst_backend})[/]"
     )
 
 

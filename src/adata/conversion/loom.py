@@ -54,6 +54,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequ
 import h5py
 import numpy as np
 from rich.console import Console
+from rich.markup import escape
 
 from adata.conversion import scope
 from adata.conversion.base import ConversionPlan, Converter, Options
@@ -489,7 +490,7 @@ class LoomImport(Converter):
                 if not places:
                     continue
                 ds = handle["matrix"] if loom_name == "" else handle["layers"][loom_name]
-                with console.status(f"[cyan]Reading {loom_name or 'matrix'}...[/]"):
+                with console.status(f"[cyan]Reading {escape(loom_name or 'matrix')}...[/]"):
                     _write_matrix(ds, root, places, detail)
 
 
@@ -947,11 +948,11 @@ class LoomExport(Converter):
             staged[0], "w"
         ) as out:
             root = store.root
-            with console.status(f"[cyan]Writing {detail.matrix} dense...[/]"):
+            with console.status(f"[cyan]Writing {escape(detail.matrix)} dense...[/]"):
                 _export_matrix(resolve(root, detail.matrix), out, "matrix")
             layers = out.create_group("layers")
             for name, where in detail.layers:
-                with console.status(f"[cyan]Writing layer {name} dense...[/]"):
+                with console.status(f"[cyan]Writing layer {escape(name)} dense...[/]"):
                     _export_matrix(resolve(root, where), layers, name)
 
             with console.status("[cyan]Writing the attributes...[/]"):

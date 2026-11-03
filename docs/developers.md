@@ -38,7 +38,7 @@ installed by the `integration` tests in environments of their own.
 | `src/adata/elements/` | The AnnData on-disk spec: encodings, readers for every layout since anndata 0.7, writers of the current one |
 | `src/adata/storage/` | One interface over h5py and zarr |
 | `src/adata/conversion/` | `adata convert`: one module per format, through AnnData |
-| `src/adata/formats/` | The file types of `export` and `import`: npy, Matrix Market, CSV, JSON, images; and what the converters read: Parquet, GeoJSON polygons |
+| `src/adata/formats/` | The file types of `export` and `import`: npy, Matrix Market, CSV, JSON, images; and what the converters read: Parquet, GeoJSON polygons, pycisTopic's pickles |
 | `src/adata/util/` | Output staging, path checks, names |
 | `tests/` | The test suite; [Testing](reference/testing.md) describes it |
 | `benchmarks/` | The comparative benchmark against anndata and scanpy |
@@ -56,9 +56,18 @@ Each layer calls only those below it:
 cli.py ──► commands/ ──► core/, conversion/, formats/ ──► elements/ ──► storage/
 ```
 
+The one exception: `storage/` uses `elements/` (the spec, `strings`, and the
+readers and writers that `copy_tree` and `create_dataset` need to copy an
+element faithfully).
+
 - **`cli.py`** parses options and checks cheap things such as `--zarr-format`.
   Its `console` writes to stderr; only data and `out_console` go to stdout,
-  which is what lets output pipe cleanly.
+  which is what lets output pipe cleanly. Off a terminal, in a log file or a
+  pipe, neither writes colour, cursor or spinner codes, and a message on
+  stderr stays on one line. `raise _fail(e)` turns an exception into that
+  line, `Error: ...`, and exit code 1. `--chunk` and `--no-space-check` are
+  defined once, as `_chunk_option` and `_space_check_option`; a new command
+  reuses them.
 - **`commands/`** orchestrates one command: what to read, what to refuse, what
   to write where, and which Zarr version.
 - **`core/`** holds the algorithms that stream. `subset.py`'s writer serves
@@ -131,7 +140,15 @@ before changing anything that writes:
   `--no-space-check` skips it.
 - **Validate before the output exists.** Resolve selections, check casts and
   plan, so that a refusal writes nothing. An empty selection is a refusal,
-  not an empty store.
+  not an empty store. What only the data can show, such as an index out of
+  range, refuses during the write, and staging keeps the output from
+  appearing.
+- **Escape what the store or the user wrote before Rich prints it.** Rich
+  reads `[word]` as a style tag: printed as it is, `pct_counts[mt]` shows as
+  `pct_counts`, and `[/x]` crashes the command. Names, labels, paths and
+  attribute values go through `rich.markup.escape` in every message, status
+  line and progress description. Help text is markup too, so a literal `[`
+  in a docstring is written `\\[`.
 - **Zarr outputs keep the source's version.** Pass `zarr_format=` to
   `open_store`; without it zarr-python writes v3, upgrading a v2 input.
   `concat` uses the version its Zarr inputs share.
@@ -155,13 +172,22 @@ before changing anything that writes:
   `concat` outputs.
 - **Complexity guards that count, not time.** `tests/test_performance.py`
   counts the elements and bytes read through hooks on h5py and zarr. A change
-  that adds reads per row or per group fails it on any machine.
+  that adds reads per row or per group fails it on any machine. The same
+  hooks (`tests/perf_counters.py`) count the largest read, which is the block
+  a loop holds, and the whole chunks and shards each read decodes and each
+  write encodes.
+- **Memory measured as a share of the input.** `perf_counters.peak_rss` runs
+  `adata` in a fresh interpreter and returns the peak memory it added; the
+  memory guards grow a store along n_obs and n_var, built by
+  `tests/perf_fixtures.py` as anndata writes it (h5ad, Zarr v2 and anndata
+  0.13's sharded Zarr v3), and assert the peak stays a small share of it.
 - **The docs are tested.** `tests/test_docs_are_accurate.py` checks every
   `adata …` line in the README, these pages and the `--help` examples against
   the real Click tree; that each command has a section and a contents entry
   in [Commands](reference/commands.md) and a mention in the app help; that
-  every relative link names a page and an anchor that exist; and that every
-  page has the front matter the sidebar needs.
+  every relative link names a page and an anchor that exist; that every
+  page has the front matter the sidebar needs; and that every test file has
+  a row in [Testing](reference/testing.md)'s map.
 
 ```bash
 uv run pytest -m "not integration" --cov=adata --cov-fail-under=90   # CI's coverage floor
@@ -170,10 +196,13 @@ ADATA_REQUIRE_VERSION_FIXTURES=1 uv run pytest tests/test_anndata_versions.py -m
 ```
 
 `integration` tests need the network on their first run, to build their
-environments. CI also installs the package alone from a fresh resolution,
-without the lock, imports every module and runs `convert`, so a module-level
-import of something undeclared fails there. Don't import click, which typer
-0.26 and later no longer install. House style: test names read as sentences, a regression test's
+environments. CI runs the unit suite on Python 3.12 and 3.13 and again at
+each dependency's floor, the anndata-release and external-reader tests as
+jobs of their own, a lint of the workflows and a build and smoke test of the
+image. It also installs the package alone from a fresh resolution, without
+the lock, imports every module and runs `convert`, so a module-level import
+of something undeclared fails there. Don't import click, which typer 0.26
+and later no longer install. House style: test names read as sentences, a regression test's
 docstring says what used to go wrong, and comments say why. No linter or
 formatter runs; match the code around you.
 

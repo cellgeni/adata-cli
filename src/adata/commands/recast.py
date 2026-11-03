@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from rich.console import Console
+from rich.markup import escape
 
 from adata.core.recast import (
     DEFAULT_CHUNK,
@@ -136,7 +137,7 @@ def recast_store(
 
             console.print(
                 f"[cyan]Converting {len(targets)} matrix/matrices:[/] "
-                + ", ".join(targets)
+                + escape(", ".join(targets))
             )
 
             with open_store(temp, "w", zarr_format=zarr_format) as dst_store:
@@ -154,9 +155,9 @@ def recast_store(
                 ensure_anndata_skeleton(dst)
 
     if inplace:
-        console.print(f"[green]Converted[/] {file}")
+        console.print(f"[green]Converted[/] {escape(str(file))}")
     else:
-        console.print(f"[green]Wrote[/] {dst_path}")
+        console.print(f"[green]Wrote[/] {escape(str(dst_path))}")
 
 
 def _extra(plan: Plan) -> float:

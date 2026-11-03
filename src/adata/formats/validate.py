@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Optional, Tuple, Any
 
 from rich.console import Console
+from rich.markup import escape
 
 from adata.core.info import axis_len
 from adata.util.path import norm_path
@@ -277,4 +278,4 @@ def validate_dimensions(
                     )
             return
 
-    console.print(f"[dim]Note: No dimension validation for path '{obj_path}'[/]")
+    console.print(f"[dim]Note: No dimension validation for path '{escape(obj_path)}'[/]")

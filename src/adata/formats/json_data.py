@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from rich.console import Console
+from rich.markup import escape
 
 from adata.core.read import decode_str_array
 from adata.elements import spec
@@ -186,11 +187,11 @@ def import_json(
         console.print(
             f"[yellow]Warning:[/] {len(skipped)} null "
             f"{'value was' if len(skipped) == 1 else 'values were'} left out, as "
-            f"anndata leaves out None: {', '.join(skipped[:5])}"
+            f"anndata leaves out None: {escape(', '.join(skipped[:5]))}"
             f"{', ...' if len(skipped) > 5 else ''}"
         )
 
-    console.print(f"[green]Imported[/] JSON data into '{obj}'")
+    console.print(f"[green]Imported[/] JSON data into '{escape(obj)}'")
 
 
 def write_json_value(parent: Any, name: str, value: Any) -> List[str]:

@@ -34,6 +34,7 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 import h5py
 import numpy as np
 from rich.console import Console
+from rich.markup import escape
 
 from adata.conversion.base import ConversionPlan, Converter, Options
 from adata.conversion.features import type_counts, write_index_frame
@@ -415,10 +416,10 @@ class MudataImport(Converter):
                 copy_attrs(group.attrs, dst.root.attrs, target_backend=backend)
                 ensure_anndata_root_attrs(dst.root)
                 for key in group.keys():
-                    with console.status(f"[cyan]Copying {mod.name}/{key}...[/]"):
+                    with console.status(f"[cyan]Copying {escape(mod.name)}/{escape(key)}...[/]"):
                         copy_tree(group[key], dst.root, key, compression=detail.compression)
                 ensure_anndata_skeleton(dst.root)
-                with console.status(f"[cyan]Adding the global parts to {mod.name}...[/]"):
+                with console.status(f"[cyan]Adding the global parts to {escape(mod.name)}...[/]"):
                     for axis, (_, mapping, graphs) in zip(mod.axes, _AXES):
                         _write_axis(src.root, dst.root, axis, mapping, graphs, detail.compression)
                     for key in mod.uns:

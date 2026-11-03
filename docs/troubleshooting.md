@@ -6,8 +6,8 @@ nav_order: 5
 # Troubleshooting
 {: .no_toc }
 
-Find the message you got, then the fix. Errors start `Error:` and end the
-command with exit code 1; a usage error (an unknown option, a missing
+Find the message you got, then the fix. Errors are one line on stderr
+starting `Error:`, and end the command with exit code 1; a usage error (an unknown option, a missing
 argument, an input that does not exist) is exit code 2. Messages are shown
 here with real paths replaced by short ones.
 
@@ -337,8 +337,10 @@ store it wrote; for a store another tool changed, run
 ### The command was killed for running out of memory
 
 Lower `--chunk`: a dense block holds `--chunk` × n_var values, 1,024 rows by
-default. Two things are held whole by design: obs and var columns, and a
-pycisTopic pickle, which cannot be read in part. See
+default. Some things are held whole by design: obs and var columns, an
+image (`export image`, `import image`, and the tissue images of a Visium
+conversion, which `--no-images` leaves out), and a pycisTopic pickle, which
+cannot be read in part. See
 [Pipelines and containers](guides/pipelines.md#memory-and---chunk).
 
 ### `A loom holds its matrices dense: 54.0 GB to compress and write. It is written, but may take a while`

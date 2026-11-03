@@ -49,6 +49,7 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 import h5py
 import numpy as np
 from rich.console import Console
+from rich.markup import escape
 
 from adata.conversion import tenx
 from adata.conversion.base import ConversionPlan, Converter, Options
@@ -732,7 +733,7 @@ def _write_spatial_uns(root: Any, detail: _Plan, console: Console) -> None:
         # anndata 0.8 to 0.11 cannot read a null, and leave out None themselves.
         console.print(
             f"[yellow]Warning:[/] scalefactors_json.json holds null for "
-            f"{', '.join(path.rsplit('/', 1)[-1] for path in skipped)}; left out, as "
+            f"{escape(', '.join(path.rsplit('/', 1)[-1] for path in skipped))}; left out, as "
             "anndata leaves out None."
         )
     metadata = write_mapping(library, "metadata")

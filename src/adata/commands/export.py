@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Iterator, List, Optional
 
 from rich.console import Console
+from rich.markup import escape
 
 from adata.formats.array import export_npy as export_npy_format
 from adata.formats.dataframe import export_dataframe
@@ -47,7 +48,7 @@ def _output(file: Path, out: Optional[Path], console: Console) -> Iterator[Optio
     out.parent.mkdir(parents=True, exist_ok=True)
     with staged_outputs([out]) as (temp,):
         yield temp
-    console.print(f"[green]Wrote[/] {out}")
+    console.print(f"[green]Wrote[/] {escape(str(out))}")
 
 
 def export_table(

@@ -40,6 +40,7 @@ from typing import Any, Callable, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 from rich.console import Console
+from rich.markup import escape
 
 from adata.conversion.base import ConversionPlan, Converter, Options
 from adata.conversion.features import Target, write_obs_index, write_var
@@ -552,7 +553,7 @@ class TextImport(Converter):
             write_var(root, Target(label=None, keep=None, var_names=detail.var_names, columns={}))
             ensure_anndata_skeleton(root)
             _write_uns(root["uns"], detail)
-            with console.status(f"[cyan]Reading {Path(plan.source).name}...[/]"):
+            with console.status(f"[cyan]Reading {escape(Path(plan.source).name)}...[/]"):
                 if detail.transpose:
                     obs = _write_names(root, detail.obs_names)
                     _write_transposed(root, reader, detail)

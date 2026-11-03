@@ -18,6 +18,7 @@ from typing import Any, BinaryIO, Iterator, Optional, Tuple
 
 import numpy as np
 from rich.console import Console
+from rich.markup import escape
 
 from adata.elements import spec
 from adata.elements.read import decode_str_array
@@ -147,7 +148,7 @@ def export_npy(
     elif missing:
         dtype = np.dtype(np.float64)
         console.print(
-            f"[yellow]Note:[/] '{obj}' has {missing:,} missing values, written "
+            f"[yellow]Note:[/] '{escape(obj)}' has {missing:,} missing values, written "
             "as NaN, so the array is float64."
         )
     else:
@@ -176,7 +177,7 @@ def export_npy(
     status = (
         nullcontext()
         if to_stdout
-        else console.status(f"[magenta]Exporting {obj} to {out}...[/]")
+        else console.status(f"[magenta]Exporting {escape(obj)} to {escape(str(out))}...[/]")
     )
     with target as fh, status as progress, stdout_reader_may_stop():
         fh.write(header)
@@ -186,7 +187,7 @@ def export_npy(
             n = shape[0]
             for start, end in _row_blocks(shape, chunk_elements):
                 if progress:
-                    progress.update(f"[magenta]Exporting {obj}: {start}-{end} of {n}...[/]")
+                    progress.update(f"[magenta]Exporting {escape(obj)}: {start}-{end} of {n}...[/]")
                 fh.write(convert(start, end).tobytes())
 
 
@@ -250,4 +251,4 @@ def import_npy(
             target[start:end] = block
 
     shape_str = "×".join(str(d) for d in arr.shape)
-    console.print(f"[green]Imported[/] {shape_str} array into '{obj}'")
+    console.print(f"[green]Imported[/] {shape_str} array into '{escape(obj)}'")

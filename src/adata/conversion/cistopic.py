@@ -38,6 +38,7 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 from rich.console import Console
+from rich.markup import escape
 
 from adata.conversion.base import ConversionPlan, Converter, Options
 from adata.conversion.features import STRING_STEP, Target, write_obs_index, write_var
@@ -210,7 +211,7 @@ class CistopicImport(Converter):
                 write_dense(root[key], label, values)
             _write_uns(root["uns"], detail, warnings)
         for message in warnings:
-            console.print(f"[yellow]Warning:[/] {message}")
+            console.print(f"[yellow]Warning:[/] {escape(message)}")
 
 
 def _is_sparse(value: Any) -> bool:

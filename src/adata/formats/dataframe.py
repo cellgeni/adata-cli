@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from rich.console import Console
+from rich.markup import escape
 
 from adata.core.read import col_chunk_as_strings
 from adata.elements.read import dataframe_columns, element_len, resolve_index
@@ -86,7 +87,7 @@ def export_dataframe(
             status_ctx = (
                 nullcontext()
                 if to_stdout
-                else console.status(f"[magenta]Exporting {axis} table to {out}...[/]")
+                else console.status(f"[magenta]Exporting {escape(axis)} table to {escape(str(out))}...[/]")
             )
 
             with status_ctx as status:
@@ -159,12 +160,12 @@ def import_dataframe(
         if column.name in forced:
             if kind not in ("str", "category"):
                 console.print(
-                    f"[yellow]Note:[/] {column.name!r} holds {kind} values, so it "
+                    f"[yellow]Note:[/] {escape(repr(column.name))} holds {kind} values, so it "
                     "stays as it is rather than a categorical."
                 )
             elif column.seen is None:
                 console.print(
-                    f"[yellow]Warning:[/] {column.name!r} has more than "
+                    f"[yellow]Warning:[/] {escape(repr(column.name))} has more than "
                     f"{CATEGORY_CAP:,} distinct values, so it is written as strings."
                 )
             else:
@@ -184,5 +185,5 @@ def import_dataframe(
     detail = f" ({n_categorical} categorical)" if n_categorical else ""
     console.print(
         f"[green]Imported[/] {scan.n_rows} rows x {len(scan.columns)} columns "
-        f"into '{obj}'{detail}"
+        f"into '{escape(obj)}'{detail}"
     )

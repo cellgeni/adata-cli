@@ -7,6 +7,7 @@ from typing import Any, Optional
 import numpy as np
 from PIL import Image
 from rich.console import Console
+from rich.markup import escape
 
 from adata.elements.write import write_dense, write_mapping
 from adata.formats.validate import DATAFRAME_PATHS, check_target, validate_dimensions
@@ -149,5 +150,5 @@ def import_image(root: Any, obj: str, input_file: Path, console: Console) -> Non
     write_dense(parent, parts[-1], arr, replace=True)
     console.print(
         f"[green]Imported[/] {'x'.join(str(d) for d in arr.shape)} "
-        f"image ({arr.dtype}) into '{obj}'"
+        f"image ({arr.dtype}) into '{escape(obj)}'"
     )

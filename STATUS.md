@@ -54,9 +54,42 @@ Steps:
 - [x] Wave 1, then 0.17.4
 - [x] Wave 2, then 0.17.5
 - [ ] Waves 3 and 4, then 0.17.6
+  - [x] B6a: the memory harness, then recast streaming (#118)
+  - [x] B8c: pickles, Xenium and images (#120)
+  - [ ] B6b: block sizing and Zarr v3 shards (#121)
+  - [ ] B10: CLI output and the documentation sweep
+  - [ ] Release 0.17.6
 
 ## Follow-ups noticed
 
+- From waves 3 and 4 of the audit fixes:
+  - The streaming transpose and other users of `csr_build.BucketSorter`
+    append every input block to every bucket, (nnz/chunk)² appends, and
+    each bucket holds three growable datasets (1.8 GB at 30,000 buckets).
+    The transpose knows its row sizes, so fixed regions as in concat's
+    `_ColumnBuckets` would do; concat's `_csc_runs` and recast's
+    `_bucket_runs` could then move into `csr_build` (B3b, B6a).
+  - The transpose's scratch lives inside a Zarr output and is appended to
+    unbuffered, about 135 times its writes; an HDF5 scratch beside the
+    output, as concat has, would fix it. It is also missing from recast's
+    free-space estimate (B3b, B6a, B6b).
+  - recast's sparse reads are a fixed million entries, not `--chunk`; and
+    `concat`, `recast` and `export` read `--chunk` rows where one chunk
+    height is over the read budget, with column tiles only in `subset`,
+    `split` and `convert` (B6a, B6b).
+  - `copy_dataset` writes HDF5 text uncompressed: a Zarr to h5ad
+    conversion's obs index is about nine times anndata's (B6b).
+  - `convert` has no `--chunk`: the cisTopic and MuData converters use a
+    fixed byte budget (B8b, B8c).
+  - A pickle holding pandas 3's Arrow strings is refused; pycisTopic's
+    pandas 1.5 never writes one (B8c).
+  - Python warnings reach stderr with their source line; printing them as
+    `Warning: ...` lines would match the rest of the output (B5).
+  - CI's `external-readers` job is named "10x h5 against scanpy and
+    PyTables" and its `compatibility` job "anndata 0.8-0.13", though the
+    first checks every converter's reader and the second reads 0.7.8 too.
+    Renaming a job changes its required-check name, so it waits for the
+    repository settings (B10).
 - From wave 2 of the audit fixes:
   - CI: a Python 3.14 leg; Dependabot for the pinned actions, uv and base
     image (the pinned actions run on Node 20, which GitHub is retiring); the
@@ -67,6 +100,14 @@ Steps:
     that fix's scope (B5).
   - Flex's `target_sets` group is not carried, and `--make-unique` names
     export with their suffixes (B8a).
+  - `formats/textio.py` does not unquote a field that starts with `"`, as
+    pandas does; if it did, MTX export could quote such names rather than
+    refuse them (B8a).
+  - A fixed-width text dataset that HDF5 compressed can inflate far beyond
+    its stored size when read whole, as the loom import reads var columns;
+    only loom's global attributes are bounded (B8b).
+  - Under an outer join, an input lacking some genes counts as lacking var
+    columns, varm and varp entirely; anndata pads them (B3b).
   - A numeric `in` list with thousands of values is slow (B4).
 - From wave 1 of the audit fixes:
   - `core/csr_build.py`'s on-disk sort makes many small appends, slow for
@@ -85,17 +126,6 @@ Steps:
   4's `barcode_mappings.parquet` (a 0.17.x after the audit fixes).
 - Dropped: spatial bundles whose matrix is a MEX folder only. 10x always
   writes the `.h5` beside it, and the refusal points to `--from 10x-mtx`.
-
-- Fixed in 0.16.2 (#77): `export image` without `-o` crashed (`'NoneType'
-  object has no attribute 'parent'`); it now writes PNG to stdout, as every
-  other export writes there. Found by the docs review.
-- Fixed in 0.16.1 (#74): `subset`, `split` and the MuData export kept
-  every category of a categorical column, where anndata's subsetting keeps
-  only those used (and narrows `uns["<col>_colors"]`). The ~50% "slack"
-  noted here before was mostly a measuring error -- `get_storage_size()`
-  leaves out the variable-length string heap -- but the unpruned categories
-  were real: the pbmc3k Multiome `.h5mu` drops from 84.7 to 74.2 MB, and a
-  subset's obs and var now equal anndata's own subset.
 
 ## Next candidates (#31)
 

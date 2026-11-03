@@ -29,6 +29,7 @@ from typing import List, Optional, Sequence
 
 import numpy as np
 from rich.console import Console
+from rich.markup import escape
 
 from adata.conversion.base import ConversionPlan, Converter, Options
 from adata.conversion.features import (
@@ -298,7 +299,7 @@ class ParseImport(Converter):
         # cannot be read must not leave a store holding obs and var alone.
         scans = []
         for item in detail.items:
-            with console.status(f"[cyan]Checking {_label(item)}...[/]"):
+            with console.status(f"[cyan]Checking {escape(_label(item))}...[/]"):
                 scans.append(scan(item.header, item.emap))
 
         for item, scanned, path in zip(detail.items, scans, staged):
@@ -306,7 +307,7 @@ class ParseImport(Converter):
                 root = stack.enter_context(
                     open_store(path, "w", zarr_format=detail.zarr_format)
                 ).root
-                with console.status(f"[cyan]Writing obs and var of {item.dge.sample}...[/]"):
+                with console.status(f"[cyan]Writing obs and var of {escape(str(item.dge.sample))}...[/]"):
                     write_table(root, "obs", item.cells, rows=item.rows)
                     write_var(root, item.target)
                     ensure_anndata_skeleton(root)
@@ -316,13 +317,13 @@ class ParseImport(Converter):
                     data_dtype=value_dtype(item.header, scanned),
                     compression=detail.compression,
                 )
-                with console.status(f"[cyan]Reading {_label(item)}...[/]"):
+                with console.status(f"[cyan]Reading {escape(_label(item))}...[/]"):
                     summed = read_into(item.header, item.emap, scanned, [[appender]], root)
                     appender.finish()
                 if summed:
                     console.print(
                         f"[yellow]Warning:[/] {summed:,} duplicate entries in "
-                        f"{_label(item)} were summed, as scipy does."
+                        f"{escape(_label(item))} were summed, as scipy does."
                     )
 
 
