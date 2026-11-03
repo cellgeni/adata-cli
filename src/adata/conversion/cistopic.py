@@ -24,14 +24,17 @@ cells x features, CSR, or dense with `--dense`.
 A pickle cannot be read in part, so the object is held in memory, as it was
 when pycisTopic saved it. What is written from it is not copied again: the
 fragment matrix, regions x cells CSR, is the same three arrays as a CSC cells
-x regions, and is turned into CSR on disk by the streaming transpose.
+x regions, and is turned into CSR on disk by the streaming transpose. A
+dense imputed matrix is written `BLOCK_ENTRIES` at a time, which is also
+the dense output's chunk, so neither grows with the number of features; a
+sparse one asked for dense goes through that CSR on disk first.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 from rich.console import Console
@@ -69,8 +72,11 @@ MODEL_ATTRS = frozenset({
     "topic_region",
 })
 
-#: Cells of a dense imputed matrix written at once.
-DENSE_CELLS = 4096
+#: Entries of an imputed matrix written at once: a block of cells, every
+#: feature of each, or a run of one cell's features when a cell has more.
+#: Also the chunk of a dense output. Sparse output from a dense matrix takes
+#: about 40 bytes an entry while a block is sorted out, so 40 MiB at most.
+BLOCK_ENTRIES = 1 << 20
 
 
 def require_extra() -> None:
@@ -130,8 +136,10 @@ class CistopicImport(Converter):
         name = Path(source).name
         try:
             obj = pickled.load(source)
-        except pickled.RefusedGlobal as exc:
+        except pickled.RefusedPickle as exc:
             raise ValueError(f"{name}: {exc}") from None
+        except Exception as exc:  # numpy's, scipy's or pandas' own refusal, or a file cut short
+            raise ValueError(f"{name} could not be read as a pycisTopic pickle: {exc}") from None
         kind = getattr(obj, "kind", type(obj).__name__)
         warnings: List[str] = []
         if kind == "CistopicObject":
@@ -294,6 +302,11 @@ def _plan_imputed(obj: Any, name: str) -> _Import:
             f"{name}: its matrix is {shape}, but it names {len(features):,} features "
             f"and {len(cells):,} cells."
         )
+    if not _is_sparse(matrix):
+        if not isinstance(matrix, np.ndarray) or matrix.ndim != 2:
+            raise ValueError(f"{name}: its matrix is a {type(matrix).__name__}, not an array.")
+        if matrix.dtype.kind not in "biuf":
+            raise ValueError(f"{name}: its matrix holds {matrix.dtype} values, not numbers.")
     return _Import("CistopicImputedFeatures", obj, len(cells), len(features), cells, features)
 
 
@@ -350,33 +363,88 @@ def _write_csr(parent: Any, name: str, matrix: Any, shape: Tuple[int, int], deta
         create_dataset(group, key, data=values, **kw)
 
 
-def _write_imputed(root: Any, detail: _Import) -> None:
-    """The features x cells matrix as cells x features, a block of cells at a time."""
-    matrix = detail.obj.mtx
-    if _is_sparse(matrix):
-        _write_fragments(root, "X", matrix, detail)
-        return
-    matrix = np.asarray(matrix)
+def _tiles(n_cells: int, n_features: int) -> Tuple[int, int]:
+    """Cells and features a block holds, `BLOCK_ENTRIES` at most: whole
+    cells when one fits, else a run of one cell's features."""
+    budget = max(1, BLOCK_ENTRIES)
+    if n_features <= budget:
+        return max(1, budget // max(1, n_features)), max(1, n_features)
+    return 1, budget
+
+
+def _blocks(n_cells: int, n_features: int) -> Iterator[Tuple[slice, slice]]:
+    """(cells, features) of each block, in row order: a cell is split only
+    when it is a block of its own."""
+    rows, cols = _tiles(n_cells, n_features)
+    for lo in range(0, n_cells, rows):
+        for start in range(0, n_features, cols):
+            yield slice(lo, min(lo + rows, n_cells)), slice(start, min(start + cols, n_features))
+
+
+def _dense_target(root: Any, detail: _Import, dtype: np.dtype) -> Any:
+    """X, dense, chunked as the blocks it is written in."""
     shape = (detail.n_obs, detail.n_var)
-    dtype = np.dtype(matrix.dtype.str)
-    if detail.dense:
-        kw: Dict[str, Any] = {"chunks": (min(max(shape[0], 1), DENSE_CELLS), max(shape[1], 1))}
+    kw: Dict[str, Any] = {}
+    if all(shape):  # no chunk is larger than the array, nor compressed without one
+        rows, cols = _tiles(*shape)
+        kw = {"chunks": (min(rows, shape[0]), min(cols, shape[1]))}
         if detail.compression is not None:
             kw = with_compression(
                 kw, detail.compression, shape=shape, dtype=dtype,
                 backend="zarr" if is_zarr_group(root) else "hdf5", zarr_format=detail.zarr_format,
             )
-        target = create_dataset(root, "X", shape=shape, dtype=dtype, **kw)
-        spec.set_encoding(target, spec.ARRAY)
-        for lo in range(0, shape[0], DENSE_CELLS):
-            target[lo : lo + DENSE_CELLS] = matrix[:, lo : lo + DENSE_CELLS].T
+    target = create_dataset(root, "X", shape=shape, dtype=dtype, **kw)
+    spec.set_encoding(target, spec.ARRAY)
+    return target
+
+
+def _write_imputed(root: Any, detail: _Import) -> None:
+    """The features x cells matrix as cells x features, a block at a time."""
+    matrix = detail.obj.mtx
+    if _is_sparse(matrix):
+        if detail.dense:
+            _write_dense_from_sparse(root, matrix, detail)
+        else:
+            _write_fragments(root, "X", matrix, detail)
+        return
+    shape = (detail.n_obs, detail.n_var)
+    dtype = np.dtype(matrix.dtype.str)
+    if detail.dense:
+        target = _dense_target(root, detail, dtype)
+        for cells, features in _blocks(*shape):
+            target[cells, features] = matrix[features, cells].T
         return
     appender = CsrAppender(root, "X", shape=shape, data_dtype=dtype, compression=detail.compression)
-    for lo in range(0, shape[0], DENSE_CELLS):
-        block = matrix[:, lo : lo + DENSE_CELLS].T
+    for cells, features in _blocks(*shape):
+        block = matrix[features, cells].T
         rows, cols = np.nonzero(block)
-        appender.append(rows + lo, cols, block[rows, cols])
+        appender.append(rows + cells.start, cols + features.start, block[rows, cols])
     appender.finish()
+
+
+def _write_dense_from_sparse(root: Any, matrix: Any, detail: _Import) -> None:
+    """A sparse features x cells matrix as dense cells x features: as CSR
+    first, on disk through the streaming transpose, then a block of cells at
+    a time from that, entries repeated at a place summed as scipy sums
+    them."""
+    dtype = np.dtype(matrix.dtype.str)
+    with scratch_group(root, "__cistopic_dense__") as scratch:
+        _write_fragments(scratch, "csr", matrix, detail)
+        csr = scratch["csr"]
+        indptr = np.asarray(csr["indptr"][...], dtype=np.int64)
+        target = _dense_target(root, detail, dtype)
+        read = None  # the cells whose entries are held: one read for all their runs of features
+        for cells, features in _blocks(detail.n_obs, detail.n_var):
+            if read != cells:
+                read = cells
+                start, end = int(indptr[cells.start]), int(indptr[cells.stop])
+                cols = np.asarray(csr["indices"][start:end], dtype=np.int64)
+                values = np.asarray(csr["data"][start:end])
+                rows = np.repeat(np.arange(cells.stop - cells.start), np.diff(indptr[cells.start : cells.stop + 1]))
+            block = np.zeros((cells.stop - cells.start, features.stop - features.start), dtype=dtype)
+            keep = (cols >= features.start) & (cols < features.stop)
+            np.add.at(block, (rows[keep], cols[keep] - features.start), values[keep])
+            target[cells, features] = block
 
 
 def _write_uns(uns: Any, detail: _Import, warnings: List[str]) -> None:

@@ -128,9 +128,11 @@ def export_json(
         )
 
 
-def export_image(file: Path, obj: str, out: Optional[Path], console: Console) -> None:
+def export_image(
+    file: Path, obj: str, out: Optional[Path], console: Console, scale: bool = False
+) -> None:
     with _output(file, out, console) as target, open_store(file, "r") as store:
-        export_image_format(store.root, obj=obj, out=target, console=console)
+        export_image_format(store.root, obj=obj, out=target, console=console, scale=scale)
 
 
 __all__ = [
