@@ -52,19 +52,21 @@ Test markers:
 CI (`.github/workflows/tests.yml`) runs on every pull request:
 - the unit suite on Python 3.12 and 3.13, with the coverage floor;
 - a fresh install: the package from a fresh resolution, without the lock,
-  every module imported on the base dependencies alone, and `convert` run.
-  That catches a module-level import of something undeclared; one inside a
-  function is caught only on the paths it runs;
+  every module imported on the base dependencies alone, `convert` run with
+  and without click beside typer, and the docs-accuracy suite run with no
+  click. That catches a module-level import of something undeclared; one
+  inside a function is caught only on the paths it runs;
 - the unit suite at each direct dependency's floor;
 - the `integration` tests of `test_anndata_versions.py` and
   `test_external_readers.py`, each its own job;
 - `workflow lint` (actionlint and zizmor) and `container image`, which
-  builds the Docker image and smoke-tests it. Don't import click: typer
-0.26 and later no longer install it. Compare the enums typer hands back
-(such as `ParameterSource`) by `.name`.
+  builds the Docker image and smoke-tests it.
 
-Neither CI nor the repo runs a linter or formatter. Match the style of the
-surrounding code.
+Don't import click: typer 0.26 and later no longer install it. Compare the
+enums typer hands back (such as `ParameterSource`) by `.name`.
+
+No linter or formatter runs on the code; CI lints only the workflows. Match
+the style of the surrounding code.
 
 ## Architecture
 
@@ -83,7 +85,9 @@ uses `elements/` (the spec, `strings`, and the readers and writers that
     off one, as in a log file or a pipe, it writes no colour, cursor or
     spinner codes, and `console` keeps each message on one line.
   - `raise _fail(e)` prints an exception as the one `Error:` line on stderr
-    and exits 1. `main(argv)` runs the arguments it is given.
+    and exits 1. `main(argv)` runs the arguments it is given and raises
+    `SystemExit` for its caller; run as the command (`argv` None), a failed
+    run ends the process at once (`_leave`), past h5py's teardown.
 - **`commands/`**: one module per command. Each orchestrates its command:
   - planning and refusals;
   - progress output;
@@ -153,7 +157,8 @@ uses `elements/` (the spec, `strings`, and the readers and writers that
   (categorical when values repeat); the loom import uses it. `geojson.py`
   walks a GeoJSON FeatureCollection a feature at a time and measures each
   polygon's centroid and area (Space Ranger 4's cell outlines).
-- **`util/`**: `staging.py` and `path.py` (below), plus `names.py`.
+- **`util/`**: `staging.py` and `path.py` (below), plus `names.py` and
+  `markup.py` (`literal`, below).
   - `path.check_output(output, inputs)` is the one output check, and
     `path.output_target(source, output, inplace)` wraps it for commands with
     `--inplace`.
@@ -208,9 +213,14 @@ These are easy to break without any test noticing straight away:
 - **Escape what the store or the user wrote before Rich prints it.** Rich
   reads `[word]` as a style tag, so `pct_counts[mt]` printed as it is shows
   `pct_counts`, and `[/x]` crashes the command. Member names, labels, paths
-  and attribute values go through `rich.markup.escape`, in messages, status
-  lines and progress descriptions alike. Help text is markup too: a literal
-  `[` there is `\\[` in the source, which the docstring holds as `\[`.
+  and attribute values go through `util/markup.literal`, in messages, status
+  lines, progress descriptions and tree labels alike. It escapes as
+  `rich.markup.escape` does, but a trailing backslash prints once whatever
+  follows. Never write brackets around a value in a template
+  (`obs\\[{literal(column)}]`): a value with an unclosed `[` closes into a
+  tag there; escape the whole `obs[column]` instead. Help text is markup
+  too: a literal `[` there is `\\[` in the source, which the docstring holds
+  as `\[`.
 - **Zarr outputs keep the source's version.**
   - Pass `zarr_format=` to `open_store`. Without it zarr-python writes v3, and a
     v2 input gets silently upgraded.

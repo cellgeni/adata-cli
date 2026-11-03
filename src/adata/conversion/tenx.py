@@ -34,7 +34,6 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import h5py
 import numpy as np
 from rich.console import Console
-from rich.markup import escape
 
 from adata.conversion.base import ConversionPlan, Converter, Options
 from adata.conversion.features import (
@@ -75,6 +74,7 @@ from adata.storage import (
     is_dataset,
     open_store,
 )
+from adata.util.markup import literal
 
 #: What a group must hold to be a matrix, in each layout.
 _V3_KEYS = frozenset({"barcodes", "data", "indices", "indptr", "shape", "features"})
@@ -597,7 +597,7 @@ class TenxExport(Converter):
         ) as out:
             root = store.root
             matrix = describe(resolve(root, detail["path"]))
-            with console.status(f"[cyan]Copying {escape(detail['path'])}...[/]"):
+            with console.status(f"[cyan]Copying {literal(detail['path'])}...[/]"):
                 group = _write_matrix(matrix, out)
             n_obs, n_var = matrix.shape
             group.create_dataset("shape", data=np.array([n_var, n_obs], dtype=np.int32))
@@ -606,7 +606,7 @@ class TenxExport(Converter):
             obs_index, _ = resolve_index(obs, "obs")
             n_text, example = _write_fixed_strings_streamed(group, "barcodes", obs_index, obs)
             if n_text:
-                console.print(f"[yellow]Warning:[/] {escape(_ascii_warning(n_text, 'barcodes', example))}")
+                console.print(f"[yellow]Warning:[/] {literal(_ascii_warning(n_text, 'barcodes', example))}")
             flags = obs.get("filtered_barcodes")
             if is_dataset(flags) and "categories" not in flags.attrs and flags.dtype.kind == "b":
                 # Space Ranger's and Flex's barcodes in the filtered matrix,

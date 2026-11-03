@@ -10,7 +10,6 @@ from typing import Optional, Set, Tuple, List, Dict, Any
 
 import numpy as np
 from rich.console import Console
-from rich.markup import escape
 from rich.progress import (
     Progress,
     SpinnerColumn,
@@ -49,6 +48,7 @@ from adata.storage import (
     write_legacy_categorical,
     zarr_format_of,
 )
+from adata.util.markup import literal
 from adata.util.path import output_target
 from adata.util.staging import check_free_space, disk_size, staged_outputs
 
@@ -975,7 +975,7 @@ def _write_targets(
         console.print(
             "[yellow]Copying unrecognised top-level "
             f"{'keys' if len(passthrough) > 1 else 'key'} verbatim: "
-            f"{escape(', '.join(sorted(passthrough)))}[/]"
+            f"{literal(', '.join(sorted(passthrough)))}[/]"
         )
         tasks.extend(f"copy:{k}" for k in passthrough)
 
@@ -991,7 +991,7 @@ def _write_targets(
         transient=False,
     ) as progress:
         for task in tasks:
-            task_id = progress.add_task(f"[cyan]{verb} {escape(task)}...[/]", total=None)
+            task_id = progress.add_task(f"[cyan]{verb} {literal(task)}...[/]", total=None)
             if task in ("obs", "var"):
                 for target, narrowed in zip(targets, pruned):
                     indices = _axis_idx(target, task)
@@ -1058,7 +1058,7 @@ def _write_targets(
                     )
             progress.update(
                 task_id,
-                description=f"[green]{verb} {escape(task)}[/]",
+                description=f"[green]{verb} {literal(task)}[/]",
                 completed=1,
                 total=1,
             )

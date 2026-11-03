@@ -28,7 +28,6 @@ from typing import Any, Callable, Dict, Iterator, Optional, Tuple
 
 import numpy as np
 from rich.console import Console
-from rich.markup import escape
 
 from adata.elements import spec
 from adata.elements.write import set_shape_attr
@@ -51,6 +50,7 @@ from adata.storage import (
     with_compression,
     zarr_format_of,
 )
+from adata.util.markup import literal
 
 #: Layouts the user can ask for. "sparse" means "whichever sparse encoding
 #: keeps the major axis it already has", so densify/sparsify round-trips.
@@ -774,7 +774,7 @@ def sparsify(
     density = nnz / max(1, n_rows * n_cols)
     if console is not None and density > 0.5:
         console.print(
-            f"[yellow]{escape(name)} is {density:.0%} nonzero; the sparse form is "
+            f"[yellow]{literal(name)} is {density:.0%} nonzero; the sparse form is "
             f"larger than the dense one below about 33%.[/]"
         )
     return nnz, density
@@ -1044,7 +1044,7 @@ def plan_conversion(
             raise ValueError(f"{name}: {message}. Pass --force to convert anyway.")
         if console is not None:
             colour = "dim" if report.lossless else "yellow"
-            console.print(f"[{colour}]{escape(f'{name}: {message}')}[/]")
+            console.print(f"[{colour}]{literal(f'{name}: {message}')}[/]")
 
     return Plan(src, target_layout, data_dtype, idx_dtype, ptr_dtype, report)
 

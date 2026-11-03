@@ -15,11 +15,11 @@ from pathlib import Path
 from typing import Any, Iterator, Optional, Tuple
 
 from rich.console import Console
-from rich.markup import escape
 from rich.tree import Tree
 
 from adata.core.info import format_type_info, get_entry_type
 from adata.storage import is_dataset, is_group, open_store
+from adata.util.markup import literal
 from adata.util.path import norm_path
 
 
@@ -46,9 +46,9 @@ def _describe(obj: Any, long: bool) -> str:
     if shape:
         bits.append(f"[dim]{tuple(shape)}[/]")
     if is_dataset(obj) and getattr(obj, "dtype", None) is not None:
-        bits.append(f"[dim]{escape(str(obj.dtype))}[/]")
+        bits.append(f"[dim]{literal(str(obj.dtype))}[/]")
     if info["encoding"]:
-        bits.append(f"[dim]{escape(str(info['encoding']))}[/]")
+        bits.append(f"[dim]{literal(str(info['encoding']))}[/]")
     return " " + " ".join(bits)
 
 
@@ -97,10 +97,10 @@ def _print_tree(
     long: bool,
 ) -> None:
     root_label = f"{label}:{entry_path}" if entry_path else label
-    tree = Tree(f"[bold]{escape(root_label)}[/]")
+    tree = Tree(f"[bold]{literal(root_label)}[/]")
 
     if is_dataset(root):
-        tree.add(f"[bright_white]{escape(entry_path or label)}[/]{_describe(root, long)}")
+        tree.add(f"[bright_white]{literal(entry_path or label)}[/]{_describe(root, long)}")
         console.print(tree)
         return
 
@@ -110,9 +110,9 @@ def _print_tree(
         parent = nodes.get(parent_path, tree)
         if is_group(obj):
             nodes[path] = parent.add(
-                f"[bold yellow]{escape(name)}/[/]{_describe(obj, long)}"
+                f"[bold yellow]{literal(name)}/[/]{_describe(obj, long)}"
             )
         else:
-            parent.add(f"[bright_white]{escape(name)}[/]{_describe(obj, long)}")
+            parent.add(f"[bright_white]{literal(name)}[/]{_describe(obj, long)}")
 
     console.print(tree)

@@ -5,7 +5,6 @@ from typing import Any, List, Optional, Sequence
 
 from rich.console import Console
 import typer
-from rich.markup import escape
 
 from adata.conversion import FORMATS, Options, writable_formats
 from adata.core.recast import LAYOUTS
@@ -27,6 +26,7 @@ from adata.commands import (
 )
 
 from adata.commands import export_image as export_image_cmd
+from adata.util.markup import literal
 
 app = typer.Typer(
     help="Streaming CLI for huge AnnData .h5ad and .zarr stores "
@@ -65,7 +65,7 @@ def _fail(error: BaseException) -> typer.Exit:
     and the command line, which Rich would read as markup: they are escaped.
     """
     message = error.args[0] if isinstance(error, KeyError) and error.args else error
-    console.print(f"[bold red]Error:[/] {escape(str(message))}")
+    console.print(f"[bold red]Error:[/] {literal(str(message))}")
     return typer.Exit(code=1)
 
 
@@ -1816,11 +1816,16 @@ def import_image_cmd(
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
-    """Run the CLI on `argv`, or on the command line when it is None."""
+    """Run the CLI on `argv`, or on the command line when it is None.
+
+    Run as the `adata` command, a failed run ends the process at once
+    (`_leave`). Given `argv`, it raises SystemExit as Click does, for the
+    caller, a test or a notebook, to catch.
+    """
     try:
         app(args=list(argv) if argv is not None else None, standalone_mode=True)
     except SystemExit as done:
-        if isinstance(done.code, int) and done.code != 0:
+        if argv is None and isinstance(done.code, int) and done.code != 0:
             _leave(done.code)
         raise
 

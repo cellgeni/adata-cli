@@ -16,7 +16,6 @@ from typing import Any, Callable, Iterator, Optional, Tuple
 import h5py
 import numpy as np
 from rich.console import Console
-from rich.markup import escape
 
 from adata.formats.array import IMPORT_CHUNK_ELEMENTS, import_npy
 from adata.formats.dataframe import import_dataframe
@@ -26,6 +25,7 @@ from adata.formats.mtx import read_header
 from adata.formats.sparse import import_mtx
 from adata.formats.validate import check_target, validate_dimensions
 from adata.storage import copy_path, copy_store_contents, detect_backend, open_store
+from adata.util.markup import literal
 from adata.util.path import output_target
 from adata.util.staging import check_free_space, disk_size, staged_outputs
 
@@ -47,13 +47,13 @@ def _copy_source(
     if src_backend == dst_backend:
         copy_path(file, temp)
         if not inplace:
-            console.print(f"[dim]Copied {escape(str(file))} → {escape(str(output))}[/]")
+            console.print(f"[dim]Copied {literal(str(file))} → {literal(str(output))}[/]")
         return
 
     with open_store(file, "r") as src_store, open_store(temp, "w") as dst_store:
         copy_store_contents(src_store.root, dst_store.root)
     console.print(
-        f"[dim]Converted {escape(str(file))} ({src_backend}) → {escape(str(output))} ({dst_backend})[/]"
+        f"[dim]Converted {literal(str(file))} ({src_backend}) → {literal(str(output))} ({dst_backend})[/]"
     )
 
 

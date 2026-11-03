@@ -38,8 +38,8 @@ installed by the `integration` tests in environments of their own.
 | `src/adata/elements/` | The AnnData on-disk spec: encodings, readers for every layout since anndata 0.7, writers of the current one |
 | `src/adata/storage/` | One interface over h5py and zarr |
 | `src/adata/conversion/` | `adata convert`: one module per format, through AnnData |
-| `src/adata/formats/` | The file types of `export` and `import`: npy, Matrix Market, CSV, JSON, images; and what the converters read: Parquet, GeoJSON polygons, pycisTopic's pickles |
-| `src/adata/util/` | Output staging, path checks, names |
+| `src/adata/formats/` | The file types of `export` and `import`: npy, Matrix Market, CSV, JSON, images, and the check of an element's kind and dimensions before an import writes it; what the converters read: Parquet, GeoJSON polygons, pycisTopic's pickles; and pandas frames written as anndata writes them |
+| `src/adata/util/` | Output staging, path checks, names, and `literal` for putting a value into Rich markup |
 | `tests/` | The test suite; [Testing](reference/testing.md) describes it |
 | `benchmarks/` | The comparative benchmark against anndata and scanpy |
 | `docs/` | This site |
@@ -65,7 +65,9 @@ element faithfully).
   which is what lets output pipe cleanly. Off a terminal, in a log file or a
   pipe, neither writes colour, cursor or spinner codes, and a message on
   stderr stays on one line. `raise _fail(e)` turns an exception into that
-  line, `Error: ...`, and exit code 1. `--chunk` and `--no-space-check` are
+  line, `Error: ...`, and exit code 1. `main(argv)` runs the arguments it is
+  given and raises `SystemExit` for the caller; run as the command, a failed
+  run ends the process at once. `--chunk` and `--no-space-check` are
   defined once, as `_chunk_option` and `_space_check_option`; a new command
   reuses them.
 - **`commands/`** orchestrates one command: what to read, what to refuse, what
@@ -146,9 +148,12 @@ before changing anything that writes:
 - **Escape what the store or the user wrote before Rich prints it.** Rich
   reads `[word]` as a style tag: printed as it is, `pct_counts[mt]` shows as
   `pct_counts`, and `[/x]` crashes the command. Names, labels, paths and
-  attribute values go through `rich.markup.escape` in every message, status
-  line and progress description. Help text is markup too, so a literal `[`
-  in a docstring is written `\\[`.
+  attribute values go through `util/markup.literal` in every message, status
+  line, progress description and tree label; it escapes as
+  `rich.markup.escape` does, but a trailing backslash prints once whatever
+  follows. Never write brackets around a value in a template: a value with
+  an unclosed `[` closes into a tag there. Help text is markup too, so a
+  literal `[` in a docstring is written `\\[`.
 - **Zarr outputs keep the source's version.** Pass `zarr_format=` to
   `open_store`; without it zarr-python writes v3, upgrading a v2 input.
   `concat` uses the version its Zarr inputs share.
@@ -204,7 +209,8 @@ the lock, imports every module and runs `convert`, so a module-level import
 of something undeclared fails there. Don't import click, which typer 0.26
 and later no longer install. House style: test names read as sentences, a regression test's
 docstring says what used to go wrong, and comments say why. No linter or
-formatter runs; match the code around you.
+formatter runs on the code (CI lints only the workflows); match the code
+around you.
 
 [Testing](reference/testing.md) has the detail: what each file covers, what the
 guards count and why, and the anndata releases checked.

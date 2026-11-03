@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from rich.console import Console
-from rich.markup import escape
 
 from adata.conversion.base import ConversionPlan, Converter, Options
 from adata.elements.write import ensure_anndata_skeleton
@@ -21,6 +20,7 @@ from adata.storage import (
     ensure_anndata_root_attrs,
     open_store,
 )
+from adata.util.markup import literal
 
 
 def _backend(fmt: str) -> str:
@@ -83,7 +83,7 @@ class AnnDataCopy(Converter):
             copy_attrs(src.root.attrs, dst.root.attrs, target_backend=backend)
             ensure_anndata_root_attrs(dst.root)
             for key in src.root.keys():
-                with console.status(f"[cyan]Copying {escape(key)}...[/]"):
+                with console.status(f"[cyan]Copying {literal(key)}...[/]"):
                     copy_tree(
                         src.root[key], dst.root, key,
                         compression=detail["compression"],

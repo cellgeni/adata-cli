@@ -29,8 +29,9 @@ the names GitHub shows:
 | `workflow lint` | [actionlint](https://github.com/rhysd/actionlint) and [zizmor](https://docs.zizmor.sh) over the workflows |
 | `container image` | Builds the Docker image and runs `.github/scripts/smoke-image.sh` against it |
 
-The last two jobs' names are older than what they check, and renaming a job
-renames the check a branch rule requires, so they stay. `test_concat_versions.py`
+The compatibility and external-reader jobs' names are older than what they
+check, and renaming a job renames the check a branch rule requires, so they
+stay. `test_concat_versions.py`
 is an `integration` test that no job runs; run it locally.
 
 The fresh-install job exists because the locked suite cannot see a
@@ -61,7 +62,7 @@ inside every release before PyPI has it.
 | `test_staging.py` | `util/staging.py` on its own: write beside and rename into place, several outputs together, a failed swap put back, leftovers refused rather than deleted |
 | `test_write_safety.py` | Every way a command used to destroy or corrupt a store while reporting success, or leave a half-written one: outputs that alias the input, failed selections, `--inplace`, failed closes, a full disk, two runs on one output, SIGTERM |
 | `test_formats.py` | `.npy`, `.mtx`, image and JSON export/import, including their failure modes |
-| `test_cli_output.py` | What the CLI prints: names, labels and paths with square brackets as the store spells them, a failure as one plain `Error:` line in a log file, help text that keeps its brackets, `main(argv)` |
+| `test_cli_output.py` | What the CLI prints: names, labels and paths with square brackets or a trailing backslash as the store spells them (`util/markup.literal`), a failure as one plain `Error:` line in a log file, help text that keeps its brackets, `main(argv)` raising rather than ending the process |
 | `test_validate.py` | Dimension validation for every axis-bearing path, including `raw/` |
 | `test_invariants.py` | Relationships that must hold for any data: subsetting everything is the identity, split partitions exactly, concat undoes split |
 | `test_anndata_roundtrip.py` | anndata writes the fixtures, reads back our output |
@@ -97,7 +98,7 @@ inside every release before PyPI has it.
 | `test_scope.py` | SCope looms, read as pySCENIC's `export2loom` writes them and written with `--scope` (round trips, plain AnnData, refusals, markers): regulons as dataframes, embeddings and clusterings named from `MetaData`, plain or compressed `MetaData`, region looms, R's logicals and factors, renamed fields, small blocks |
 | `test_table.py` | The streaming CSV reader against pandas: column types, quoting, row subsets, blocks, refusals |
 | `test_mtx_codec.py`, `test_csr_build.py` | The streaming Matrix Market reader and writer against scipy, and the bucket sort they and `recast` share |
-| `test_external_readers.py` | Every converter checked by the reader people use, each in its own uv environment pinned in `reference_stores.ORACLES` (`integration`): 10x HDF5 and MTX and CellBender by scanpy, and our 10x export by PyTables; Parse runs by Parse's own scanpy recipe; looms by anndata with loompy (the pySCENIC tutorial's recipe for SCope looms); anndata's `read_csv`, `read_text` and `read_hdf`; a pandas 1.5 pycisTopic pickle read back there; mudata (a file it writes read as it reads it; ours read by it); Visium by squidpy, Visium HD by scanpy with pandas and pyarrow, its segmented cells by 10x's geopandas recipe, Xenium by 10x's scanpy recipe; scanpy's `rank_genes_groups` through every conversion |
+| `test_external_readers.py` | Every converter checked by the reader people use, each in its own uv environment pinned in `reference_stores.ORACLES` (`integration`): 10x HDF5 and MTX and CellBender by scanpy, and our 10x export by PyTables; Parse runs by Parse's own scanpy recipe; looms by anndata with loompy (the pySCENIC tutorial's recipe for SCope looms); anndata's `read_csv`, `read_text` and `read_hdf`; a pandas 1.5 pycisTopic pickle read back there; mudata (a file it writes read as it reads it; ours read by it); Visium by squidpy, Visium HD by scanpy with pandas and pyarrow, its segmented cells by 10x's geopandas recipe, Xenium by 10x's scanpy recipe; scanpy's `rank_genes_groups` through h5ad to Zarr v2 and v3, Zarr to h5ad and a recompressed h5ad |
 | `test_performance.py` | Complexity guards -- what an operation costs, not how long it takes (see below); its fixtures are in `perf_fixtures.py` |
 | `test_benchmark_harness.py` | That the benchmark's measurement is trustworthy, and that each run compares with the release before it |
 | `test_release_pipeline.py` | The workflows and the Dockerfile: which jobs publish in each kind of run, which hold a write token and what they run, pinned actions and base image, no untrusted value pasted into a script, each Python leg on its own Python |

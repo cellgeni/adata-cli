@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import List, Optional
 
 from rich.console import Console
-from rich.markup import escape
 
 from adata.conversion import (
     Options,
@@ -24,6 +23,7 @@ from adata.conversion import (
     output_format,
 )
 from adata.storage import check_hdf5_inputs
+from adata.util.markup import literal
 from adata.util.path import check_output, is_zarr_path, same_path
 from adata.util.staging import check_free_space, disk_size, staged_outputs
 
@@ -97,13 +97,13 @@ def convert_store(
     ):
         check_free_space(plan.outputs[0], lambda: disk_size(file), check=space_check)
 
-    console.print(f"[cyan]Converting[/] {escape(str(file))}: {escape(plan.summary)}")
+    console.print(f"[cyan]Converting[/] {literal(str(file))}: {literal(plan.summary)}")
     for warning in plan.warnings:
-        console.print(f"[yellow]Warning:[/] {escape(warning)}")
+        console.print(f"[yellow]Warning:[/] {literal(warning)}")
 
     with staged_outputs(plan.outputs) as staged:
         converter.write(plan, staged, console)
 
     for out in plan.outputs:
-        console.print(f"[green]Wrote[/] {escape(str(out))}")
+        console.print(f"[green]Wrote[/] {literal(str(out))}")
     return plan.outputs

@@ -12,10 +12,10 @@ from pathlib import Path
 from typing import List, Optional
 
 from rich.console import Console
-from rich.markup import escape
 
 from adata.elements.write import ensure_anndata_skeleton, write_dataframe_header
 from adata.storage import open_store
+from adata.util.markup import literal
 from adata.util.path import check_output
 from adata.util.staging import staged_outputs
 
@@ -92,6 +92,6 @@ def create_store(
             ensure_anndata_skeleton(root)
 
     console.print(
-        f"[green]Created[/] {escape(str(output))} "
+        f"[green]Created[/] {literal(str(output))} "
         f"({len(obs_index)} obs x {len(var_index)} var, empty)"
     )

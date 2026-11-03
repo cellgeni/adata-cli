@@ -54,7 +54,6 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequ
 import h5py
 import numpy as np
 from rich.console import Console
-from rich.markup import escape
 
 from adata.conversion import scope
 from adata.conversion.base import ConversionPlan, Converter, Options
@@ -97,6 +96,7 @@ from adata.storage import (
     is_zarr_group,
     open_store,
 )
+from adata.util.markup import literal
 from adata.util.names import claim, count_duplicates, make_index_unique, storable
 
 #: Attributes that name the cells, the gene ids and the gene symbols, in the
@@ -490,7 +490,7 @@ class LoomImport(Converter):
                 if not places:
                     continue
                 ds = handle["matrix"] if loom_name == "" else handle["layers"][loom_name]
-                with console.status(f"[cyan]Reading {escape(loom_name or 'matrix')}...[/]"):
+                with console.status(f"[cyan]Reading {literal(loom_name or 'matrix')}...[/]"):
                     _write_matrix(ds, root, places, detail)
 
 
@@ -948,11 +948,11 @@ class LoomExport(Converter):
             staged[0], "w"
         ) as out:
             root = store.root
-            with console.status(f"[cyan]Writing {escape(detail.matrix)} dense...[/]"):
+            with console.status(f"[cyan]Writing {literal(detail.matrix)} dense...[/]"):
                 _export_matrix(resolve(root, detail.matrix), out, "matrix")
             layers = out.create_group("layers")
             for name, where in detail.layers:
-                with console.status(f"[cyan]Writing layer {escape(name)} dense...[/]"):
+                with console.status(f"[cyan]Writing layer {literal(name)} dense...[/]"):
                     _export_matrix(resolve(root, where), layers, name)
 
             with console.status("[cyan]Writing the attributes...[/]"):

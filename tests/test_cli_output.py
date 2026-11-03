@@ -244,10 +244,79 @@ def test_the_deprecated_entry_point_warns_on_stderr_and_runs_its_arguments(
     assert "'h5ad' command is deprecated" in captured.err
 
 
-def test_main_exits_with_the_failing_code(monkeypatch, tmp_path):
-    """A failed run still leaves through `_leave`, with its exit code."""
+def test_main_run_from_the_command_line_leaves_with_the_failing_code(monkeypatch, tmp_path):
+    """Run as the `adata` command, a failed run still ends through `_leave`."""
     codes = []
     monkeypatch.setattr(cli, "_leave", lambda code: codes.append(code))
+    monkeypatch.setattr(sys, "argv", ["adata", "view", str(tmp_path / "missing.h5ad")])
     with pytest.raises(SystemExit):
-        cli.main(["view", str(tmp_path / "missing.h5ad")])
+        cli.main()
     assert codes == [2]
+
+
+@pytest.mark.parametrize(
+    "value", ["plain", "pct_counts[mt]", "[red]b", "x[/y]", "x[red", "a]b", "end\\", "two\\\\", "a\\[b]", "[link=x]y"]
+)
+@pytest.mark.parametrize(
+    "template,expected",
+    [
+        ("[cyan]{}[/]", "{}"),
+        ("{}: tail", "{}: tail"),
+        ("'{}'", "'{}'"),
+        ("[dim]{}[/dim] [green]ok[/]", "{} ok"),
+    ],
+)
+def test_literal_prints_any_value_as_it_is_whatever_follows_it(value, template, expected):
+    """F042, from the review: `rich.markup.escape` doubles a trailing
+    backslash so a tag after it still counts, and where text followed instead
+    the name printed with two (`Skipping obsm/emb\\\\: ...`).
+
+    A template never writes brackets around a value (`obs\\[{}]`): a value
+    with an unclosed `[` would close into a tag there, so split escapes the
+    whole `obs[column]`."""
+    from rich.text import Text
+
+    from adata.util.markup import literal
+
+    assert Text.from_markup(template.format(literal(value))).plain == expected.format(value)
+
+
+def test_split_names_a_column_holding_an_unclosed_bracket_as_it_is(tmp_path):
+    """F042, from the review: `obs\\[{column}]` closed a column `x[red` into the
+    tag `[red]`, so the header read `Splitting on obs[x` in red."""
+    obs = pd.DataFrame({"x[red": pd.Categorical(["a", "a", "b"]), "y\\": ["u", "v", "v"]},
+                       index=["c0", "c1", "c2"])
+    path = tmp_path / "open.h5ad"
+    ad.AnnData(np.ones((3, 2), dtype="float32"), obs=obs).write_h5ad(path)
+    for column in ad.read_h5ad(path).obs.columns:
+        result = runner.invoke(
+            app, ["split", str(path), "--by", column, "-o", str(tmp_path / "out"), "--dry-run"]
+        )
+        assert result.exit_code == 0, result.output
+        assert f"Splitting on obs[{column}]: 2 groups" in result.stderr
+
+
+def test_a_name_ending_in_a_backslash_prints_with_one(tmp_path):
+    """F042, from the review: view printed `Path: uns/slash\\\\`."""
+    path = tmp_path / "slash.h5ad"
+    adata = ad.AnnData(np.ones((2, 2), dtype="float32"))
+    adata.uns["slash\\"] = np.arange(3)
+    adata.write_h5ad(path)
+    assert "slash\\" in ad.read_h5ad(path).uns
+    viewed = runner.invoke(app, ["view", str(path), "uns/slash\\"])
+    assert viewed.exit_code == 0, viewed.output
+    assert "Path: uns/slash\\\n" in viewed.stdout
+    listed = runner.invoke(app, ["ls", str(path), "uns"])
+    assert listed.exit_code == 0, listed.output
+    assert "slash\\\n" in listed.stdout and "slash\\\\" not in listed.stdout
+
+
+def test_main_given_arguments_raises_on_failure_rather_than_ending_the_process(monkeypatch):
+    """F161, from the review: a failure in `main(argv)` ended the process with
+    os._exit, so a test or notebook embedding the CLI died with it."""
+    left = []
+    monkeypatch.setattr(cli, "_leave", lambda code: left.append(code))
+    with pytest.raises(SystemExit) as done:
+        cli.main(["view", "/no/such/store.h5ad"])
+    assert done.value.code == 2
+    assert left == []

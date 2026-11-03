@@ -38,7 +38,6 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 import h5py
 import numpy as np
 from rich.console import Console
-from rich.markup import escape
 
 from adata.conversion import tenx
 from adata.conversion.base import ConversionPlan, Converter, Options
@@ -64,6 +63,7 @@ from adata.elements.write import (
 )
 from adata.formats.mtx import EntryMap, iter_matrix_entries
 from adata.storage import create_dataset, open_store
+from adata.util.markup import literal
 
 #: Datasets of a 0.2 matrix group that are the matrix, not a latent.
 _MATRIX_KEYS = frozenset({
@@ -580,7 +580,7 @@ class CellbenderImport(Converter):
                 )
 
             if detail.raw is not None:
-                with console.status(f"[cyan]Reading the raw counts of {escape(detail.raw.path.name)}...[/]"):
+                with console.status(f"[cyan]Reading the raw counts of {literal(detail.raw.path.name)}...[/]"):
                     _write_raw(
                         detail.raw, roots, detail.targets, n_out, matrix.n_features, group,
                     )

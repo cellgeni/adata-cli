@@ -27,7 +27,6 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequ
 import h5py
 import numpy as np
 from rich.console import Console
-from rich.markup import escape
 
 from adata.core.info import axis_len
 from adata.core.subset import _open_output_limit, aligned_rows
@@ -66,6 +65,7 @@ from adata.storage import (
     open_store,
     zarr_format_of,
 )
+from adata.util.markup import literal
 from adata.util.names import natural_sorted
 from adata.util.staging import check_free_space, disk_size, staged_outputs
 
@@ -559,7 +559,7 @@ def _concat_categorical(
     )
     if any(ordered) and not keeps_order:
         console.print(
-            f"[yellow]Column {escape(repr(name))}: the inputs disagree on its category order, "
+            f"[yellow]Column {literal(repr(name))}: the inputs disagree on its category order, "
             "so it is written unordered (anndata keeps no order either).[/]"
         )
     lookup = {category: i for i, category in enumerate(categories.tolist())}
@@ -724,8 +724,8 @@ def _concat_obs_column(
         _concat_text(parent, name, column, lengths)
     else:
         console.print(
-            f"[yellow]Dropping column {escape(repr(name))}: "
-            f"cannot concatenate encodings {escape(str(sorted({kind for _, kind in kinds})))}[/]"
+            f"[yellow]Dropping column {literal(repr(name))}: "
+            f"cannot concatenate encodings {literal(str(sorted({kind for _, kind in kinds})))}[/]"
         )
         return False
     return True
@@ -1282,13 +1282,13 @@ def _concat_obsm(
         return True
     kinds = {_matrix_kind(s) for s in inputs.each(path)}
     if "other" in kinds:
-        console.print(f"[yellow]Skipping obsm/{escape(name)}: not an array, or not a dataframe, in every input[/]")
+        console.print(f"[yellow]Skipping obsm/{literal(name)}: not an array, or not a dataframe, in every input[/]")
         return False
 
     widths = {_trailing_shape(s) for s in inputs.each(path)}
     if len(widths) != 1:
         console.print(
-            f"[yellow]Skipping obsm/{escape(name)}: inputs disagree on shape {sorted(widths)}[/]"
+            f"[yellow]Skipping obsm/{literal(name)}: inputs disagree on shape {sorted(widths)}[/]"
         )
         return False
     if len(kinds) != 1:
@@ -1509,7 +1509,7 @@ def _write_pairwise(
         return
     enc = spec.encoding_type(obj)
     if enc not in spec.SPARSE_TYPES:
-        console.print(f"[yellow]Skipping varp/{escape(name)}: neither an array nor a sparse matrix[/]")
+        console.print(f"[yellow]Skipping varp/{literal(name)}: neither an array nor a sparse matrix[/]")
         return
     if len(take) == _shape(obj)[0] and np.array_equal(take, np.arange(len(take))):
         copy_tree(obj, parent, name)
@@ -1589,7 +1589,7 @@ def _write_varm(
                 _write_var_column(frame, column, obj[column], take, obj)
             set_column_order(frame, columns)
         else:
-            console.print(f"[yellow]Skipping varm/{escape(name)}: neither an array nor a dataframe[/]")
+            console.print(f"[yellow]Skipping varm/{literal(name)}: neither an array nor a dataframe[/]")
 
 
 def _write_varp(
@@ -1901,10 +1901,10 @@ def concat_on_disk(
 
         console.print(
             f"[cyan]Concatenating {len(files)} stores: "
-            f"{n_obs} obs x {n_var} var ({escape(join)} join)[/]"
+            f"{n_obs} obs x {n_var} var ({literal(join)} join)[/]"
         )
         for f, key, count in zip(files, input_keys, obs_counts):
-            console.print(f"  [dim]{escape(str(key))}[/]: {count} obs from {escape(f.name)}")
+            console.print(f"  [dim]{literal(str(key))}[/]: {count} obs from {literal(f.name)}")
 
         if len(set(target_obs)) != len(target_obs):
             console.print(
@@ -1962,7 +1962,7 @@ def concat_on_disk(
             if any(inputs.get(i, "raw") is not None for i in range(len(inputs))):
                 console.print("[yellow]Dropping raw/: not concatenated.[/]")
 
-    console.print(f"[green]Wrote[/] {escape(str(output))} ({n_obs} obs x {n_var} var)")
+    console.print(f"[green]Wrote[/] {literal(str(output))} ({n_obs} obs x {n_var} var)")
 
 
 def _write_obs(
@@ -2122,7 +2122,7 @@ def _write_matrices(
         path = f"layers/{name}"
         if not all(layer is not None for layer in inputs.each(path)):
             console.print(
-                f"[yellow]Skipping layer {escape(repr(name))}: not present in every input[/]"
+                f"[yellow]Skipping layer {literal(repr(name))}: not present in every input[/]"
             )
             continue
         _concat_matrix(layers, name, inputs, path, col_maps, row_counts, n_obs, n_var,
@@ -2150,7 +2150,7 @@ def _write_obsm(
         path = f"obsm/{name}"
         if not all(entry is not None for entry in inputs.each(path)):
             console.print(
-                f"[yellow]Skipping obsm/{escape(name)}: not present in every input[/]"
+                f"[yellow]Skipping obsm/{literal(name)}: not present in every input[/]"
             )
             continue
         _concat_obsm(

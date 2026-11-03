@@ -24,13 +24,13 @@ from typing import Any, Iterator, List, Optional, Sequence, Tuple
 import h5py
 import numpy as np
 from rich.console import Console
-from rich.markup import escape
 
 from adata.conversion.base import ConversionPlan, Converter, Options
 from adata.conversion.dense import write_dense_matrix
 from adata.conversion.features import STRING_STEP, Target, write_obs_index, write_var
 from adata.elements.write import ensure_anndata_skeleton, set_column_order, write_mapping, write_scalar
 from adata.storage import COMPRESSIONS, open_store
+from adata.util.markup import literal
 from adata.util.names import count_duplicates, make_index_unique
 
 EXTENSIONS = (".hdf5", ".he5", ".hdf")
@@ -235,7 +235,7 @@ class Hdf5Import(Converter):
             for axis, path in (("obs_names", detail.obs_names), ("var_names", detail.var_names)):
                 if path is not None:
                     write_scalar(meta, axis, path)
-            with console.status(f"[cyan]Reading {escape(detail.key)}...[/]"):
+            with console.status(f"[cyan]Reading {literal(detail.key)}...[/]"):
                 write_dense_matrix(
                     handle[detail.key], [(root, "X")], cells_axis=1 if detail.transpose else 0,
                     dense=detail.dense, compression=detail.compression,

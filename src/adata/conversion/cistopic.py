@@ -38,7 +38,6 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 from rich.console import Console
-from rich.markup import escape
 
 from adata.conversion.base import ConversionPlan, Converter, Options
 from adata.conversion.features import STRING_STEP, Target, write_obs_index, write_var
@@ -57,6 +56,7 @@ from adata.elements.write import (
 )
 from adata.formats import pickled
 from adata.storage import COMPRESSIONS, create_dataset, is_zarr_group, open_store, with_compression
+from adata.util.markup import literal
 from adata.util.names import claim, count_duplicates, make_index_unique, sanitize_label
 
 EXTENSIONS = (".pkl", ".pickle", ".pkl.gz", ".pickle.gz")
@@ -211,7 +211,7 @@ class CistopicImport(Converter):
                 write_dense(root[key], label, values)
             _write_uns(root["uns"], detail, warnings)
         for message in warnings:
-            console.print(f"[yellow]Warning:[/] {escape(message)}")
+            console.print(f"[yellow]Warning:[/] {literal(message)}")
 
 
 def _is_sparse(value: Any) -> bool:

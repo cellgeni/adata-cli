@@ -2,11 +2,11 @@ from pathlib import Path
 from typing import Any, Optional
 
 from rich.console import Console
-from rich.markup import escape
 from rich.tree import Tree
 
 from adata.core.info import axis_len, format_type_info, get_entry_type
 from adata.storage import is_dataset, is_group, open_store
+from adata.util.markup import literal
 
 # Preferred display order for top-level keys
 KEY_ORDER = ["X", "obs", "var", "obsm", "varm", "layers", "obsp", "varp", "uns"]
@@ -69,9 +69,9 @@ def show_info(
                     ]
                     if sub_keys and key != "X":
                         out.print(
-                            f"\t[bold yellow]{escape(key)}:[/]\t"
+                            f"\t[bold yellow]{literal(key)}:[/]\t"
                             + ", ".join(
-                                f"[bright_white]{escape(sub)}[/]" for sub in sub_keys
+                                f"[bright_white]{literal(sub)}[/]" for sub in sub_keys
                             )
                         )
 
@@ -90,7 +90,7 @@ def _show_types_tree(
     Names come from the store and are escaped: Rich would read the `[mt]` of
     `pct_counts[mt]` as a style tag and drop it.
     """
-    tree = Tree(f"[bold]{escape(root_label)}[/]")
+    tree = Tree(f"[bold]{literal(root_label)}[/]")
 
     # Define max depth for each top-level group
     max_depth_map = {
@@ -117,11 +117,11 @@ def _show_types_tree(
 
         if is_dataset(obj):
             shape_str = f"[dim]{obj.shape}[/]" if obj.shape else ""
-            node_text = f"[bright_white]{escape(name)}[/] {shape_str} {type_str}"
+            node_text = f"[bright_white]{literal(name)}[/] {shape_str} {type_str}"
             parent_tree.add(node_text)
         else:
             # Group
-            node_text = f"[bold yellow]{escape(name)}/[/] {type_str}"
+            node_text = f"[bold yellow]{literal(name)}/[/] {type_str}"
             subtree = parent_tree.add(node_text)
 
             # Recurse only if within allowed depth
@@ -171,19 +171,19 @@ def _show_object_info(f: Any, entry_path: str, console: Console) -> None:
     entry = f[entry_path]
     info = get_entry_type(entry)
 
-    console.print(f"\n[bold cyan]Path:[/] {escape(entry_path)}")
-    console.print(f"[bold cyan]Type:[/] {escape(info['type'])}")
+    console.print(f"\n[bold cyan]Path:[/] {literal(entry_path)}")
+    console.print(f"[bold cyan]Type:[/] {literal(info['type'])}")
 
     if info["encoding"]:
-        console.print(f"[bold cyan]Encoding:[/] {escape(str(info['encoding']))}")
+        console.print(f"[bold cyan]Encoding:[/] {literal(str(info['encoding']))}")
 
     if info["shape"]:
         console.print(f"[bold cyan]Shape:[/] {info['shape']}")
 
     if info["dtype"]:
-        console.print(f"[bold cyan]Dtype:[/] {escape(info['dtype'])}")
+        console.print(f"[bold cyan]Dtype:[/] {literal(info['dtype'])}")
 
-    console.print(f"[bold cyan]Details:[/] {escape(info['details'])}")
+    console.print(f"[bold cyan]Details:[/] {literal(info['details'])}")
 
     # Show attributes if any
     if entry.attrs:
@@ -192,7 +192,7 @@ def _show_object_info(f: Any, entry_path: str, console: Console) -> None:
             v_str = v.decode("utf-8") if isinstance(v, bytes) else str(v)
             if len(v_str) > 80:
                 v_str = v_str[:77] + "..."
-            console.print(f"  [dim]{escape(k)}:[/] {escape(v_str)}")
+            console.print(f"  [dim]{literal(k)}:[/] {literal(v_str)}")
 
     # If it's a group, show children
     if is_group(entry):
@@ -207,4 +207,4 @@ def _show_object_info(f: Any, entry_path: str, console: Console) -> None:
                 child_entry = entry[child_name]
                 child_info = get_entry_type(child_entry)
                 type_str = format_type_info(child_info)
-                console.print(f"  [bright_white]{escape(child_name)}[/] {type_str}")
+                console.print(f"  [bright_white]{literal(child_name)}[/] {type_str}")

@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from rich.console import Console
-from rich.markup import escape
 
 from adata.core.recast import (
     DEFAULT_CHUNK,
@@ -29,6 +28,7 @@ from adata.core.recast import (
 from adata.elements import spec
 from adata.elements.write import ensure_anndata_skeleton
 from adata.storage import copy_tree, detect_backend, is_dataset, is_group, open_store
+from adata.util.markup import literal
 from adata.util.path import output_target
 from adata.util.staging import check_free_space, disk_size, staged_outputs
 
@@ -137,7 +137,7 @@ def recast_store(
 
             console.print(
                 f"[cyan]Converting {len(targets)} matrix/matrices:[/] "
-                + escape(", ".join(targets))
+                + literal(", ".join(targets))
             )
 
             with open_store(temp, "w", zarr_format=zarr_format) as dst_store:
@@ -155,9 +155,9 @@ def recast_store(
                 ensure_anndata_skeleton(dst)
 
     if inplace:
-        console.print(f"[green]Converted[/] {escape(str(file))}")
+        console.print(f"[green]Converted[/] {literal(str(file))}")
     else:
-        console.print(f"[green]Wrote[/] {escape(str(dst_path))}")
+        console.print(f"[green]Wrote[/] {literal(str(dst_path))}")
 
 
 def _extra(plan: Plan) -> float:
