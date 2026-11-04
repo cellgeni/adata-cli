@@ -7,6 +7,7 @@ moves; the plan of record for the current item is in the section below.
 
 | Version | What | Issues |
 |---|---|---|
+| 0.17.6 | Audit fixes, waves 3 and 4 (streaming): reads and writes follow the source's chunks and Zarr v3 shards, each shard written once; `recast` checks and converts in `--chunk` blocks; `split`'s memory no longer grows with its groups; pickle arrays checked before use; 16-bit images export as they are; plain-line logs and names printed as stored; h5py >= 3.16 | #96, #97, #101, #103 |
 | 0.17.5 | Audit fixes, wave 2 (fidelity): scanpy's marker genes and anndata 0.7 files survive every copy, data held outside an h5ad refused; subset/split keep every named row and subset every element as anndata; concat takes any number of inputs in anndata's order; 10x, MTX, Parse, CellBender, loom, SCope and MuData fixes; release pipeline hardened, image non-root; zarr >= 3.2 | #93, #94, #95, #99, #100, #102 |
 | 0.17.4 | Audit fixes, wave 1 (data safety): every writer staged and checked, close errors fail the command, `--chunk` at least 1, a free-space check; text/MTX/dense imports refuse what they cannot read; concat refuses repeated var names and keeps missing values and dtypes; import/export type values as pandas does; Pillow 13 | #89, #90, #91, #92, #98 |
 | 0.17.3 | Space Ranger's analysis (clusters, UMAP, PCA) for Visium spots and HD bins; `convert` works on fresh installs (broken since 0.7.0) | #85, #88 |
@@ -25,40 +26,10 @@ The conversion epic's sub-issues (#21–#30) are all done and ticked in #20.
 
 ## In progress
 
-The fixes from the October 2026 audit, epic #87: 164 findings in 16
-batches, one PR and one sub-issue each. Batches in a wave own disjoint files
-and run in parallel; a batch that shares files with another starts once that
-one has merged.
-
-| Wave | Batches | Release |
-|---|---|---|
-| 0 | B0 #88 | 0.17.3 |
-| 1 | B1 #89, B2a #90, B2b #91, B3a #92, B7 #98 | 0.17.4: data safety |
-| 2 | B3b #93, B4 #94, B5 #95, B8a #99, B8b #100, B9 #102 | 0.17.5: fidelity |
-| 3 | B6a #96, B6b #97, B8c #101 | 0.17.6: streaming |
-| 4 | B10 #103 | 0.17.6 |
-
-Decisions:
-- Every batch ships as a 0.17.x patch.
-- `concat` orders an outer join's var and merged categories as anndata does
-  (sorted), and the changelog says so (B3b).
-- Pickle reading is hardened, and the docs say pickles are trusted input
-  (B8c).
-- A full disk aborts inside HDF5, beyond the tool's reach, so writers check
-  free space against the output's estimated size first (B1).
-- Each PR carries its changelog entry in its description, and the release PR
-  collects them, so parallel batches do not conflict in `docs/changelog.md`.
-
-Steps:
-- [x] B0: `convert` on fresh installs (#88), in 0.17.3
-- [x] Wave 1, then 0.17.4
-- [x] Wave 2, then 0.17.5
-- [ ] Waves 3 and 4, then 0.17.6
-  - [x] B6a: the memory harness, then recast streaming (#118)
-  - [x] B8c: pickles, Xenium and images (#120)
-  - [ ] B6b: block sizing and Zarr v3 shards (#121)
-  - [ ] B10: CLI output and the documentation sweep
-  - [ ] Release 0.17.6
+Nothing. The fixes from the October 2026 audit (epic #87, 164 findings in
+16 batches) finished with 0.17.6; the sub-issues (#88–#103) are all done
+and ticked in #87. The batch names in the follow-ups below (B1 to B10) are
+theirs.
 
 ## Follow-ups noticed
 

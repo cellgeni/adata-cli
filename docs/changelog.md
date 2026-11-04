@@ -8,6 +8,167 @@ nav_order: 7
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
+## 0.17.6
+
+The last wave of fixes from the October 2026 audit
+([#87](https://github.com/cellgeni/adata-cli/issues/87)), on streaming, which
+closes it. Reads and writes follow the source's chunks and shards, so
+anndata 0.13's sharded Zarr v3 stores stream at the cost `--chunk` implies
+and each shard is written once; `recast` checks and converts in `--chunk`
+blocks; `split`'s memory no longer grows with its groups. Pickle reading is
+hardened, 16-bit images export as they are, and the CLI's output is plain
+lines in logs and pipes, with names printed as the store spells them.
+h5py 3.16 or later is now required; its Linux wheels need glibc 2.28.
+
+### Changed
+
+- **h5py 3.16.0 or later is required**
+  ([#96](https://github.com/cellgeni/adata-cli/issues/96)). h5py 3.15 kept 32
+  to 160 bytes of memory for good on every dataset read and write, so long
+  streaming runs grew with their number of blocks. h5py 3.16's HDF5 2.0 gives
+  each dataset an 8 MiB chunk cache; stores are opened with 1 MiB, as before.
+  Its Linux wheels need glibc 2.28 or later.
+
+### Fixed
+
+- **Subset, split, concat, recast and convert write each Zarr v3 shard once**
+  ([#97](https://github.com/cellgeni/adata-cli/issues/97)). anndata 0.13 writes
+  Zarr v3 sharded, a whole array in one shard. Commands wrote outputs a
+  `--chunk` block at a time, and zarr rewrites a whole shard for a write of any
+  part of it: subset and concat wrote 15 times the bytes they meant to, split
+  121 times, and a dense subset held 1.7 GB. Outputs are written a whole shard
+  (or chunk) at a time now. A shard is cut along its rows to at most 8 MiB, 128
+  MiB shared across the outputs `split` writes at once, and about four times
+  that is held while zarr encodes it.
+- **Outputs keep a sharded source's shards and inner chunks**
+  ([#97](https://github.com/cellgeni/adata-cli/issues/97)). A sparse matrix's
+  `data` and `indices` dropped the shard and kept the inner chunk, 245 elements
+  a file under anndata 0.13 with zarr 3.1: thousands of files per array. An
+  h5ad output took the inner chunk as its HDF5 chunk, making a file twice
+  anndata's own. Zarr v3 outputs keep the shard. HDF5 outputs let HDF5 choose
+  their chunks, and `--zarr-format 2` takes the shard as the chunk.
+- **Sparse `subset` and `split` follow `--chunk`**
+  ([#97](https://github.com/cellgeni/adata-cli/issues/97)). Blocks were 4,096
+  rows or columns whatever `--chunk` said, so a CSC block (4,096 genes across
+  every cell) grew with the number of cells. A block holds about as many
+  entries as `--chunk` rows do now, and a gene expressed in every cell is read
+  in parts.
+- **Reads follow the source's chunks**
+  ([#97](https://github.com/cellgeni/adata-cli/issues/97)). `subset`, `split`,
+  `concat`, `recast`, `convert` and `export` read a dense matrix in whole
+  chunks of the source, so a chunk taller than `--chunk` is no longer decoded
+  once for every block: 7 to 60 times the matrix for zarr's own chunks or
+  chunks of (n_obs, 8). Past 32 MiB, `subset`, `split` and `convert` read a
+  band of columns, so `convert` no longer reads a column-chunked matrix whole.
+  A Zarr v3 shard's index is read once per command, not once per block.
+- **`split` memory no longer grows with the number of groups**
+  ([#97](https://github.com/cellgeni/adata-cli/issues/97)). An open HDF5 file
+  costs about 0.6 MB whatever is in it, and split held up to 1,024 open at
+  once: 581 MB of RSS at 512 groups, against 143 MB now. It writes at most 128
+  outputs per pass over the matrices, so past 128 groups the matrices are read
+  once per 128. Each output is written a whole chunk at a time, so a chunk 512
+  rows tall is no longer decoded and encoded once for every block.
+- **`recast --dtype` checks a dense matrix a block at a time**
+  ([#96](https://github.com/cellgeni/adata-cli/issues/96)). The round-trip
+  check read the whole matrix at once, and two more copies of it, whatever
+  `--chunk` said. It reads `--chunk` rows now, as the conversion does.
+- **Densifying a CSC matrix, and writing a dense one as CSC, hold `--chunk`
+  rows** ([#96](https://github.com/cellgeni/adata-cli/issues/96)). Each block
+  was `--chunk` columns of every row, so memory followed the number of cells: 8
+  GB a block at 2M cells. Both now go through a CSR in scratch and the
+  streaming transpose.
+- **The streaming transpose reads about a chunk at a time on skewed matrices**
+  ([#96](https://github.com/cellgeni/adata-cli/issues/96)). It stepped by the
+  average row, so a run of genes expressed in every cell was read many chunks
+  at once, and a gene expressed in every cell was sorted whole. It steps by
+  entries now, and streams such a gene from a bucket of its own.
+- **A sparse matrix made from a dense one keeps element-sized chunks**
+  ([#96](https://github.com/cellgeni/adata-cli/issues/96)). `recast --layout
+  csr`/`csc` and the 10x-h5 export gave `data` and `indices` the dense source's
+  chunk height as their chunk, down to 16 elements: hundreds of thousands of
+  chunks and a file three times the size.
+- **`--force` no longer skips the index range check**
+  ([#96](https://github.com/cellgeni/adata-cli/issues/96)). Given to accept a
+  lossy cast, it also let `indptr` overflow `--indices-dtype` and wrap
+  negative, a corrupt matrix with exit 0. A dense matrix made sparse is
+  range-checked too.
+- **float16 is refused for a sparse matrix**
+  ([#96](https://github.com/cellgeni/adata-cli/issues/96)). scipy has no
+  float16 sparse matrix, so the store `recast` wrote could not be read by
+  anndata or scanpy. Use `--dtype float32`, or `--layout dense`.
+- **A dense matrix made sparse by a lossy cast drops the zeros the cast makes**
+  ([#96](https://github.com/cellgeni/adata-cli/issues/96)). Values that became
+  0 were stored as explicit zeros, three times scipy's nnz in one case, which
+  misleads nnz-based QC.
+- **Matrices nested two or more groups deep are converted**
+  ([#96](https://github.com/cellgeni/adata-cli/issues/96)). `recast` of
+  `uns/neighbors/connectivities` reported converting it and copied it
+  unchanged.
+- **Pickle arrays are checked before use**
+  ([#101](https://github.com/cellgeni/adata-cli/issues/101)). Reading a
+  pycisTopic pickle checks each array it rebuilds (dtype, shape, and a sparse
+  matrix's indices) before numpy, scipy or pandas uses it, and refuses a pickle
+  that fails before anything is written, so a crafted pickle can no longer make
+  scipy write out of bounds or have numpy read memory as another type. Dates
+  and times are no longer read from pickles, which also stops a crafted
+  timezone from opening a local file; pycisTopic's objects hold none. Pickles
+  are still trusted input: read them only from a source you would trust with
+  the data. Pickles that pandas 1.5 writes with missing values in a nullable
+  text column now read.
+- **Imputed pycisTopic matrices convert whatever their width**
+  ([#101](https://github.com/cellgeni/adata-cli/issues/101)). `--dense`
+  chunked X as 4096 cells by every feature, which HDF5 refused past 262,144
+  float32 features, and CSR output held 4096 cells' coordinates at once,
+  about 50 GB at 500,000 regions. Both now work about a million entries at
+  a time, and a dense X is chunked the same way.
+- **`--dense` is honoured for gene activity**
+  ([#101](https://github.com/cellgeni/adata-cli/issues/101)). An imputed
+  object holding a sparse matrix was written as CSR although `--dense` was
+  given and the summary said dense.
+- **A Xenium bundle converts into a new folder**
+  ([#101](https://github.com/cellgeni/adata-cli/issues/101)). With only
+  `analysis.tar.gz`, converting to an output whose folder did not exist yet
+  failed with a bare "No such file or directory" naming a temporary path.
+- **`export image` keeps 16-bit images**
+  ([#101](https://github.com/cellgeni/adata-cli/issues/101)). Every value
+  from 255 up was clipped to 255, silently. One channel of 16 bits is now
+  written as a 16-bit PNG or TIFF, and values an image cannot keep are
+  refused, naming their range; the new `--scale` stretches them onto 0-255.
+- **Names with square brackets print as the store spells them**
+  ([#103](https://github.com/cellgeni/adata-cli/issues/103)). Rich read the
+  `[mt]` of scanpy's `pct_counts[mt]` as a style tag. `view`, `ls`, `split` and
+  messages showed `pct_counts`, a name the next command could not find, and a
+  name, label or attribute holding `[/x]` stopped the command. Every name,
+  label, path and value from a store or the command line is escaped now.
+- **`view FILE ENTRY` on a missing entry fails**
+  ([#103](https://github.com/cellgeni/adata-cli/issues/103)). It printed its
+  `Error:` line on stdout and exited 0, so a script took the message for the
+  entry's description. It goes to stderr with exit code 1 now, as `ls` does.
+- **Logs hold plain lines**
+  ([#103](https://github.com/cellgeni/adata-cli/issues/103)). Written to a file
+  or a pipe, stderr held colour and cursor codes and wrapped messages at 80
+  columns, so `grep '^Error:' adata.log` found nothing. Off a terminal there
+  are no codes now and an error is one line. On a terminal nothing changes.
+- **`convert --help` names the extras to install**
+  ([#103](https://github.com/cellgeni/adata-cli/issues/103)):
+  `pyadata-cli[spatial]` and `pyadata-cli[pickle]` showed as `pyadata-cli`.
+- **Help says what the commands do**
+  ([#103](https://github.com/cellgeni/adata-cli/issues/103)):
+  - `--to` lists only the formats `convert` can write;
+  - `--inplace` says the source is replaced by a store written beside it, not
+    modified directly;
+  - `convert --help` says which formats are only read.
+- **`adata.cli.main(argv)` runs `argv`**
+  ([#103](https://github.com/cellgeni/adata-cli/issues/103)). It parsed the
+  process's own command line instead.
+- **The documentation matches the code**
+  ([#103](https://github.com/cellgeni/adata-cli/issues/103)):
+  - the command reference has every option;
+  - troubleshooting and the pipelines guide list everything held whole in
+    memory, images among them;
+  - the testing page maps every test file and CI job;
+  - the 0.17.1 entry below no longer says images are not loaded whole.
+
 ## 0.17.5
 
 The second wave of fixes from the October 2026 audit
@@ -325,7 +486,6 @@ user, so a Docker run that writes to a mounted folder needs `--user`.
   longer runs unpinned packages with a token that can push to main. Actions and
   uv are pinned, and tags reach scripts through `env:`.
 
-
 ## 0.17.4
 
 The first wave of fixes from the October 2026 audit
@@ -529,7 +689,6 @@ values as pandas does. Pillow moves to 13.0.0 for its decoder advisories.
   image pinned, has published heap-overflow and out-of-bounds-write
   advisories in its decoders. The floor is now `pillow>=13.0.0`, and the
   lock also takes pygments 2.20.0 and pytest 9.0.3 (dev) for theirs.
-
 
 ## 0.17.3
 
