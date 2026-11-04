@@ -26,6 +26,7 @@ from adata.formats.common import _get_encoding_type, _resolve, stdout_reader_may
 from adata.formats.validate import check_target, validate_dimensions
 from adata.storage import create_dataset, is_dataset, is_group, is_zarr_group, row_bands
 from adata.elements.strings import is_string_dtype
+from adata.util.markup import literal
 
 #: Elements of a `.npy` copied into the store at once by `import array`.
 IMPORT_CHUNK_ELEMENTS = 1 << 20
@@ -153,7 +154,7 @@ def export_npy(
     elif missing:
         dtype = np.dtype(np.float64)
         console.print(
-            f"[yellow]Note:[/] '{obj}' has {missing:,} missing values, written "
+            f"[yellow]Note:[/] '{literal(obj)}' has {missing:,} missing values, written "
             "as NaN, so the array is float64."
         )
     else:
@@ -182,7 +183,7 @@ def export_npy(
     status = (
         nullcontext()
         if to_stdout
-        else console.status(f"[magenta]Exporting {obj} to {out}...[/]")
+        else console.status(f"[magenta]Exporting {literal(obj)} to {literal(str(out))}...[/]")
     )
     with target as fh, status as progress, stdout_reader_may_stop():
         fh.write(header)
@@ -192,7 +193,7 @@ def export_npy(
             n = shape[0]
             for start, end in _row_blocks(shape, chunk_elements, values):
                 if progress:
-                    progress.update(f"[magenta]Exporting {obj}: {start}-{end} of {n}...[/]")
+                    progress.update(f"[magenta]Exporting {literal(obj)}: {start}-{end} of {n}...[/]")
                 fh.write(convert(start, end).tobytes())
 
 
@@ -256,4 +257,4 @@ def import_npy(
             target[start:end] = block
 
     shape_str = "×".join(str(d) for d in arr.shape)
-    console.print(f"[green]Imported[/] {shape_str} array into '{obj}'")
+    console.print(f"[green]Imported[/] {shape_str} array into '{literal(obj)}'")

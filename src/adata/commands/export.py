@@ -23,6 +23,7 @@ from adata.formats.image import export_image as export_image_format
 from adata.formats.json_data import export_json as export_json_format
 from adata.formats.sparse import export_mtx as export_mtx_format
 from adata.storage import open_store
+from adata.util.markup import literal
 from adata.util.path import check_output
 from adata.util.staging import staged_outputs
 
@@ -47,7 +48,7 @@ def _output(file: Path, out: Optional[Path], console: Console) -> Iterator[Optio
     out.parent.mkdir(parents=True, exist_ok=True)
     with staged_outputs([out]) as (temp,):
         yield temp
-    console.print(f"[green]Wrote[/] {out}")
+    console.print(f"[green]Wrote[/] {literal(str(out))}")
 
 
 def export_table(

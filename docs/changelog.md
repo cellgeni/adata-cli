@@ -645,9 +645,9 @@ Parquet positions.
 
 ### Changed
 
-- **Images are written a strip of rows at a time**, as they are read, rather
-  than loaded before the write starts: Visium HD's hires image is 6,000
-  pixels, some 100 MB.
+- **Images are copied into the store a strip of rows at a time**, rather
+  than as a second whole copy: Visium HD's hires image is 6,000 pixels, some
+  100 MB. The image itself is still decoded whole, as a PNG can only be.
 - **Barcodes are matched as bytes**, a quarter of the memory of numpy's
   unicode, for Visium, Visium HD and Xenium alike.
 

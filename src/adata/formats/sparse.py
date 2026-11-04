@@ -33,6 +33,7 @@ from adata.formats.mtx import (
 from adata.formats.textio import create_binary
 from adata.formats.validate import check_target, validate_dimensions
 from adata.storage import is_dataset, is_group, is_zarr_group
+from adata.util.markup import literal
 
 
 def export_mtx(
@@ -87,7 +88,7 @@ def export_mtx(
     status = (
         nullcontext()
         if to_stdout
-        else console.status(f"[magenta]Exporting {obj} to {out}...[/]")
+        else console.status(f"[magenta]Exporting {literal(obj)} to {literal(str(out))}...[/]")
     )
     with target as fh, status, stdout_reader_may_stop():
         write_header(
@@ -121,7 +122,7 @@ def import_mtx(
     validate_dimensions(root, obj, shape, console)
 
     emap = EntryMap(n_rows=header.n_rows, n_cols=header.n_cols)
-    with console.status(f"[magenta]Checking {input_file.name}...[/]"):
+    with console.status(f"[magenta]Checking {literal(input_file.name)}...[/]"):
         scanned = scan(header, emap)
     dtype = value_dtype(header, scanned)
 
@@ -137,7 +138,7 @@ def import_mtx(
     appender = CsrAppender(
         parent, name, shape=shape, data_dtype=dtype, compression=compression
     )
-    with console.status(f"[magenta]Importing {input_file.name}...[/]"):
+    with console.status(f"[magenta]Importing {literal(input_file.name)}...[/]"):
         summed = read_into(header, emap, scanned, [[appender]], parent)
         nnz = appender.finish()
 
@@ -148,5 +149,5 @@ def import_mtx(
         )
     console.print(
         f"[green]Imported[/] {shape[0]}×{shape[1]} sparse matrix ({nnz} non-zero, "
-        f"{dtype}) into '{obj}'"
+        f"{dtype}) into '{literal(obj)}'"
     )

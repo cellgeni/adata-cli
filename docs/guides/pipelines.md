@@ -120,6 +120,7 @@ most data:
 | `subset`, `split`, `concat`, `recast` | 1,024 | rows of a dense matrix |
 | `export dataframe` | 10,000 | rows |
 | `export array` | 100,000 | elements |
+| `export sparse` | 1,000 | rows of a CSR matrix, columns of a CSC one |
 | `import array` | 1,048,576 | elements |
 
 A dense block holds `--chunk` × n_var values, so lower it for very wide dense
@@ -145,6 +146,19 @@ See [Writing outputs](../reference/commands.md#writing-outputs).
 A loom output is dense by definition, so `convert` to `.loom` warns above
 10 GB before compression.
 
+What `--chunk` does not bound, held whole by design:
+
+- obs and var columns, which is what grows with the number of cells;
+- an image: `export image` reads its array whole, `import image` decodes
+  its file whole, and a Visium conversion decodes each tissue image whole
+  (a PNG can only be read whole) before copying it in strips;
+  `--no-images` leaves them out;
+- a pycisTopic pickle, which cannot be read in part;
+- a JSON document: `import dict` parses the file whole, and `export dict`
+  builds its JSON whole (`--max-elements` bounds each array, not the sum);
+- the whole matrix, when asked for with `--in-memory` (`recast`'s transpose,
+  `export sparse`).
+
 ## Exit codes and output streams
 
 | Exit code | Meaning |
@@ -156,7 +170,11 @@ A loom output is dense by definition, so `convert` to `.loom` warns above
 
 Data goes to stdout and everything else (progress, notes, warnings, errors)
 to stderr, so `adata export dataframe in.h5ad obs > obs.csv` is clean, and
-`2> adata.log` keeps the log. An export piped to a reader that stops early,
+`2> adata.log` keeps the log. Written to a file or a pipe rather than a
+terminal, neither stream holds colour codes or a spinner, and a refusal or
+failure (exit code 1) is one line however long, so `grep '^Error:'
+adata.log` finds it whole. A usage error (exit code 2) is the argument
+parser's own message, in a box. An export piped to a reader that stops early,
 such as `head`, ends quietly with exit code 0.
 
 ## Zarr v2 and v3

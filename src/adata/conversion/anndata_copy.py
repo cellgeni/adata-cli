@@ -20,6 +20,7 @@ from adata.storage import (
     ensure_anndata_root_attrs,
     open_store,
 )
+from adata.util.markup import literal
 
 
 def _backend(fmt: str) -> str:
@@ -82,7 +83,7 @@ class AnnDataCopy(Converter):
             copy_attrs(src.root.attrs, dst.root.attrs, target_backend=backend)
             ensure_anndata_root_attrs(dst.root)
             for key in src.root.keys():
-                with console.status(f"[cyan]Copying {key}...[/]"):
+                with console.status(f"[cyan]Copying {literal(key)}...[/]"):
                     copy_tree(
                         src.root[key], dst.root, key,
                         compression=detail["compression"],

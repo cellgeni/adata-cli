@@ -1,9 +1,11 @@
 """The `convert` command: rewrite a store in another format.
 
-Every refusal happens while building the plan, before an output exists, and
-the outputs are written beside their destination and moved into place only
-once complete. A conversion that fails therefore leaves nothing behind, and
-never a half-written store that the next command would read as a whole one.
+What the input's layout and the options can show is refused while building
+the plan, before an output exists; what only the data shows, such as an
+index out of range, stops the copy. Either way the outputs are written beside
+their destination and moved into place only once complete. A conversion that
+fails therefore leaves nothing behind, and never a half-written store that
+the next command would read as a whole one.
 """
 
 from __future__ import annotations
@@ -12,7 +14,6 @@ from pathlib import Path
 from typing import List, Optional
 
 from rich.console import Console
-from rich.markup import escape
 
 from adata.conversion import (
     Options,
@@ -22,6 +23,7 @@ from adata.conversion import (
     output_format,
 )
 from adata.storage import check_hdf5_inputs
+from adata.util.markup import literal
 from adata.util.path import check_output, is_zarr_path, same_path
 from adata.util.staging import check_free_space, disk_size, staged_outputs
 
@@ -95,13 +97,13 @@ def convert_store(
     ):
         check_free_space(plan.outputs[0], lambda: disk_size(file), check=space_check)
 
-    console.print(f"[cyan]Converting[/] {file}: {plan.summary}")
+    console.print(f"[cyan]Converting[/] {literal(str(file))}: {literal(plan.summary)}")
     for warning in plan.warnings:
-        console.print(f"[yellow]Warning:[/] {escape(warning)}")
+        console.print(f"[yellow]Warning:[/] {literal(warning)}")
 
     with staged_outputs(plan.outputs) as staged:
         converter.write(plan, staged, console)
 
     for out in plan.outputs:
-        console.print(f"[green]Wrote[/] {out}")
+        console.print(f"[green]Wrote[/] {literal(str(out))}")
     return plan.outputs

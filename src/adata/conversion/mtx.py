@@ -81,6 +81,7 @@ from adata.formats.textio import (
     read_tsv,
 )
 from adata.storage import COMPRESSIONS, GZIP_LEVEL, is_dataset, open_store
+from adata.util.markup import literal
 from adata.util.path import is_zarr_path
 
 #: The velocyto matrices STARsolo writes, in the order they become layers.
@@ -434,7 +435,7 @@ class MtxImport(Converter):
         # not leave a store holding obs and var and nothing else.
         scans = {}
         for name, header in detail.headers.items():
-            with console.status(f"[cyan]Checking {header.path.name}...[/]"):
+            with console.status(f"[cyan]Checking {literal(header.path.name)}...[/]"):
                 scans[name] = scan(header, emap)
 
         with ExitStack() as stack:
@@ -473,7 +474,7 @@ class MtxImport(Converter):
                         )
                         for parent, key in places
                     ])
-                with console.status(f"[cyan]Reading {header.path.name}...[/]"):
+                with console.status(f"[cyan]Reading {literal(header.path.name)}...[/]"):
                     summed = read_into(header, emap, scanned, destinations, roots[0])
                     for appenders in destinations:
                         for appender in appenders:
@@ -481,7 +482,7 @@ class MtxImport(Converter):
                 if summed:
                     console.print(
                         f"[yellow]Warning:[/] {summed:,} duplicate entries in "
-                        f"{header.path.name} were summed, as scipy does."
+                        f"{literal(header.path.name)} were summed, as scipy does."
                     )
 
 
@@ -627,7 +628,7 @@ class MtxExport(Converter):
 
             matrix = describe(resolve(root, source.path))
             check_sparse(matrix)
-            with console.status(f"[cyan]Counting the entries of {source.path}...[/]"):
+            with console.status(f"[cyan]Counting the entries of {literal(source.path)}...[/]"):
                 nnz = count_entries(matrix)
             with create_binary(folder / f"matrix.mtx{ext}", gzipped=gzipped, level=GZIP_LEVEL) as fh:
                 write_header(
@@ -638,7 +639,7 @@ class MtxExport(Converter):
                     nnz=nnz,
                     comments=_metadata_comment(root),
                 )
-                with console.status(f"[cyan]Writing {source.path}...[/]"):
+                with console.status(f"[cyan]Writing {literal(source.path)}...[/]"):
                     write_entries(fh, iter_matrix_entries(matrix, transpose=True))
 
 

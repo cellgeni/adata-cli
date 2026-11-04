@@ -24,9 +24,10 @@ Naming:
 - The import package and the command are `adata`.
 - The repo directory is still called `h5ad-cli`.
 - `h5ad` is a deprecated alias of the command (`main_deprecated` in `cli.py`).
+- `info` is a hidden, deprecated alias of `view`.
 - `convert` given recast's old flags forwards to `recast` with a warning.
 
-Both of these deprecated paths stay until 1.0.0.
+These deprecated paths stay until 1.0.0.
 
 ## Commands
 
@@ -50,19 +51,31 @@ Test markers:
   few beside the code they guard). CI runs them as a job of their own,
   beside the unit suite's coverage job, and a release needs both.
 
-CI also installs the package from a fresh resolution, without the lock,
-imports every module on the base dependencies alone, and runs `convert`.
-That catches a module-level import of something undeclared; one inside a
-function is caught only on the paths it runs. Don't import click: typer
-0.26 and later no longer install it. Compare the enums typer hands back
-(such as `ParameterSource`) by `.name`.
+CI (`.github/workflows/tests.yml`) runs on every pull request:
+- the unit suite on Python 3.12 and 3.13, with the coverage floor;
+- the cost guards (`-m perf`) on both interpreters, at the same time;
+- a fresh install: the package from a fresh resolution, without the lock,
+  every module imported on the base dependencies alone, `convert` run with
+  and without click beside typer, and the docs-accuracy suite run with no
+  click. That catches a module-level import of something undeclared; one
+  inside a function is caught only on the paths it runs;
+- the unit suite at each direct dependency's floor;
+- the `integration` tests of `test_anndata_versions.py` and
+  `test_external_readers.py`, each its own job;
+- `workflow lint` (actionlint and zizmor) and `container image`, which
+  builds the Docker image and smoke-tests it.
 
-Neither CI nor the repo runs a linter or formatter. Match the style of the
-surrounding code.
+Don't import click: typer 0.26 and later no longer install it. Compare the
+enums typer hands back (such as `ParameterSource`) by `.name`.
+
+No linter or formatter runs on the code; CI lints only the workflows. Match
+the style of the surrounding code.
 
 ## Architecture
 
-Each layer calls only the layers below it:
+Each layer calls only the layers below it, with one exception: `storage/`
+uses `elements/` (the spec, `strings`, and the readers and writers that
+`copy_tree` and `create_dataset` need to copy an element faithfully).
 
 - **`cli.py`**: the whole Typer app, including the `export` and `import` sub-apps.
   - Commands parse options, validate cheap things such as `--zarr-format`, call
@@ -71,7 +84,13 @@ Each layer calls only the layers below it:
     `--chunk` its `min=1`, and `_space_check_option` is `--no-space-check`.
     A new command that takes either uses these, not its own `typer.Option`.
   - `console` writes to **stderr**. Only `out_console` and data go to stdout,
-    so output pipes cleanly.
+    so output pipes cleanly. Rich asks each stream whether it is a terminal:
+    off one, as in a log file or a pipe, it writes no colour, cursor or
+    spinner codes, and `console` keeps each message on one line.
+  - `raise _fail(e)` prints an exception as the one `Error:` line on stderr
+    and exits 1. `main(argv)` runs the arguments it is given and raises
+    `SystemExit` for its caller; run as the command (`argv` None), a failed
+    run ends the process at once (`_leave`), past h5py's teardown.
 - **`commands/`**: one module per command. Each orchestrates its command:
   - planning and refusals;
   - progress output;
@@ -128,7 +147,11 @@ Each layer calls only the layers below it:
   in the matrix's order; it also reads the `analysis/` (clusters, UMAP, PCA)
   that Xenium and Space Ranger (spots, bins and cells) share.
 - **`formats/`**: the per-file-type halves of `export` and `import`: npy, mtx,
-  csv, json and images. `mtx.py` is a streaming Matrix Market codec (two
+  csv, json and images, with `validate.py` checking an element's kind and
+  dimensions before an import writes it. Beside them are what converters
+  read: `parquet.py` (Visium HD's positions, the only pyarrow import),
+  `pickled.py` (pycisTopic's pickles, through an allowlist) and
+  `pandas_frame.py` (pandas frames written as anndata writes them). `mtx.py` is a streaming Matrix Market codec (two
   passes in, block writes out) shared by `import`/`export sparse` and the
   `10x-mtx` and `parse` converters; `textio.py` holds its gzip-aware block
   I/O, and `table.py` a streaming CSV reader that types columns as pandas
@@ -137,7 +160,8 @@ Each layer calls only the layers below it:
   (categorical when values repeat); the loom import uses it. `geojson.py`
   walks a GeoJSON FeatureCollection a feature at a time and measures each
   polygon's centroid and area (Space Ranger 4's cell outlines).
-- **`util/`**: `staging.py` and `path.py` (below), plus `names.py`.
+- **`util/`**: `staging.py` and `path.py` (below), plus `names.py` and
+  `markup.py` (`literal`, below).
   - `path.check_output(output, inputs)` is the one output check, and
     `path.output_target(source, output, inplace)` wraps it for commands with
     `--inplace`.
@@ -186,7 +210,20 @@ These are easy to break without any test noticing straight away:
   no cleanup runs. Honour `--no-space-check`.
 - **Validate before the output exists.** Resolve selections, check casts and
   build plans first, so that a refusal writes nothing. An empty selection is
-  a refusal, never an empty store.
+  a refusal, never an empty store. What only the data can show (an index out
+  of range) refuses during the write; staging keeps the output from
+  appearing.
+- **Escape what the store or the user wrote before Rich prints it.** Rich
+  reads `[word]` as a style tag, so `pct_counts[mt]` printed as it is shows
+  `pct_counts`, and `[/x]` crashes the command. Member names, labels, paths
+  and attribute values go through `util/markup.literal`, in messages, status
+  lines, progress descriptions and tree labels alike. It escapes as
+  `rich.markup.escape` does, but a trailing backslash prints once whatever
+  follows. Never write brackets around a value in a template
+  (`obs\\[{literal(column)}]`): a value with an unclosed `[` closes into a
+  tag there; escape the whole `obs[column]` instead. Help text is markup
+  too: a literal `[` there is `\\[` in the source, which the docstring holds
+  as `\[`.
 - **Zarr outputs keep the source's version.**
   - Pass `zarr_format=` to `open_store`. Without it zarr-python writes v3, and a
     v2 input gets silently upgraded.
@@ -208,20 +245,30 @@ These are easy to break without any test noticing straight away:
   `zarr3`. Write element-level tests against it, so one test body covers all
   three backends.
 - CLI tests use a module-level `CliRunner`. Strip ANSI codes and collapse
-  whitespace before matching messages, because Rich wraps them. The CLI test
-  files define an `_out(result)` helper for this.
+  whitespace before matching messages: `FORCE_COLOR` brings the codes back,
+  and help text and stdout's trees wrap at Rich's width. The CLI test files
+  define an `_out(result)` helper for this.
 - Correctness is checked against an oracle: anndata reads back what we write,
   and scipy checks `recast`. Self-consistency alone is not accepted.
 - `tests/test_performance.py` guards complexity by **counting** elements and
   bytes read through hooks on h5py and zarr (`tests/perf_counters.py`). It never
   uses a clock. A change that adds reads per row or per group will fail it.
+  - The same hooks count bytes: the largest single read (the block a loop
+    holds), and the whole chunks and shards each read decodes and each write
+    encodes.
+  - `perf_counters.peak_rss(argv)` runs `adata` in a fresh interpreter and
+    returns the peak memory it added. The memory guards grow the input
+    along n_obs and n_var and assert the peak is a small share of it.
+  - `tests/perf_fixtures.py` builds stores as anndata writes them: every
+    layout, h5ad, Zarr v2 and anndata 0.13's sharded Zarr v3.
 - `tests/test_docs_are_accurate.py` parses every `adata …` line in the README,
   `docs/` and the `--help` examples, and checks it against the real Click tree.
   A new or renamed option has to be documented correctly in
   `docs/reference/commands.md`. A new command also needs a section there, an
   entry in the table of contents and a mention in the app help. The same file
-  checks that relative links name a page and an anchor that exist, and that
-  every page has `title` front matter and a `parent` that exists.
+  checks that relative links name a page and an anchor that exist, that
+  every page has `title` front matter and a `parent` that exists, and that
+  every test file has a row in `docs/reference/testing.md`'s map.
 - House style:
   - test names read as sentences
     (`test_a_failed_selection_keeps_an_existing_output`);

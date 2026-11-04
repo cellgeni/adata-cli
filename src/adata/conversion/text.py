@@ -62,6 +62,7 @@ from adata.storage import (
     open_store,
     with_compression,
 )
+from adata.util.markup import literal
 from adata.util.names import count_duplicates, make_index_unique
 
 #: Extensions read as text, each also gzipped; and the delimiter each implies.
@@ -552,7 +553,7 @@ class TextImport(Converter):
             write_var(root, Target(label=None, keep=None, var_names=detail.var_names, columns={}))
             ensure_anndata_skeleton(root)
             _write_uns(root["uns"], detail)
-            with console.status(f"[cyan]Reading {Path(plan.source).name}...[/]"):
+            with console.status(f"[cyan]Reading {literal(Path(plan.source).name)}...[/]"):
                 if detail.transpose:
                     obs = _write_names(root, detail.obs_names)
                     _write_transposed(root, reader, detail)

@@ -24,6 +24,7 @@ from adata.core.select import group_indices
 from adata.core.subset import check_subsettable, split_h5ad
 from adata.elements.read import element_len, resolve_index
 from adata.storage import detect_backend, open_store
+from adata.util.markup import literal
 from adata.util.names import unique_names
 from adata.util.path import check_output
 from adata.util.staging import check_free_space, disk_size, staged_outputs
@@ -76,7 +77,7 @@ def split_store(
     # it ("" or "NA"), so NA always holds the rows with no value.
     names = unique_names(order)
     console.print(
-        f"[cyan]Splitting on {axis}[{column}]: "
+        f"[cyan]Splitting on {literal(f'{axis}[{column}]')}: "
         f"{len(order)} group{'s' if len(order) != 1 else ''}[/]"
     )
 
@@ -93,7 +94,7 @@ def split_store(
         planned.append((label, out_path, len(indices)))
 
     for label, out_path, count in planned:
-        console.print(f"  {_shown(label)} -> {out_path} ({count} {axis})")
+        console.print(f"  {_shown(label)} -> {literal(str(out_path))} ({count} {axis})")
 
     for _, out_path, _ in planned:
         try:
@@ -138,12 +139,13 @@ def split_store(
     if manifest:
         _write_manifest(file, output_dir, column, planned, console)
 
-    console.print(f"[green]Wrote[/] {len(planned)} stores to {output_dir}")
+    console.print(f"[green]Wrote[/] {len(planned)} stores to {literal(str(output_dir))}")
     return planned
 
 
 def _shown(label: Optional[str]) -> str:
-    return "(missing)" if label is None else repr(label)
+    """A label as a message prints it, escaped: labels are data, not markup."""
+    return "(missing)" if label is None else literal(repr(label))
 
 
 def _manifest_path(file: Path, output_dir: Path) -> Path:
@@ -172,5 +174,5 @@ def _write_manifest(
             for label, out_path, count in planned:
                 value = "" if label is None else label
                 writer.writerow([source_id, column, value, str(out_path), count])
-    console.print(f"[dim]Manifest written to {path}[/]")
+    console.print(f"[dim]Manifest written to {literal(str(path))}[/]")
     return path

@@ -42,6 +42,7 @@ from adata.elements.write import ensure_anndata_skeleton
 from adata.formats.mtx import EntryMap, MtxHeader, read_header, read_into, scan, value_dtype
 from adata.formats.table import TableScan, read_small_table, scan_table, write_table
 from adata.storage import COMPRESSIONS, open_store
+from adata.util.markup import literal
 from adata.util.names import unique_names
 from adata.util.path import is_zarr_path
 
@@ -298,7 +299,7 @@ class ParseImport(Converter):
         # cannot be read must not leave a store holding obs and var alone.
         scans = []
         for item in detail.items:
-            with console.status(f"[cyan]Checking {_label(item)}...[/]"):
+            with console.status(f"[cyan]Checking {literal(_label(item))}...[/]"):
                 scans.append(scan(item.header, item.emap))
 
         for item, scanned, path in zip(detail.items, scans, staged):
@@ -306,7 +307,7 @@ class ParseImport(Converter):
                 root = stack.enter_context(
                     open_store(path, "w", zarr_format=detail.zarr_format)
                 ).root
-                with console.status(f"[cyan]Writing obs and var of {item.dge.sample}...[/]"):
+                with console.status(f"[cyan]Writing obs and var of {literal(str(item.dge.sample))}...[/]"):
                     write_table(root, "obs", item.cells, rows=item.rows)
                     write_var(root, item.target)
                     ensure_anndata_skeleton(root)
@@ -316,13 +317,13 @@ class ParseImport(Converter):
                     data_dtype=value_dtype(item.header, scanned),
                     compression=detail.compression,
                 )
-                with console.status(f"[cyan]Reading {_label(item)}...[/]"):
+                with console.status(f"[cyan]Reading {literal(_label(item))}...[/]"):
                     summed = read_into(item.header, item.emap, scanned, [[appender]], root)
                     appender.finish()
                 if summed:
                     console.print(
                         f"[yellow]Warning:[/] {summed:,} duplicate entries in "
-                        f"{_label(item)} were summed, as scipy does."
+                        f"{literal(_label(item))} were summed, as scipy does."
                     )
 
 

@@ -68,6 +68,12 @@ adata ls data.h5ad uns --depth 2      # only below a path
 adata ls data.h5ad -1 | grep spatial  # bare paths, for piping
 ```
 
+| Flag | Meaning |
+|---|---|
+| `--depth N`, `-d` | Maximum depth to descend |
+| `--long`, `-l` | Show each entry's type, shape, dtype and encoding |
+| `-1`, `--plain` | One bare path per line, with no tree, for piping |
+
 ## `subset`
 
 Write a filtered copy. Select by name list, by expression, or both axes at
@@ -84,7 +90,7 @@ adata subset data.h5ad --inplace --obs barcodes.txt
 | Flag | Meaning |
 |---|---|
 | `--output`, `-o` | Output path. Required unless `--inplace` |
-| `--inplace` | Replace the source (written to a temporary path first) |
+| `--inplace` | Replace the source; the new store is written beside it first |
 | `--obs` / `--var` | File of names to keep, one per line |
 | `--obs-query`, `-q` / `--var-query` | Keep rows matching an [expression](query.md) |
 | `--chunk`, `-C` | Rows per block, of a dense or a sparse matrix (at least 1) |
@@ -154,7 +160,7 @@ adata convert multiome.h5ad -o multiome.h5mu
 |---|---|
 | `--output`, `-o` | Output path (required) |
 | `--from` | Input format, if it cannot be detected |
-| `--to` | Output format, if the extension does not say |
+| `--to` | Output format, if the extension does not say: one the Write column below allows |
 | `--zarr-format` | Zarr version to write; defaults to the source's, else 3 |
 | `--compression` | `none`, `gzip` or `lzf` for h5ad; `none`, `gzip`, `zstd` or `blosc` for Zarr; `gzip` (default) or `none` for an MTX folder |
 | `--overwrite` | Replace an existing output |
@@ -189,9 +195,11 @@ written to Zarr gets zarr-python's default codec. `--compression` replaces all
 of that with one choice. Elements are not re-encoded, so a store written by
 anndata 0.7 keeps its legacy layout.
 
-Every check runs before anything is written. The output is written beside
-its destination (`out.adata-tmp.zarr`) and moved into place only once
-complete, so a failed conversion leaves nothing behind. An existing output is
+The input and the options are checked before anything is written; what only
+the data can show, such as an index out of range, stops the copy. Either way
+the output is written beside its destination (`out.adata-tmp.zarr`) and
+moved into place only once complete, so a failed conversion leaves nothing
+behind. An existing output is
 refused unless `--overwrite` is given, and is replaced only once its
 successor is finished. `--overwrite` replaces a store, or a Matrix Market
 folder holding only its own files, never a folder holding anything else.
@@ -216,7 +224,7 @@ adata recast data.h5ad layers/counts -o out.h5ad --layout dense --force
 | Flag | Meaning |
 |---|---|
 | `--output`, `-o` | Output path. Required unless `--inplace` |
-| `--inplace` | Replace the source (written to a temporary path first) |
+| `--inplace` | Replace the source; the new store is written beside it first |
 | `--all` | Recast `X`, every layer and `raw/X` |
 | `--dtype` | New dtype for the values, e.g. `float32` |
 | `--indices-dtype` | New dtype for sparse indices: `int32` or `int64` |
@@ -283,6 +291,7 @@ adata split data.h5ad --by cluster -o out/ --min-size 50
 | `--output-dir`, `-o` | Where to write the stores |
 | `--axis` | `obs` (default) or `var` |
 | `--min-size` | Skip groups smaller than this |
+| `--suffix` | Output extension, which picks the backend (`.zarr` for Zarr); defaults to the source's, `.h5ad` or `.zarr` |
 | `--dry-run` | Print the plan without writing |
 | `--manifest / --no-manifest` | Write a CSV listing the outputs (default on) |
 | `--chunk`, `-C` | Rows per block, of a dense or a sparse matrix (at least 1) |
@@ -321,6 +330,7 @@ adata concat a.h5ad b.h5ad -o m.h5ad --keys a,b --index-unique - --uns-merge sam
 
 | Flag | Meaning |
 |---|---|
+| `--output`, `-o` | Output path (required) |
 | `--join`, `-j` | `inner` (shared vars only) or `outer` (their union) |
 | `--label` | Add an obs column recording each cell's source |
 | `--keys` | Names for the inputs; defaults to their filenames |
@@ -422,8 +432,16 @@ adata create out.h5ad --n-obs 5000 --n-var 2000
 adata create out.zarr --obs-names cells.txt --var-names genes.txt
 ```
 
-Give each axis either a size (names are generated as `cell_0000`, `gene_0000`)
-or a file of names. `--force` overwrites an existing store, and only a store:
+| Flag | Meaning |
+|---|---|
+| `--n-obs`, `--n-var` | Number of observations, of variables |
+| `--obs-names`, `--var-names` | A file of names, one per line, which sets the number |
+| `--zarr-format` | Zarr version to write, 2 or 3; 3 by default |
+| `--force`, `-f` | Overwrite an existing store |
+
+Give each axis either a size or a file of names. Generated names are
+zero-padded to the axis length: `--n-obs 5000` gives `cell_0000` to
+`cell_4999`, `--n-obs 3` gives `cell_0` to `cell_2`. `--force` overwrites an existing store, and only a store:
 a folder that is not a Zarr store, or a file that is not HDF5, is refused.
 The new store is written beside the old one and swapped in once complete, so
 a failed `create --force` leaves the old store as it was.
@@ -445,6 +463,17 @@ adata export sparse data.h5ad X -o matrix.mtx
 adata export array data.h5ad obsm/X_umap > umap.npy
 adata export dict data.h5ad uns -o metadata.json
 ```
+
+| Flag | Subcommands | Meaning |
+|---|---|---|
+| `--output`, `-o` | all | Output file; stdout when omitted (`export dict` also takes it as a third argument) |
+| `--columns`, `-c` | `dataframe` | Comma separated columns to include |
+| `--head N`, `-n` | `dataframe`, `sparse` | Only the first N rows, or entries |
+| `--chunk`, `-C` | `dataframe`, `array`, `sparse` | Rows a block (`dataframe`, 10,000; also `--chunk-rows`, `-r`), elements (`array`, 100,000), or rows or columns of the matrix's layout (`sparse`, 1,000); at least 1 |
+| `--in-memory`, `-m` | `sparse` | Load the whole matrix first, which can be faster for a small one |
+| `--max-elements` | `dict` | Refuse an array larger than this (100,000 elements) |
+| `--include-attrs` | `dict` | Write the elements' attributes too |
+| `--scale` | `image` | Stretch the values onto 0-255 (below) |
 
 Omit `--output` to write to stdout; `export image` writes PNG there, and
 otherwise takes its format from the output's extension. `export dataframe`,
@@ -508,6 +537,16 @@ adata import sparse    data.h5ad X counts.mtx --inplace
 adata import dict      data.h5ad uns/params params.json --inplace
 adata import image     data.h5ad uns/spatial/hires tissue.png --inplace
 ```
+
+| Flag | Subcommands | Meaning |
+|---|---|---|
+| `--output`, `-o` | all | Output path; required unless `--inplace` |
+| `--inplace` | all | Replace the source; the new store is written beside it first |
+| `--no-space-check` | all | Write even if the disk looks too small |
+| `--index-column`, `-i` | `dataframe` | Column that becomes the index; the first by default |
+| `--categorical` | `dataframe` | Comma separated text columns to make categoricals |
+| `--auto-categorical / --no-auto-categorical` | `dataframe` | Make text columns that repeat a value categoricals (default on) |
+| `--chunk`, `-C` | `array` | Elements a block (below) |
 
 Dimensions are validated against the existing obs/var where the path implies
 an axis. For `array` and `sparse` that is done from the file's header,

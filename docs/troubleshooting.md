@@ -6,9 +6,10 @@ nav_order: 5
 # Troubleshooting
 {: .no_toc }
 
-Find the message you got, then the fix. Errors start `Error:` and end the
-command with exit code 1; a usage error (an unknown option, a missing
-argument, an input that does not exist) is exit code 2. Messages are shown
+Find the message you got, then the fix. A refusal or failure is one line on
+stderr starting `Error:`, and ends the command with exit code 1; a usage
+error (an unknown option, a missing argument, an input that does not exist)
+is the argument parser's own message, in a box, with exit code 2. Messages are shown
 here with real paths replaced by short ones.
 
 1. TOC
@@ -337,10 +338,13 @@ store it wrote; for a store another tool changed, run
 ### The command was killed for running out of memory
 
 Lower `--chunk`: a dense block holds `--chunk` × n_var values, 1,024 rows by
-default. Two things are held whole by design: obs and var columns, and a
-pycisTopic pickle, which cannot be read in part. Writing an output a whole
-shard or chunk at a time holds at most 8 MiB more (128 MiB across
-`split`'s outputs), and about four times a shard while it is encoded. See
+default. Some things are held whole by design: obs and var columns, an
+image (`export image`, `import image`, and the tissue images of a Visium
+conversion, which `--no-images` leaves out), a JSON document (`import dict`,
+`export dict`), a pycisTopic pickle, which cannot be read in part, and the
+matrix `--in-memory` asks for. Writing an output a whole shard or chunk at a
+time holds at most 8 MiB more (128 MiB across `split`'s outputs), and about
+four times a shard while it is encoded. See
 [Pipelines and containers](guides/pipelines.md#memory-and---chunk).
 
 ### It is slow on a Zarr store anndata 0.13 wrote

@@ -77,9 +77,9 @@ pickle = [
     "pandas>=2.2.3",
     "scipy>=1.15",
 ]
-# Reading Visium HD: its bin positions are Parquet only. Imported only by
-# the Visium converter, and only for an HD input. 18 is the first with
-# wheels for Python 3.13.
+# Reading Visium HD: its bin positions are Parquet only. Imported only in
+# formats/parquet.py, which the Visium converter calls for an HD input. 18
+# is the first with wheels for Python 3.13.
 spatial = [
     "pyarrow>=18",
 ]
@@ -97,8 +97,8 @@ dev = [
     # Turns a hang into a failure with a traceback. Without it a stuck test
     # burns the CI job's whole timeout and reports nothing useful.
     "pytest-timeout>=2.3.1",
-    # Used only by tests/test_anndata_roundtrip.py, to check that what this
-    # tool reads and writes matches what anndata itself produces.
+    # The oracle most tests check against: anndata writes their inputs and
+    # reads back what this tool writes. The tool itself never imports it.
     "anndata>=0.13",
 ]
 

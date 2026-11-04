@@ -63,6 +63,7 @@ from adata.elements.write import (
 )
 from adata.formats.mtx import EntryMap, iter_matrix_entries
 from adata.storage import create_dataset, open_store
+from adata.util.markup import literal
 
 #: Datasets of a 0.2 matrix group that are the matrix, not a latent.
 _MATRIX_KEYS = frozenset({
@@ -579,7 +580,7 @@ class CellbenderImport(Converter):
                 )
 
             if detail.raw is not None:
-                with console.status(f"[cyan]Reading the raw counts of {detail.raw.path.name}...[/]"):
+                with console.status(f"[cyan]Reading the raw counts of {literal(detail.raw.path.name)}...[/]"):
                     _write_raw(
                         detail.raw, roots, detail.targets, n_out, matrix.n_features, group,
                     )
