@@ -28,9 +28,13 @@ from adata.commands import (
 from adata.commands import export_image as export_image_cmd
 from adata.util.markup import literal
 
+# Help text is Rich markup on every typer the floor allows: typer 0.21 made
+# that the default, but 0.20 printed it raw, so the escaped brackets of
+# `pyadata-cli\[spatial]` showed their backslash there.
 app = typer.Typer(
     help="Streaming CLI for huge AnnData .h5ad and .zarr stores "
-    "(view, ls, create, subset, split, concat, convert, recast, export, import)."
+    "(view, ls, create, subset, split, concat, convert, recast, export, import).",
+    rich_markup_mode="rich",
 )
 
 
@@ -78,8 +82,8 @@ def _version_callback(value: bool) -> None:
 
 
 # Create sub-apps for export and import
-export_app = typer.Typer(help="Export objects from an AnnData store.")
-import_app = typer.Typer(help="Import objects into an AnnData store.")
+export_app = typer.Typer(help="Export objects from an AnnData store.", rich_markup_mode="rich")
+import_app = typer.Typer(help="Import objects into an AnnData store.", rich_markup_mode="rich")
 app.add_typer(export_app, name="export")
 app.add_typer(import_app, name="import")
 
