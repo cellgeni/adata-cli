@@ -33,6 +33,13 @@ theirs.
 
 ## Follow-ups noticed
 
+- From #124 (`--categorical` now reads numeric-looking labels as text):
+  - `import dataframe --keep-dtypes`, to keep the encodings the existing
+    frame has for columns of the same name (category order, `ordered`,
+    numeric dtypes), so a pipeline need not list every categorical.
+  - An import that adds or replaces only the CSV's columns, joined on the
+    index, and leaves the frame's other columns as they are ("attach
+    metadata" without a round trip of the whole frame).
 - From waves 3 and 4 of the audit fixes:
   - The streaming transpose and other users of `csr_build.BucketSorter`
     append every input block to every bucket, (nnz/chunk)² appends, and

@@ -1544,7 +1544,8 @@ def import_dataframe(
     categorical: Optional[str] = typer.Option(
         None,
         "--categorical",
-        help="Comma separated columns to force to categorical",
+        help="Comma separated columns to read as text and make categoricals, "
+        "numeric-looking labels such as leiden's 0, 1, 10 included",
     ),
     auto_categorical: bool = typer.Option(
         True,
@@ -1557,7 +1558,8 @@ def import_dataframe(
 
     A text column that repeats a value becomes a categorical, as anndata
     makes it; pass --no-auto-categorical to keep text as plain strings, or
-    --categorical to force specific columns.
+    --categorical to make specific columns categoricals of their text,
+    whatever their values look like.
 
     Examples:
         adata import dataframe data.h5ad obs cells.csv -o out.h5ad -i cell_id

@@ -544,7 +544,7 @@ adata import image     data.h5ad uns/spatial/hires tissue.png --inplace
 | `--inplace` | all | Replace the source; the new store is written beside it first |
 | `--no-space-check` | all | Write even if the disk looks too small |
 | `--index-column`, `-i` | `dataframe` | Column that becomes the index; the first by default |
-| `--categorical` | `dataframe` | Comma separated text columns to make categoricals |
+| `--categorical` | `dataframe` | Comma separated columns to read as text and make categoricals |
 | `--auto-categorical / --no-auto-categorical` | `dataframe` | Make text columns that repeat a value categoricals (default on) |
 | `--chunk`, `-C` | `array` | Elements a block (below) |
 
@@ -583,9 +583,12 @@ an integer column float64, with NaN), True/False as bool, and text
 otherwise. A number is what pandas reads as one, so a label such as `1_1`
 stays text, and whole numbers past int64 become uint64, or text past uint64.
 A text column that repeats a value becomes a categorical, as anndata makes
-it. Use `--categorical col1,col2` to make specific text columns categoricals
-whatever their values (numeric columns stay numeric), or
-`--no-auto-categorical` to keep all text as `string-array`. A row with more
+it. Use `--categorical col1,col2` to read specific columns as text and make
+them categoricals whatever their values: leiden clusters `0`, `1`, `10` stay
+labels rather than becoming int64, and `007` keeps its zeros. Missing values
+(as pandas reads them) are gaps, and a column with more than 65,536 distinct
+values is written as `string-array`. Use `--no-auto-categorical` to keep
+all other text as `string-array`. A row with more
 or fewer fields than the header, a header that repeats a name, a column with
 no name (as pandas writes an unnamed index) or named `_index` besides the
 index, and a `--categorical` name the file does not have are refused before
