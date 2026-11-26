@@ -38,7 +38,7 @@ the entire measurement.
 library offers an equivalent, so the rows would only ever read `n/a`. They are covered
 by the complexity guards instead.
 
-## Results — `0.17.6`
+## Results — `0.17.7`
 
 | | |
 |---|---|
@@ -47,10 +47,10 @@ by the complexity guards instead.
 | Page cache | dropped between runs |
 | Address-space ceiling | 12.9 GB per process |
 | Repeats | 3 (fastest shown) |
-| Platform | Linux x86_64, Python 3.12.3 |
-| Versions | adata-cli 0.17.6, anndata 0.13.4, geopandas 1.2.0, scanpy 1.12.5 |
-| Generated | 2026-11-04T16:24:50Z |
-| vs previous | `0.17.5` |
+| Platform | Linux x86_64, Python 3.12.15 |
+| Versions | adata-cli 0.17.7, anndata 0.13.4, geopandas 1.2.0, scanpy 1.12.6 |
+| Generated | 2026-11-26T21:41:49Z |
+| vs previous | `0.17.6` |
 
 ### `startup`
 
@@ -58,9 +58,9 @@ What does each contender cost before it does any work?
 
 | Contender | Wall time | Peak RSS | Output | vs previous |
 |---|---|---|---|---|
-| adata-cli | 0.72 s | 83.0 MB | - | no change |
-| anndata | 1.60 s | 137.1 MB | - | no change |
-| scanpy | 3.41 s | 264.2 MB | - | time -28% |
+| adata-cli | 0.61 s | 80.9 MB | - | time -15% |
+| anndata | 1.34 s | 136.4 MB | - | time -16% |
+| scanpy | 2.89 s | 263.6 MB | - | time -15% |
 
 ### `concat-inner`
 
@@ -68,9 +68,9 @@ Concatenate two stores on the obs axis, inner join.
 
 | Contender | Wall time | Peak RSS | Output | vs previous |
 |---|---|---|---|---|
-| adata-cli | 12.34 s | 258.5 MB | 583.6 MB | time +37% |
-| anndata (concat_on_disk) | 6.20 s | 453.0 MB | 831.9 MB | time +21% |
-| anndata (in memory) | 12.30 s | 1.8 GB | 580.3 MB | time +48% |
+| adata-cli | 11.86 s | 255.6 MB | 583.6 MB | no change |
+| anndata (concat_on_disk) | 5.70 s | 452.5 MB | 831.9 MB | no change |
+| anndata (in memory) | 11.87 s | 1.8 GB | 580.3 MB | no change |
 | scanpy | n/a | n/a | n/a | - |
 | | *scanpy has no concat of its own; it re-exports anndata's* | | | |
 
@@ -80,9 +80,9 @@ Concatenate carrying var columns forward -- the REQ-71798 case.
 
 | Contender | Wall time | Peak RSS | Output | vs previous |
 |---|---|---|---|---|
-| adata-cli | 1.90 s | 249.8 MB | 45.7 MB | time +32% |
-| anndata (concat_on_disk) | 2.29 s | 250.9 MB | 63.2 MB | time +14% |
-| anndata (in memory) | 2.70 s | 290.9 MB | 44.6 MB | time +27% |
+| adata-cli | 1.78 s | 245.8 MB | 45.7 MB | no change |
+| anndata (concat_on_disk) | 2.02 s | 249.2 MB | 63.2 MB | time -12% |
+| anndata (in memory) | 2.42 s | 290.1 MB | 44.6 MB | time -10% |
 
 ### `subset-query`
 
@@ -90,10 +90,10 @@ Keep the obs rows matching a predicate on an existing column.
 
 | Contender | Wall time | Peak RSS | Output | vs previous |
 |---|---|---|---|---|
-| adata-cli | 4.55 s | 149.8 MB | 146.3 MB | time +52%, RSS -37% |
-| anndata (backed) | 5.03 s | 685.3 MB | 146.6 MB | time +35% |
-| anndata (in memory) | 5.24 s | 988.7 MB | 146.6 MB | time +35% |
-| scanpy (filter_cells) | 9.07 s | 1.6 GB | 291.2 MB | time +38% |
+| adata-cli | 4.25 s | 151.7 MB | 146.3 MB | no change |
+| anndata (backed) | 4.72 s | 692.7 MB | 146.6 MB | no change |
+| anndata (in memory) | 4.98 s | 987.9 MB | 146.6 MB | no change |
+| scanpy (filter_cells) | 8.49 s | 1.6 GB | 291.2 MB | no change |
 
 ### `h5ad-to-zarr`
 
@@ -101,8 +101,8 @@ Convert a store to Zarr.
 
 | Contender | Wall time | Peak RSS | Output | vs previous |
 |---|---|---|---|---|
-| adata-cli | 6.70 s | 137.6 MB | 151.6 MB in 4717 files | time +39% |
-| anndata (in memory) | 6.00 s | 815.0 MB | 136.8 MB in 55 files | time +27% |
+| adata-cli | 5.79 s | 135.4 MB | 151.6 MB in 4717 files | time -14% |
+| anndata (in memory) | 5.68 s | 794.8 MB | 136.8 MB in 55 files | no change |
 | scanpy | n/a | n/a | n/a | - |
 | | *no streaming converter; scanpy defers to anndata* | | | |
 
@@ -112,9 +112,9 @@ Report what is in the store, without reading the matrix.
 
 | Contender | Wall time | Peak RSS | Output | vs previous |
 |---|---|---|---|---|
-| adata-cli | 0.73 s | 85.2 MB | - | time +18% |
-| anndata (read_elem on obs) | 1.76 s | 163.5 MB | - | time +17% |
-| anndata (full load) | 3.18 s | 587.3 MB | - | time +22% |
+| adata-cli | 0.63 s | 83.3 MB | - | time -14% |
+| anndata (read_elem on obs) | 1.53 s | 162.8 MB | - | time -13% |
+| anndata (full load) | 2.97 s | 586.6 MB | - | no change |
 
 ### `export-obs`
 
@@ -122,9 +122,9 @@ Write the obs table out as CSV.
 
 | Contender | Wall time | Peak RSS | Output | vs previous |
 |---|---|---|---|---|
-| adata-cli | 0.85 s | 98.7 MB | 1.8 MB | time +20% |
-| anndata (read_elem on obs) | 1.78 s | 163.5 MB | 1.8 MB | time +15% |
-| anndata (full load) | 3.26 s | 587.3 MB | 1.8 MB | time +21% |
+| adata-cli | 0.79 s | 96.6 MB | 1.8 MB | no change |
+| anndata (read_elem on obs) | 1.55 s | 163.7 MB | 1.8 MB | time -13% |
+| anndata (full load) | 3.05 s | 586.3 MB | 1.8 MB | no change |
 
 ### `split-by-sample`
 
@@ -132,8 +132,8 @@ Write one store per distinct value of an obs column.
 
 | Contender | Wall time | Peak RSS | Output | vs previous |
 |---|---|---|---|---|
-| adata-cli | 7.33 s | 189.7 MB | 301.0 MB in 9 files | time +44% |
-| anndata (hand-written loop) | 7.86 s | 689.2 MB | 301.7 MB in 8 files | time +41% |
+| adata-cli | 6.90 s | 163.3 MB | 301.0 MB in 9 files | RSS -14% |
+| anndata (hand-written loop) | 7.46 s | 688.6 MB | 301.7 MB in 8 files | no change |
 
 ### `ls`
 
@@ -141,8 +141,8 @@ List everything in the store.
 
 | Contender | Wall time | Peak RSS | Output | vs previous |
 |---|---|---|---|---|
-| adata-cli | 0.72 s | 84.8 MB | - | no change |
-| h5py (visit) | 1.68 s | 140.1 MB | - | time +14% |
+| adata-cli | 0.62 s | 82.5 MB | - | time -14% |
+| h5py (visit) | 1.40 s | 139.6 MB | - | time -17% |
 | h5ls -r | n/a | n/a | n/a | - |
 | | *h5ls is not installed* | | | |
 
@@ -152,8 +152,8 @@ Write an empty store with a given obs/var shape.
 
 | Contender | Wall time | Peak RSS | Output | vs previous |
 |---|---|---|---|---|
-| adata-cli | 0.78 s | 98.0 MB | 3.4 MB | time +24% |
-| anndata | 8.76 s | 228.4 MB | 49.2 MB | time +20% |
+| adata-cli | 0.68 s | 95.6 MB | 3.4 MB | time -13% |
+| anndata | 8.44 s | 241.0 MB | 49.2 MB | no change |
 
 ### `export-array`
 
@@ -161,9 +161,9 @@ Write a dense element out as .npy.
 
 | Contender | Wall time | Peak RSS | Output | vs previous |
 |---|---|---|---|---|
-| adata-cli | 0.73 s | 87.6 MB | 10.0 MB | no change |
-| anndata (read_elem) | 1.62 s | 158.0 MB | 10.0 MB | no change |
-| anndata (full load) | 3.14 s | 587.3 MB | 10.0 MB | time +11% |
+| adata-cli | 0.64 s | 85.7 MB | 10.0 MB | time -13% |
+| anndata (read_elem) | 1.41 s | 157.1 MB | 10.0 MB | time -13% |
+| anndata (full load) | 2.96 s | 586.9 MB | 10.0 MB | no change |
 
 ### `export-sparse`
 
@@ -171,9 +171,9 @@ Write X out as Matrix Market text.
 
 | Contender | Wall time | Peak RSS | Output | vs previous |
 |---|---|---|---|---|
-| adata-cli | 11.33 s | 261.3 MB | 661.3 MB | time +28% |
-| anndata (sparse_dataset) | 7.00 s | 971.4 MB | 661.6 MB | time +26% |
-| anndata (full load) | 7.21 s | 779.0 MB | 661.6 MB | time +26% |
+| adata-cli | 10.85 s | 256.0 MB | 661.3 MB | no change |
+| anndata (sparse_dataset) | 6.50 s | 971.1 MB | 661.6 MB | no change |
+| anndata (full load) | 6.61 s | 779.6 MB | 661.6 MB | no change |
 
 ### `import-dataframe`
 
@@ -181,8 +181,8 @@ Replace obs from a CSV.
 
 | Contender | Wall time | Peak RSS | Output | vs previous |
 |---|---|---|---|---|
-| adata-cli | 1.42 s | 135.8 MB | 296.0 MB | no change |
-| anndata | 6.92 s | 596.5 MB | 291.2 MB | time +51% |
+| adata-cli | 1.28 s | 133.7 MB | 296.0 MB | no change |
+| anndata | 6.64 s | 596.1 MB | 291.2 MB | no change |
 
 ### `import-10x-mtx`
 
@@ -190,8 +190,8 @@ Read a gzipped Cell Ranger 3 MTX folder of the same counts into an h5ad. adata-c
 
 | Contender | Wall time | Peak RSS | Output | vs previous |
 |---|---|---|---|---|
-| adata-cli | 19.04 s | 392.7 MB | 279.2 MB | time +36% |
-| scanpy | 14.73 s | 3.3 GB | 284.6 MB | time +20% |
+| adata-cli | 18.90 s | 383.0 MB | 279.2 MB | no change |
+| scanpy | 13.51 s | 3.3 GB | 284.6 MB | no change |
 
 ### `import-xenium`
 
@@ -199,8 +199,8 @@ Read a Xenium bundle of the same counts -- the cell matrix, a cells.csv.gz of ce
 
 | Contender | Wall time | Peak RSS | Output | vs previous |
 |---|---|---|---|---|
-| adata-cli | 12.24 s | 192.7 MB | 131.9 MB | time +22% |
-| scanpy | 8.30 s | 710.1 MB | 280.3 MB | time +32% |
+| adata-cli | 12.06 s | 200.1 MB | 131.9 MB | no change |
+| scanpy | 7.85 s | 711.2 MB | 280.3 MB | no change |
 
 ### `import-visium-cells`
 
@@ -208,8 +208,8 @@ Read Space Ranger 4's segmented cells holding the same counts -- the cell matrix
 
 | Contender | Wall time | Peak RSS | Output | vs previous |
 |---|---|---|---|---|
-| adata-cli | 14.29 s | 173.0 MB | 131.8 MB | time +23% |
-| scanpy | 10.51 s | 774.2 MB | 281.2 MB | time +35% |
+| adata-cli | 13.61 s | 170.6 MB | 131.8 MB | no change |
+| scanpy | 9.64 s | 770.6 MB | 281.2 MB | no change |
 
 ### `import-csv`
 
@@ -217,8 +217,8 @@ Read a dense count table, a CSV of the first 10,000 cells, into an h5ad. adata-c
 
 | Contender | Wall time | Peak RSS | Output | vs previous |
 |---|---|---|---|---|
-| adata-cli | 10.06 s | 183.5 MB | 56.5 MB | time +33% |
-| anndata | 43.38 s | 1.8 GB | 44.7 MB | time +18% |
+| adata-cli | 9.99 s | 185.8 MB | 56.5 MB | no change |
+| anndata | 16.63 s | 1.8 GB | 44.7 MB | time -62% |
 
 ### `concat-outer`
 
@@ -226,9 +226,9 @@ Concatenate two stores keeping the union of variables.
 
 | Contender | Wall time | Peak RSS | Output | vs previous |
 |---|---|---|---|---|
-| adata-cli | 12.28 s | 258.5 MB | 583.6 MB | time +59% |
-| anndata (concat_on_disk) | 6.19 s | 452.9 MB | 831.9 MB | no change |
-| anndata (in memory) | 12.32 s | 1.8 GB | 580.3 MB | time +48% |
+| adata-cli | 11.93 s | 235.5 MB | 583.6 MB | no change |
+| anndata (concat_on_disk) | 5.74 s | 452.8 MB | 831.9 MB | no change |
+| anndata (in memory) | 11.88 s | 1.8 GB | 580.3 MB | no change |
 
 ### `recast-narrow`
 
@@ -236,8 +236,8 @@ Narrow X from float64 values with int64 indices to float32 and int32, as issue #
 
 | Contender | Wall time | Peak RSS | Input → output | vs previous |
 |---|---|---|---|---|
-| adata-cli | 2.52 s | 133.2 MB | 815.6 MB → 415.4 MB (-49%) | time -12% |
-| anndata (in memory) | 3.97 s | 1.8 GB | 815.6 MB → 417.3 MB (-49%) | no change |
+| adata-cli | 2.40 s | 131.9 MB | 815.6 MB → 415.4 MB (-49%) | no change |
+| anndata (in memory) | 3.67 s | 1.8 GB | 815.6 MB → 417.3 MB (-49%) | no change |
 | scanpy | n/a | n/a | n/a | - |
 | | *no dtype rewrite; scanpy defers to anndata* | | | |
 
@@ -247,8 +247,8 @@ The same narrowing on an lzf-compressed X. Integer counts in float64 are mostly 
 
 | Contender | Wall time | Peak RSS | Input → output | vs previous |
 |---|---|---|---|---|
-| adata-cli | 8.25 s | 142.3 MB | 302.5 MB → 291.1 MB (-4%) | time +48% |
-| anndata (in memory) | 8.16 s | 1.8 GB | 302.5 MB → 291.2 MB (-4%) | time +54% |
+| adata-cli | 7.87 s | 140.7 MB | 302.5 MB → 291.1 MB (-4%) | no change |
+| anndata (in memory) | 7.78 s | 1.8 GB | 302.5 MB → 291.2 MB (-4%) | no change |
 
 ### `convert-layout`
 
@@ -256,9 +256,9 @@ Transpose X from CSR to CSC. The output should be the size of the input: 0.7.0 f
 
 | Contender | Wall time | Peak RSS | Input → output | vs previous |
 |---|---|---|---|---|
-| adata-cli (streaming) | 15.20 s | 205.7 MB | 291.2 MB → 297.0 MB (+2%) | time +11% |
-| adata-cli (--in-memory) | 9.98 s | 2.3 GB | 291.2 MB → 297.0 MB (+2%) | time +35% |
-| anndata (in memory) | 7.16 s | 987.3 MB | 291.2 MB → 297.0 MB (+2%) | time +44% |
+| adata-cli (streaming) | 14.49 s | 199.9 MB | 291.2 MB → 297.0 MB (+2%) | no change |
+| adata-cli (--in-memory) | 9.48 s | 2.3 GB | 291.2 MB → 297.0 MB (+2%) | no change |
+| anndata (in memory) | 6.90 s | 987.5 MB | 291.2 MB → 297.0 MB (+2%) | no change |
 
 ### `rss-vs-size`
 
@@ -266,8 +266,8 @@ Does peak memory track input size, at a fixed --chunk? This is the README's clai
 
 | Contender | Wall time | Peak RSS | Output | vs previous |
 |---|---|---|---|---|
-| adata-cli | 12.16 s | 258.4 MB | 583.6 MB | time +59% |
-| anndata (in memory) | 12.18 s | 1.8 GB | 580.3 MB | time +59% |
+| adata-cli | 11.90 s | 240.6 MB | 583.6 MB | no change |
+| anndata (in memory) | 11.82 s | 1.8 GB | 580.3 MB | no change |
 
 ---
 
@@ -281,6 +281,7 @@ Rows marked `n/a` are operations the baseline does not offer; that is a result, 
 
 | Run | Ref | Tier | Wall time | Peak RSS | Raw |
 |---|---|---|---|---|---|
+| 2026-11-26T21:41:49Z | `0.17.7` | ci | 11.86 s | 255.6 MB | [json](https://github.com/cellgeni/adata-cli/blob/main/docs/benchmarks/0.17.7.json) |
 | 2026-11-04T16:24:50Z | `0.17.6` | ci | 12.34 s | 258.5 MB | [json](https://github.com/cellgeni/adata-cli/blob/main/docs/benchmarks/0.17.6.json) |
 | 2026-11-02T15:36:02Z | `0.17.5` | ci | 9.00 s | 262.8 MB | [json](https://github.com/cellgeni/adata-cli/blob/main/docs/benchmarks/0.17.5.json) |
 | 2026-10-30T17:34:55Z | `0.17.4` | ci | 11.89 s | 251.7 MB | [json](https://github.com/cellgeni/adata-cli/blob/main/docs/benchmarks/0.17.4.json) |
