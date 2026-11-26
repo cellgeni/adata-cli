@@ -100,16 +100,16 @@ def _run(workflow, event, ref, inputs=None, failing=(), outputs=None):
     return results
 
 
-PUBLISHERS = {"publish-testpypi", "publish-pypi", "image"}
+PUBLISHERS = {"publish-testpypi", "publish-pypi", "image", "github-release"}
 TAG = "refs/tags/0.17.5"
 
 
 @pytest.mark.parametrize(
     "event, ref, target, failing, published",
     [
-        ("push", TAG, None, (), {"publish-pypi", "image"}),
+        ("push", TAG, None, (), {"publish-pypi", "image", "github-release"}),
         ("workflow_dispatch", TAG, "testpypi", (), {"publish-testpypi"}),
-        ("workflow_dispatch", TAG, "pypi", (), {"publish-pypi", "image"}),
+        ("workflow_dispatch", TAG, "pypi", (), {"publish-pypi", "image", "github-release"}),
         ("workflow_dispatch", "refs/heads/main", "testpypi", (), {"publish-testpypi"}),
         # check-version refuses a branch, so the run fails rather than pass.
         ("workflow_dispatch", "refs/heads/main", "pypi", ("check-version",), set()),
@@ -117,11 +117,14 @@ TAG = "refs/tags/0.17.5"
         ("push", TAG, None, ("check-version",), set()),
         ("push", TAG, None, ("build",), set()),
         ("push", TAG, None, ("publish-pypi",), set()),
+        # PyPI has the version by then, so the release still announces it.
+        ("push", TAG, None, ("image",), {"publish-pypi", "github-release"}),
     ],
     ids=[
         "tag", "testpypi-dispatch-from-tag", "pypi-dispatch-from-tag",
         "testpypi-dispatch-from-branch", "pypi-dispatch-from-branch",
         "tests-fail", "tag-is-not-the-version", "build-fails", "pypi-upload-fails",
+        "image-fails",
     ],
 )
 def test_each_run_publishes_exactly_what_passed(event, ref, target, failing, published):
@@ -180,6 +183,59 @@ def test_check_version_passes_only_a_tag_that_names_the_version(
     assert (done.returncode == 0) == ok, done.stdout + done.stderr
     if ok:
         assert output.read_text() == f"version={declared}\n"
+
+
+@pytest.mark.parametrize(
+    "heading, ok",
+    [
+        ("## 0.17.5\n\nText.\n", True),
+        ("## 0.17.4\n\nText.\n", False),
+        ("## 0.17.5 (soon)\n\nText.\n", False),
+        ("## 0.17.5\n\n## 0.17.4\n\nText.\n", False),
+        ("## 0.17.5\n", False),
+    ],
+    ids=["has-the-section", "no-section", "heading-is-not-the-tag", "section-is-empty", "heading-ends-the-file"],
+)
+def test_check_version_refuses_a_tag_the_changelog_does_not_cover(tmp_path, heading, ok):
+    """The release's notes are the tag's changelog section, so a tag with
+    none, or with no text in it, is refused before anything is published:
+    once PyPI has the version the tag cannot change to mend the notes."""
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "changelog.md").write_text(f"# Changelog\n\n{heading}")
+    done = _bash(
+        _script("publish.yml", "check-version", "changelog"), tmp_path, TAG="0.17.5",
+    )
+    assert (done.returncode == 0) == ok, done.stdout + done.stderr
+
+
+def test_the_release_notes_are_the_tags_changelog_section(tmp_path):
+    """GitHub releases stopped at 0.11.1: they were cut by hand and the
+    checklist never said so. publish.yml now writes the notes from the
+    changelog, the tag's section alone."""
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "changelog.md").write_text(
+        "# Changelog\n\n## 0.17.6\n\nNewer.\n\n## 0.17.5\n\nThis one.\n\n"
+        "### Fixed\n\n- **A fix**.\n\n## 0.17.4\n\nOlder.\n"
+    )
+    script = _script("publish.yml", "github-release", "notes")
+
+    done = _bash(script, tmp_path, TAG="0.17.5")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert (tmp_path / "notes.md").read_text() == "\nThis one.\n\n### Fixed\n\n- **A fix**.\n\n"
+
+    # A tag the changelog lacks gives empty notes, and the job fails.
+    assert _bash(script, tmp_path, TAG="0.17.9").returncode != 0
+
+
+def test_the_real_changelog_gives_notes_for_its_newest_release(tmp_path):
+    (tmp_path / "docs").mkdir()
+    changelog = (ROOT / "docs" / "changelog.md").read_text()
+    (tmp_path / "docs" / "changelog.md").write_text(changelog)
+    newest = re.search(r"^## (\S+)$", changelog, re.M)[1]
+    done = _bash(_script("publish.yml", "github-release", "notes"), tmp_path, TAG=newest)
+    assert done.returncode == 0, done.stdout + done.stderr
+    notes = (tmp_path / "notes.md").read_text()
+    assert notes.strip() and "\n## " not in notes
 
 
 def test_the_image_is_pushed_only_from_publish():
