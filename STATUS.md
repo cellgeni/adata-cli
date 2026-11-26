@@ -7,7 +7,7 @@ moves; the plan of record for the current item is in the section below.
 
 | Version | What | Issues |
 |---|---|---|
-| 0.17.7 | `import dataframe --categorical` keeps numeric-looking labels (leiden's 0, 1, 10) as categoricals of their text; every tag gets its GitHub release from the changelog | #124, #114 |
+| 0.17.7 | `import dataframe --categorical` keeps numeric-looking labels (leiden's 0, 1, 10) as categoricals of their text; `convert --feature-type` / `--split-feature-types` take a 10x input with no feature types (Cell Ranger 2) as gene expression; every tag gets its GitHub release from the changelog | #124, #127, #114 |
 | 0.17.6 | Audit fixes, waves 3 and 4 (streaming): reads and writes follow the source's chunks and Zarr v3 shards, each shard written once; `recast` checks and converts in `--chunk` blocks; `split`'s memory no longer grows with its groups; pickle arrays checked before use; 16-bit images export as they are; plain-line logs and names printed as stored; h5py >= 3.16 | #96, #97, #101, #103 |
 | 0.17.5 | Audit fixes, wave 2 (fidelity): scanpy's marker genes and anndata 0.7 files survive every copy, data held outside an h5ad refused; subset/split keep every named row and subset every element as anndata; concat takes any number of inputs in anndata's order; 10x, MTX, Parse, CellBender, loom, SCope and MuData fixes; release pipeline hardened, image non-root; zarr >= 3.2 | #93, #94, #95, #99, #100, #102 |
 | 0.17.4 | Audit fixes, wave 1 (data safety): every writer staged and checked, close errors fail the command, `--chunk` at least 1, a free-space check; text/MTX/dense imports refuse what they cannot read; concat refuses repeated var names and keeps missing values and dtypes; import/export type values as pandas does; Pillow 13 | #89, #90, #91, #92, #98 |
@@ -34,6 +34,10 @@ theirs.
 
 ## Follow-ups noticed
 
+- From #127: `convert` from h5ad refuses `--feature-type` and
+  `--split-feature-types`; they could filter on var's `feature_types`
+  column, so one h5ad converted from a multiome `.h5` splits as the `.h5`
+  would.
 - From #124 (`--categorical` now reads numeric-looking labels as text):
   - `import dataframe --keep-dtypes`, to keep the encodings the existing
     frame has for columns of the same name (category order, `ordered`,
