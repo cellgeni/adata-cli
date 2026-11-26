@@ -7,6 +7,7 @@ moves; the plan of record for the current item is in the section below.
 
 | Version | What | Issues |
 |---|---|---|
+| 0.17.7 | `import dataframe --categorical` keeps numeric-looking labels (leiden's 0, 1, 10) as categoricals of their text; every tag gets its GitHub release from the changelog | #124, #114 |
 | 0.17.6 | Audit fixes, waves 3 and 4 (streaming): reads and writes follow the source's chunks and Zarr v3 shards, each shard written once; `recast` checks and converts in `--chunk` blocks; `split`'s memory no longer grows with its groups; pickle arrays checked before use; 16-bit images export as they are; plain-line logs and names printed as stored; h5py >= 3.16 | #96, #97, #101, #103 |
 | 0.17.5 | Audit fixes, wave 2 (fidelity): scanpy's marker genes and anndata 0.7 files survive every copy, data held outside an h5ad refused; subset/split keep every named row and subset every element as anndata; concat takes any number of inputs in anndata's order; 10x, MTX, Parse, CellBender, loom, SCope and MuData fixes; release pipeline hardened, image non-root; zarr >= 3.2 | #93, #94, #95, #99, #100, #102 |
 | 0.17.4 | Audit fixes, wave 1 (data safety): every writer staged and checked, close errors fail the command, `--chunk` at least 1, a free-space check; text/MTX/dense imports refuse what they cannot read; concat refuses repeated var names and keeps missing values and dtypes; import/export type values as pandas does; Pillow 13 | #89, #90, #91, #92, #98 |
@@ -26,10 +27,7 @@ The conversion epic's sub-issues (#21–#30) are all done and ticked in #20.
 
 ## In progress
 
-- #124: `import dataframe --categorical` reads numeric-looking labels as
-  text (#125), for 0.17.7.
-
-The fixes from the October 2026 audit (epic #87, 164 findings in 16
+Nothing. The fixes from the October 2026 audit (epic #87, 164 findings in 16
 batches) finished with 0.17.6; the sub-issues (#88–#103) are all done and
 ticked in #87. The batch names in the follow-ups below (B1 to B10) are
 theirs.

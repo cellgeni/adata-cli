@@ -8,6 +8,30 @@ nav_order: 7
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
+## 0.17.7
+
+`adata import dataframe --categorical` keeps numeric-looking labels such as
+leiden clusters as categoricals of their text, so an `export dataframe` →
+edit → `import dataframe` round trip keeps them. Every tag now gets its
+GitHub release, with its changelog section as the notes.
+
+### Fixed
+
+- **`--categorical` keeps numeric-looking labels**
+  ([#124](https://github.com/cellgeni/adata-cli/issues/124)). `adata import
+  dataframe … --categorical leiden` left leiden clusters `0`, `1`, `10` as
+  int64. A column named in `--categorical` is now read as text and stored as
+  a categorical whatever its values look like, so `007` also keeps its
+  zeros; what pandas reads as missing stays a gap. A forced column with more
+  than 65,536 distinct values is written as strings, numbers included (it
+  used to stay numeric).
+- **Every tag gets a GitHub release**
+  ([#114](https://github.com/cellgeni/adata-cli/pull/114)). Releases were
+  cut by hand and stopped at 0.11.1; 0.12.0 to 0.17.6 have been backfilled.
+  `publish.yml` now creates the release once PyPI has the version, with the
+  tag's section of this changelog as its notes and the benchmark summary
+  appended, and refuses a tag with no section before anything is published.
+
 ## 0.17.6
 
 The last wave of fixes from the October 2026 audit
