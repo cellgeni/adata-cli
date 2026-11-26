@@ -258,13 +258,54 @@ def test_a_cell_ranger_2_file_with_one_genome_needs_no_flag(tmp_path):
     "extra,message",
     [
         (["--genome", "dm6"], "No genome 'dm6' in this file; it has: hg19, mm10"),
-        (["--genome", "hg19", "--feature-type", "Gene Expression"], "records no feature types"),
+        (
+            ["--genome", "hg19", "--feature-type", "Peaks"],
+            "No features of type 'Peaks'; Cell Ranger 2's layout records no "
+            "feature types, so this file holds gene expression only.",
+        ),
     ],
 )
 def test_bad_cell_ranger_2_options_are_refused(tmp_path, extra, message):
     result = _convert(_v2(tmp_path), "-o", tmp_path / "o.h5ad", *extra)
     assert result.exit_code == 1
     assert message in _out(result)
+    assert list(tmp_path.glob("o*")) == []
+
+
+def _same_conversion(got, expected) -> None:
+    assert list(got.obs_names) == list(expected.obs_names)
+    assert list(got.var_names) == list(expected.var_names)
+    assert list(got.var.columns) == list(expected.var.columns)
+    for name in expected.var.columns:
+        assert list(got.var[name]) == list(expected.var[name]), name
+    assert got.X.dtype == expected.X.dtype
+    assert np.array_equal(got.X.toarray(), expected.X.toarray())
+
+
+@pytest.mark.parametrize(
+    "flags, written",
+    [
+        (["--feature-type", "Gene Expression"], "o.h5ad"),
+        (["--split-feature-types"], "o.Gene_Expression.h5ad"),
+    ],
+    ids=["feature-type", "split"],
+)
+def test_the_type_flags_take_a_cell_ranger_2_file_as_gene_expression(tmp_path, flags, written):
+    """#127: --feature-type and --split-feature-types were refused on a Cell
+    Ranger 2 file, so a pipeline had to know each input's 10x version before
+    it chose its flags. Cell Ranger 2 measured gene expression alone."""
+    h5 = _v2(tmp_path)
+    plain = tmp_path / "plain.h5ad"
+    _ok(h5, "-o", plain, "--genome", "hg19")
+
+    result = _ok(h5, "-o", tmp_path / "o.h5ad", "--genome", "hg19", *flags)
+
+    assert sorted(p.name for p in tmp_path.glob("o*.h5ad")) == [written]
+    _same_conversion(_read(tmp_path / written), _read(plain))
+    assert (
+        "Warning: Cell Ranger 2's layout records no feature types; every feature "
+        "is taken as 'Gene Expression', the only type such a file holds."
+    ) in _out(result)
 
 
 def test_an_inconsistent_matrix_is_refused_before_writing(tenx, tmp_path):

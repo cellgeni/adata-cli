@@ -50,6 +50,10 @@ from adata.util.names import (
 
 VAR_NAMES = ("gene_symbols", "gene_ids")
 
+#: The type of every feature of an input that records none: Cell Ranger 2
+#: and STARsolo's two-column files measured gene expression alone.
+GENE_EXPRESSION = "Gene Expression"
+
 #: Rows of a string column handled per read when streaming one.
 STRING_STEP = 1 << 18
 
@@ -137,13 +141,40 @@ def plan_targets(
     options: Options,
     *,
     noun: str,
+    untyped: Optional[str] = None,
 ) -> Tuple[List[Path], List[Target], List[str]]:
     """The outputs to write, the features each keeps, and any warnings.
 
     One output, unless `--split-feature-types` asks for one per type. `keep`
     is what survives filters the caller applied first, such as `--genome`;
     `noun` names the input in messages ("file", "folder").
+
+    `types` is None for an input that records no feature types; `untyped`
+    then says why ("genes.tsv records no feature types"). Such an input
+    holds gene expression alone, so the type flags work on it as on a v3
+    input of that one type, and a pipeline can pass the same flags for any
+    10x input (#127). Without `untyped` the flags are refused.
     """
+    warnings: List[str] = []
+    if types is None and (options.feature_type is not None or options.split_feature_types):
+        if untyped is None:
+            raise ValueError(
+                f"This {noun} records no feature types; --feature-type and "
+                "--split-feature-types need them."
+            )
+        if options.feature_type is not None and options.feature_type != GENE_EXPRESSION:
+            raise ValueError(
+                f"No features of type {options.feature_type!r}; {untyped}, so "
+                f"this {noun} holds gene expression only."
+            )
+        # Used only to select: var gains no feature_types column, so the
+        # output is the one the conversion gives without the flag.
+        types = np.full(len(names), GENE_EXPRESSION, dtype=object)
+        warnings.append(
+            f"{untyped}; every feature is taken as "
+            f"{GENE_EXPRESSION!r}, the only type such a {noun} holds."
+        )
+
     groups: List[Tuple[Optional[str], np.ndarray]] = []
     if options.feature_type is not None:
         available = [t for t, _ in type_counts(types)]
@@ -176,7 +207,6 @@ def plan_targets(
     stems = unique_names([label for label, _ in groups if label is not None])
     outputs: List[Path] = []
     targets: List[Target] = []
-    warnings: List[str] = []
     for label, mask in groups:
         path = output
         if options.split_feature_types:
@@ -403,7 +433,7 @@ def export_features(
         types = column(types_col)
     else:
         missing.append("feature types (a feature_types column, or --feature-types-column)")
-        types = ["Gene Expression"] * n
+        types = [GENE_EXPRESSION] * n
 
     if missing:
         if not options.force:
