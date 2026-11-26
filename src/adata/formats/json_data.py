@@ -20,6 +20,7 @@ from adata.elements.write import (
     write_string_array,
 )
 from adata.storage import is_dataset, is_group
+from adata.util.markup import literal
 
 
 def export_json(
@@ -100,6 +101,9 @@ def _pyify(value: Any, max_elements: int) -> Any:
             raise ValueError(
                 f"Refusing to convert array of size {value.size} (> {max_elements}) to JSON."
             )
+        if value.dtype.names is not None:
+            # A record array (scanpy's rank_genes_groups): one list per field.
+            return {f: _pyify(value[f], max_elements) for f in value.dtype.names}
         if np.issubdtype(value.dtype, np.bytes_) or value.dtype.kind == "O":
             value = decode_str_array(value)
         return value.tolist()
@@ -183,11 +187,11 @@ def import_json(
         console.print(
             f"[yellow]Warning:[/] {len(skipped)} null "
             f"{'value was' if len(skipped) == 1 else 'values were'} left out, as "
-            f"anndata leaves out None: {', '.join(skipped[:5])}"
+            f"anndata leaves out None: {literal(', '.join(skipped[:5]))}"
             f"{', ...' if len(skipped) > 5 else ''}"
         )
 
-    console.print(f"[green]Imported[/] JSON data into '{obj}'")
+    console.print(f"[green]Imported[/] JSON data into '{literal(obj)}'")
 
 
 def write_json_value(parent: Any, name: str, value: Any) -> List[str]:

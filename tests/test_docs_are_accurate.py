@@ -510,3 +510,94 @@ def _problems_with_example(line: str) -> List[str]:
 def test_help_examples_name_real_commands_and_options(line, source):
     problems = _problems_with_example(line)
     assert not problems, f"{source}: `{line}` -- " + "; ".join(problems)
+
+
+# ---------------------------------------------------------------------------
+# the test suite's map
+#
+# docs/reference/testing.md has a table of what each test file covers. It had
+# fallen eight files behind (the spatial converters, the row scatter, staging
+# and write safety among them), so a contributor looking for where Visium or
+# the scatter is tested found nothing. Both directions are checked: every file
+# has a row, and every row names a file that exists.
+
+TESTING_MD = _front_matter((SITE / "reference" / "testing.md").read_text())[1]
+TEST_FILES = sorted(p.name for p in (REPO / "tests").glob("test_*.py"))
+
+
+@pytest.mark.parametrize("name", TEST_FILES)
+def test_every_test_file_is_in_the_suite_map(name):
+    assert f"`{name}`" in TESTING_MD, (
+        f"tests/{name} has no row in the table of docs/reference/testing.md "
+        "(\"How the suite is organised\"): say what it covers."
+    )
+
+
+def test_the_suite_map_names_only_test_files_that_exist():
+    named = set(re.findall(r"`(test_[a-z0-9_]+\.py)`", TESTING_MD))
+    assert named, "no test files found in docs/reference/testing.md"
+    gone = sorted(named - set(TEST_FILES))
+    assert not gone, f"docs/reference/testing.md names test files that do not exist: {gone}"
+
+
+# ---------------------------------------------------------------------------
+# every option is in the reference
+#
+# The checks above catch an option the docs name that does not exist, not one
+# that exists and the docs never name: `split`'s table left out `--suffix`,
+# and `export`'s `--chunk` and `--in-memory`, `create`'s `--zarr-format` and
+# `import dataframe`'s `--index-column` were in no table at all. Each visible
+# option has to appear in its command's section of commands.md. A format's
+# own `convert` flags live on its page under reference/formats/ instead.
+
+FORMAT_PAGES = "\n".join(
+    p.read_text() for p in sorted((SITE / "reference" / "formats").glob("*.md"))
+)
+
+
+def _section(name: str) -> str:
+    match = re.search(
+        rf"^## `{re.escape(name)}`\n(.*?)(?=^## |\Z)", COMMANDS_MD, re.S | re.M
+    )
+    return match.group(1) if match else ""
+
+
+def _documented_options() -> List[Tuple[str, str, List[str]]]:
+    found = []
+
+    def walk(command: Any, path: List[str]) -> None:
+        subs = _subcommands(command)
+        for name, sub in subs.items():
+            if not getattr(sub, "hidden", False):
+                walk(sub, path + [name])
+        if subs or not path:
+            return
+        for param in command.params:
+            if getattr(param, "hidden", False) or getattr(param, "param_type_name", "") != "option":
+                continue
+            flags = [o for o in list(param.opts) + list(param.secondary_opts) if o.startswith("--")]
+            if flags and "--help" not in flags:
+                found.append((" ".join(path), path[0], flags))
+
+    walk(ROOT, [])
+    return found
+
+
+DOCUMENTED_OPTIONS = _documented_options()
+
+
+@pytest.mark.parametrize(
+    "command,section,flags",
+    DOCUMENTED_OPTIONS,
+    ids=[f"{c}:{f[0]}" for c, _, f in DOCUMENTED_OPTIONS],
+)
+def test_every_option_is_named_in_the_reference(command, section, flags):
+    text = _section(section)
+    if section == "convert":
+        text += FORMAT_PAGES
+    named = [f for f in flags if re.search(rf"`[^`]*{re.escape(f)}(?![\w-])[^`]*`", text)]
+    assert named, (
+        f"`adata {command}` takes {' / '.join(flags)}, which the `{section}` "
+        "section of docs/reference/commands.md never names"
+        + (" (nor does any page under reference/formats/)" if section == "convert" else "")
+    )

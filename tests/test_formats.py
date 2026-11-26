@@ -85,18 +85,117 @@ def test_image_export_scales_unit_range_floats(store, temp_dir):
     assert 120 <= got[0, 1] <= 135
 
 
-def test_image_export_clips_floats_already_in_byte_range(store, temp_dir):
+def test_image_export_keeps_floats_already_in_byte_range(store, temp_dir):
     path, opener = store
     with opener("a") as root:
-        ew.write_dense(root["uns"], "img", np.array([[-5.0, 300.0], [10.0, 20.0]]))
+        ew.write_dense(root["uns"], "img", np.array([[0.0, 255.0], [10.0, 20.0]]))
         out = temp_dir / "f.png"
         export_image(root, "uns/img", out, console)
 
     from PIL import Image
 
+    assert np.array_equal(np.asarray(Image.open(out)), [[0, 255], [10, 20]])
+
+
+@pytest.mark.parametrize("suffix", [".png", ".tiff", ".tif"])
+def test_a_16_bit_image_exports_as_16_bit(store, png, temp_dir, suffix):
+    """F066: values from 255 up were clipped to 255 with no warning, so a
+    16-bit fluorescence or morphology image (stored as uint16 by `import
+    image`) came back as [0, 255, 255, ...]. One channel of 16 bits is
+    written as a 16-bit PNG or TIFF, values as they are."""
+    from PIL import Image
+
+    array = (np.arange(24, dtype=np.uint16) * 2500).reshape(4, 6)
+    source = temp_dir / "deep.png"
+    Image.fromarray(array).save(source)
+    path, opener = store
+    with opener("a") as root:
+        import_image(root, "uns/img", source, console)
+    with opener("r") as root:
+        assert root["uns"]["img"].dtype == np.uint16
+        out = temp_dir / f"out{suffix}"
+        export_image(root, "uns/img", out, console)
+
     got = np.asarray(Image.open(out))
-    assert got[0, 0] == 0, "negatives clip to 0"
-    assert got[0, 1] == 255, "values above 255 clip to 255"
+    assert got.dtype == np.uint16 and np.array_equal(got, array)
+
+
+@pytest.mark.parametrize(
+    "array, phrase",
+    [
+        ((np.arange(12, dtype=np.uint16) * 1000).reshape(2, 2, 3), "a colour image keeps 8 bits a channel"),
+        (np.array([[0.0, 4095.0], [10.0, 20.0]]), "from 0 to 4095"),
+        (np.array([[-5.0, 3.0], [10.0, 20.0]]), "from -5 to 20"),
+        (np.array([[0, 70000], [1, 2]], dtype=np.int32), "whole numbers from 0 to 65535"),
+        (np.array([[0.5, np.nan], [0.1, 0.2]]), "not finite"),
+    ],
+    ids=["rgb16", "float-4095", "negative", "past-16-bit", "nan"],
+)
+def test_image_values_an_image_cannot_hold_are_refused_unless_scaled(store, temp_dir, array, phrase):
+    """F066: such values were clipped into 0-255 silently. They are refused,
+    naming the values, unless --scale asks for them to be stretched onto
+    0-255, which maps the smallest to 0 and the largest to 255."""
+    from PIL import Image
+
+    path, opener = store
+    with opener("a") as root:
+        ew.write_dense(root["uns"], "img", array)
+    out = temp_dir / "x.png"
+    with opener("r") as root:
+        with pytest.raises(ValueError, match="--scale") as caught:
+            export_image(root, "uns/img", out, console)
+        assert phrase in str(caught.value)
+        assert not out.exists()
+        export_image(root, "uns/img", out, console, scale=True)
+
+    got = np.asarray(Image.open(out))
+    values = array.astype(np.float64)
+    finite = np.isfinite(values)
+    lo, hi = values[finite].min(), values[finite].max()
+    expected = np.where(finite, np.rint((np.where(finite, values, lo) - lo) / (hi - lo) * 255), 0)
+    assert got.dtype == np.uint8 and np.array_equal(got, expected.astype(np.uint8))
+
+
+def test_sixteen_bits_into_a_format_that_keeps_eight_is_refused(store, temp_dir):
+    """F066: JPEG holds 8 bits a pixel, so a 16-bit image is refused there
+    rather than clipped, pointing at the formats that keep 16."""
+    path, opener = store
+    with opener("a") as root:
+        ew.write_dense(root["uns"], "img", (np.arange(4, dtype=np.uint16) * 1000).reshape(2, 2))
+        with pytest.raises(ValueError, match=r"JPEG keeps 8 bits a pixel; a \.png or \.tiff keeps 16"):
+            export_image(root, "uns/img", temp_dir / "x.jpg", console)
+
+
+def test_integers_that_fit_a_byte_export_as_they_are(store, temp_dir):
+    """Whatever their dtype, whole numbers from 0 to 255 are an 8-bit image."""
+    from PIL import Image
+
+    path, opener = store
+    array = np.array([[0, 255], [7, 128]], dtype=np.int64)
+    with opener("a") as root:
+        ew.write_dense(root["uns"], "img", np.stack([array] * 3, axis=-1))
+        export_image(root, "uns/img", temp_dir / "rgb.png", console)
+    assert np.array_equal(np.asarray(Image.open(temp_dir / "rgb.png")), np.stack([array] * 3, axis=-1))
+
+
+def test_export_image_takes_scale_on_the_command_line(store, temp_dir):
+    from typer.testing import CliRunner
+
+    from adata.cli import app
+
+    path, opener = store
+    with opener("a") as root:
+        ew.write_dense(root["uns"], "img", np.array([[0.0, 4095.0], [1.0, 2.0]]))
+    runner = CliRunner()
+    out = temp_dir / "x.png"
+    refused = runner.invoke(app, ["export", "image", str(path), "uns/img", "-o", str(out)])
+    assert refused.exit_code == 1 and "--scale" in " ".join((refused.stdout + refused.stderr).split())
+    assert not out.exists()
+    done = runner.invoke(app, ["export", "image", str(path), "uns/img", "-o", str(out), "--scale"])
+    assert done.exit_code == 0, done.stdout + done.stderr
+    from PIL import Image
+
+    assert np.array_equal(np.asarray(Image.open(out)), [[0, 255], [0, 0]])
 
 
 def test_image_export_handles_booleans(store, temp_dir):

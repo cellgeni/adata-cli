@@ -38,8 +38,8 @@ installed by the `integration` tests in environments of their own.
 | `src/adata/elements/` | The AnnData on-disk spec: encodings, readers for every layout since anndata 0.7, writers of the current one |
 | `src/adata/storage/` | One interface over h5py and zarr |
 | `src/adata/conversion/` | `adata convert`: one module per format, through AnnData |
-| `src/adata/formats/` | The file types of `export` and `import`: npy, Matrix Market, CSV, JSON, images; and what the converters read: Parquet, GeoJSON polygons |
-| `src/adata/util/` | Output staging, path checks, names |
+| `src/adata/formats/` | The file types of `export` and `import`: npy, Matrix Market, CSV, JSON, images, and the check of an element's kind and dimensions before an import writes it; what the converters read: Parquet, GeoJSON polygons, pycisTopic's pickles; and pandas frames written as anndata writes them |
+| `src/adata/util/` | Output staging, path checks, names, and `literal` for putting a value into Rich markup |
 | `tests/` | The test suite; [Testing](reference/testing.md) describes it |
 | `benchmarks/` | The comparative benchmark against anndata and scanpy |
 | `docs/` | This site |
@@ -56,9 +56,20 @@ Each layer calls only those below it:
 cli.py ──► commands/ ──► core/, conversion/, formats/ ──► elements/ ──► storage/
 ```
 
+The one exception: `storage/` uses `elements/` (the spec, `strings`, and the
+readers and writers that `copy_tree` and `create_dataset` need to copy an
+element faithfully).
+
 - **`cli.py`** parses options and checks cheap things such as `--zarr-format`.
   Its `console` writes to stderr; only data and `out_console` go to stdout,
-  which is what lets output pipe cleanly.
+  which is what lets output pipe cleanly. Off a terminal, in a log file or a
+  pipe, neither writes colour, cursor or spinner codes, and a message on
+  stderr stays on one line. `raise _fail(e)` turns an exception into that
+  line, `Error: ...`, and exit code 1. `main(argv)` runs the arguments it is
+  given and raises `SystemExit` for the caller; run as the command, a failed
+  run ends the process at once. `--chunk` and `--no-space-check` are
+  defined once, as `_chunk_option` and `_space_check_option`; a new command
+  reuses them.
 - **`commands/`** orchestrates one command: what to read, what to refuse, what
   to write where, and which Zarr version.
 - **`core/`** holds the algorithms that stream. `subset.py`'s writer serves
@@ -131,12 +142,29 @@ before changing anything that writes:
   `--no-space-check` skips it.
 - **Validate before the output exists.** Resolve selections, check casts and
   plan, so that a refusal writes nothing. An empty selection is a refusal,
-  not an empty store.
+  not an empty store. What only the data can show, such as an index out of
+  range, refuses during the write, and staging keeps the output from
+  appearing.
+- **Escape what the store or the user wrote before Rich prints it.** Rich
+  reads `[word]` as a style tag: printed as it is, `pct_counts[mt]` shows as
+  `pct_counts`, and `[/x]` crashes the command. Names, labels, paths and
+  attribute values go through `util/markup.literal` in every message, status
+  line, progress description and tree label; it escapes as
+  `rich.markup.escape` does, but a trailing backslash prints once whatever
+  follows. Never write brackets around a value in a template: a value with
+  an unclosed `[` closes into a tag there. Help text is markup too, so a
+  literal `[` in a docstring is written `\\[`.
 - **Zarr outputs keep the source's version.** Pass `zarr_format=` to
   `open_store`; without it zarr-python writes v3, upgrading a v2 input.
   `concat` uses the version its Zarr inputs share.
 - **Outputs keep the source's index dtypes, chunking and compression.**
-  Changing them is `recast`'s job, or an explicit flag's.
+  Changing them is `recast`'s job, or an explicit flag's. Zarr v3 shards are
+  kept too: `fit_chunks` clamps them with the chunk, and given `itemsize`
+  cuts a unit too large to hold along its rows.
+- **A streamed output is written through `storage.RowWriter`**, flushed after
+  the last block. A write to part of a Zarr shard rewrites the whole shard,
+  and Zarr keeps no chunk cache, so a `--chunk` block written straight into
+  the array costs a whole unit a block.
 - **Memory is set by `--chunk`.** Loading a whole matrix or column is a
   regression unless it is behind an explicit `--in-memory`. `--chunk` is
   defined once in `cli.py` (`_chunk_option`, with `min=1`); reuse it.
@@ -149,31 +177,46 @@ before changing anything that writes:
   parametrised over `h5ad`, `zarr2` and `zarr3`.
 - **An oracle, not self-consistency.** anndata reads back what is written,
   scipy checks `recast`, scanpy, loompy and mudata check the conversions.
-  `test_anndata_versions.py` builds environments with anndata 0.8 to 0.13 and
-  checks both directions.
+  `test_anndata_versions.py` builds environments with anndata 0.7.8 to 0.13,
+  pinned exactly, and checks both directions: each release's store is read,
+  and from 0.8 the release reads back `subset`, `convert`, `split` and
+  `concat` outputs.
 - **Complexity guards that count, not time.** `tests/test_performance.py`
   counts the elements and bytes read through hooks on h5py and zarr. A change
-  that adds reads per row or per group fails it on any machine.
+  that adds reads per row or per group fails it on any machine. The same
+  hooks (`tests/perf_counters.py`) count the largest read, which is the block
+  a loop holds, and the whole chunks and shards each read decodes and each
+  write encodes.
+- **Memory measured as a share of the input.** `perf_counters.peak_rss` runs
+  `adata` in a fresh interpreter and returns the peak memory it added; the
+  memory guards grow a store along n_obs and n_var, built by
+  `tests/perf_fixtures.py` as anndata writes it (h5ad, Zarr v2 and anndata
+  0.13's sharded Zarr v3), and assert the peak stays a small share of it.
 - **The docs are tested.** `tests/test_docs_are_accurate.py` checks every
   `adata …` line in the README, these pages and the `--help` examples against
   the real Click tree; that each command has a section and a contents entry
   in [Commands](reference/commands.md) and a mention in the app help; that
-  every relative link names a page and an anchor that exist; and that every
-  page has the front matter the sidebar needs.
+  every relative link names a page and an anchor that exist; that every
+  page has the front matter the sidebar needs; and that every test file has
+  a row in [Testing](reference/testing.md)'s map.
 
 ```bash
-uv run pytest -m "not integration" --cov=adata --cov-fail-under=90   # CI's coverage floor
-uv run pytest -m perf                                                # the complexity guards
+uv run pytest -m "not integration and not perf" --cov=adata --cov-fail-under=90  # CI's coverage job
+uv run pytest -m perf                                                # the cost guards, CI's own job
 ADATA_REQUIRE_VERSION_FIXTURES=1 uv run pytest tests/test_anndata_versions.py -m integration
 ```
 
 `integration` tests need the network on their first run, to build their
-environments. CI also installs the package alone from a fresh resolution,
-without the lock, imports every module and runs `convert`, so a module-level
-import of something undeclared fails there. Don't import click, which typer
-0.26 and later no longer install. House style: test names read as sentences, a regression test's
+environments. CI runs the unit suite on Python 3.12 and 3.13 and again at
+each dependency's floor, the cost guards, the anndata-release and
+external-reader tests as jobs of their own, a lint of the workflows and a build and smoke test of the
+image. It also installs the package alone from a fresh resolution, without
+the lock, imports every module and runs `convert`, so a module-level import
+of something undeclared fails there. Don't import click, which typer 0.26
+and later no longer install. House style: test names read as sentences, a regression test's
 docstring says what used to go wrong, and comments say why. No linter or
-formatter runs; match the code around you.
+formatter runs on the code (CI lints only the workflows); match the code
+around you.
 
 [Testing](reference/testing.md) has the detail: what each file covers, what the
 guards count and why, and the anndata releases checked.
@@ -217,11 +260,24 @@ It reports and never gates; the complexity guards gate.
 3. Add a `## X.Y.Z` section at the top of `docs/changelog.md`: a summary
    paragraph, then whichever of `### Added`, `### Changed` and `### Fixed`
    apply, each entry led by a bold line and an issue link.
-4. Merge, then push a tag with no `v` prefix. The tag runs `publish.yml` (checks
-   the tag against `pyproject.toml` and `docs/changelog.md`, tests, publishes
-   to PyPI, then creates the GitHub release from the changelog section),
-   `quay-on-tag.yml` (the image) and `benchmark.yml` (the benchmark page,
-   which it also appends to the release notes).
+4. Merge, then push a tag with no `v` prefix. The tag runs `publish.yml`,
+   which checks the tag against `pyproject.toml` and `docs/changelog.md`,
+   tests (`tests.yml`, including a build and smoke test of the image),
+   publishes to PyPI, then calls `quay-on-tag.yml` to build the image, check
+   that it runs, and push that image, and creates the GitHub release from
+   the changelog section. If the tests fail or a check does not pass,
+   nothing is published. `:latest` moves only to the highest `X.Y.Z` tag.
+   Don't create the release by hand. The tag also runs `benchmark.yml` (the
+   benchmark page, which it also appends to the release notes), whose
+   measuring job has a read-only token; the job that commits the results
+   installs nothing.
+
+A manual `Publish` dispatch to TestPyPI publishes there alone, from any ref;
+one to PyPI publishes, and pushes the image, only when run from a tag, and
+fails from a branch.
+Workflows pin third-party actions by commit SHA, with the version in a
+comment, and pass tags and inputs to scripts through `env:`.
+`tests/test_release_pipeline.py` and the `workflow lint` job check both.
 
 `h5ad` as a command name, `info` and `convert` with `recast`'s flags are
 deprecated and stay until 1.0.0.

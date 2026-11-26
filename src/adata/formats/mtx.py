@@ -471,9 +471,10 @@ def iter_matrix_entries(
             yield (cols, rows, values) if transpose else (rows, cols, values)
         return
 
-    n_rows = matrix.shape[0]
-    for lo in range(0, n_rows, chunk_rows):
-        block = np.asarray(matrix.obj[lo : min(lo + chunk_rows, n_rows)])
+    from adata.storage import row_bands
+
+    for lo, hi in row_bands(matrix.obj, chunk_rows):
+        block = np.asarray(matrix.obj[lo:hi])
         r, c = np.nonzero(block)
         rows = r.astype(np.int64) + lo
         cols = c.astype(np.int64)
@@ -499,10 +500,11 @@ def count_entries(matrix: Matrix, *, chunk_rows: int = 1024) -> int:
     """The entries a matrix writes: its stored nonzeros, or a dense one's nonzeros."""
     if matrix.sparse:
         return matrix.nnz
+    from adata.storage import row_bands
+
     total = 0
-    n_rows = matrix.shape[0]
-    for lo in range(0, n_rows, chunk_rows):
-        total += int(np.count_nonzero(np.asarray(matrix.obj[lo : min(lo + chunk_rows, n_rows)])))
+    for lo, hi in row_bands(matrix.obj, chunk_rows):
+        total += int(np.count_nonzero(np.asarray(matrix.obj[lo:hi])))
     return total
 
 

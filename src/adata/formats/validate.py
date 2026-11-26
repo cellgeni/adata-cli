@@ -5,6 +5,7 @@ from typing import Optional, Tuple, Any
 from rich.console import Console
 
 from adata.core.info import axis_len
+from adata.util.markup import literal
 from adata.util.path import norm_path
 
 
@@ -277,4 +278,4 @@ def validate_dimensions(
                     )
             return
 
-    console.print(f"[dim]Note: No dimension validation for path '{obj_path}'[/]")
+    console.print(f"[dim]Note: No dimension validation for path '{literal(obj_path)}'[/]")

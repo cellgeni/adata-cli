@@ -35,6 +35,7 @@ __all__ = [
     "converter_for",
     "detect_format",
     "output_format",
+    "writable_formats",
 ]
 
 
@@ -184,6 +185,14 @@ def _names() -> str:
     return ", ".join(FORMATS)
 
 
+def writable_formats() -> List[str]:
+    """The formats `convert` can write: AnnData, and those with an exporter."""
+    return [
+        name for name, fmt in FORMATS.items()
+        if fmt.anndata or fmt.exporter is not None
+    ]
+
+
 def detect_format(path: Path) -> str:
     """Name the format of an existing input: by content, then by extension.
 
@@ -234,11 +243,14 @@ def output_format(path: Path, requested: Optional[str] = None) -> str:
     """
     path = Path(path)
     if requested is not None and requested not in FORMATS:
-        raise ValueError(f"Unknown format {requested!r}; use one of: {_names()}.")
-    if requested is not None and not (
-        FORMATS[requested].anndata or FORMATS[requested].exporter is not None
-    ):
-        raise ValueError(f"{requested} can be read but not written.")
+        raise ValueError(
+            f"Unknown format {requested!r}; use one of: {', '.join(writable_formats())}."
+        )
+    if requested is not None and requested not in writable_formats():
+        raise ValueError(
+            f"{requested} can be read but not written; --to takes one of: "
+            f"{', '.join(writable_formats())}."
+        )
 
     suffix = path.suffix.lower()
     # Only formats that can be written: `.h5` names CellBender output too,
@@ -255,7 +267,7 @@ def output_format(path: Path, requested: Optional[str] = None) -> str:
         if by_extension is None:
             raise ValueError(
                 f"Cannot tell the output format from '{path.name}'. "
-                f"Use a known extension or pass --to, one of: {_names()} "
+                f"Use a known extension or pass --to, one of: {', '.join(writable_formats())} "
                 "(--to 10x-mtx for a folder)."
             )
         return by_extension

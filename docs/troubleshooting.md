@@ -6,9 +6,10 @@ nav_order: 5
 # Troubleshooting
 {: .no_toc }
 
-Find the message you got, then the fix. Errors start `Error:` and end the
-command with exit code 1; a usage error (an unknown option, a missing
-argument, an input that does not exist) is exit code 2. Messages are shown
+Find the message you got, then the fix. A refusal or failure is one line on
+stderr starting `Error:`, and ends the command with exit code 1; a usage
+error (an unknown option, a missing argument, an input that does not exist)
+is the argument parser's own message, in a box, with exit code 2. Messages are shown
 here with real paths replaced by short ones.
 
 1. TOC
@@ -154,9 +155,20 @@ names are case-sensitive.
 ### `The obs query matched no rows.`
 
 Nothing to write, so nothing is written. Check the values with `adata export
-dataframe data.h5ad obs --columns cluster`. Equality compares each value's
-text, so in a float column `n == 1` matches nothing where `n == 1.0` matches;
-`>=` and `<=` compare numbers.
+dataframe data.h5ad obs --columns cluster`. Text compares exactly, case
+included; numbers and booleans compare by value (`n == 1` matches `1.0`,
+`flag == true` matches `True`). See [Query expressions](reference/query.md).
+
+### `Column 'total_counts' holds numbers, so it compares with a number, not 'zero'.`
+
+A number column is compared by value, so the value has to be a number; a
+boolean column likewise takes `true` or `false`. A typo used to make `!=`
+keep every row. To select missing values, compare with `nan`.
+
+### `Unknown operator at '= A': use ==, !=, <, <=, > or >=.`
+
+Equality is `==`. A value that holds `=`, `!`, `<`, `>`, a comma, a space or
+a parenthesis is quoted: `label == "a=b"`.
 
 ### `Operator '>' needs a number, but got 'high'.`
 
@@ -175,6 +187,12 @@ The input belongs to another store, or is transposed.
 and `var` are dataframes, and `obsm`, `layers` or `uns` hold one element per
 key. Name the entry instead, such as `obsm/X_pca` or `uns/params`, or use
 `import dataframe` for a table. See [Commands](reference/commands.md#import).
+
+### `Cannot subset obsm/ragged: it is a group encoded as awkward-array, which subset cannot narrow.`
+
+`subset` and `split` narrow every element to the rows kept, and this one
+they cannot (an awkward array, or a matrix that is not 2-D). Nothing is
+written. Drop the element from a copy first, or subset it with anndata.
 
 ### `Provide at least one of --obs, --var, --obs-query or --var-query.`
 
@@ -320,9 +338,26 @@ store it wrote; for a store another tool changed, run
 ### The command was killed for running out of memory
 
 Lower `--chunk`: a dense block holds `--chunk` × n_var values, 1,024 rows by
-default. Two things are held whole by design: obs and var columns, and a
-pycisTopic pickle, which cannot be read in part. See
+default. Some things are held whole by design: obs and var columns, an
+image (`export image`, `import image`, and the tissue images of a Visium
+conversion, which `--no-images` leaves out), a JSON document (`import dict`,
+`export dict`), a pycisTopic pickle, which cannot be read in part, and the
+matrix `--in-memory` asks for. Writing an output a whole shard or chunk at a
+time holds at most 8 MiB more (128 MiB across `split`'s outputs), and about
+four times a shard while it is encoded. See
 [Pipelines and containers](guides/pipelines.md#memory-and---chunk).
+
+### It is slow on a Zarr store anndata 0.13 wrote
+
+anndata 0.13 writes Zarr v3 sharded: a whole array in one shard file,
+inner chunks of a kilobyte (with zarr 3.1) inside. Until 0.17.6, `subset`,
+`split`, `concat`, `recast` and `convert` rewrote a whole shard for every
+block they wrote and read its index again for every block they read,
+hundreds of times slower than the same data as `.h5ad`. They write each
+shard once now, keep each index once read, and keep the source's shards on
+output. To cap what writing a shard whole holds, a shard whose rows come to
+more than 8 MiB is cut along its rows. See
+[Writing outputs](reference/commands.md#writing-outputs).
 
 ### `A loom holds its matrices dense: 54.0 GB to compress and write. It is written, but may take a while`
 
@@ -367,6 +402,16 @@ An element has no encoding metadata, which is how anndata 0.7 wrote stores,
 and anndata read it with its legacy reader. The data is read correctly. If
 `adata` wrote the store from a current source and anndata still warns, that
 is a bug: please [report it](https://github.com/cellgeni/adata-cli/issues).
+
+### anndata 0.8 to 0.11 fail with `No read method registered for ... nullable-string-array` (or `null`)
+
+anndata reads a `nullable-string-array` from 0.11 and a `null` from 0.12.
+`adata` writes either only where its input held one: anndata 0.13 under
+pandas 3 writes every text column as a `nullable-string-array`, and anndata
+0.12 and later write a `None` in `uns` as a `null`. A store derived from such
+a file keeps them. To give it to an older anndata, write it again from
+anndata 0.13 with `anndata.settings.allow_write_nullable_strings = False`,
+and without the `None` values in `uns`.
 
 ### Genes are named by id, not by symbol
 

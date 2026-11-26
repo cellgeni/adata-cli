@@ -40,3 +40,21 @@ def test_open_store_writable_mode_sets_root_attrs(temp_dir: Path) -> None:
     with h5py.File(file_path, "r") as f:
         assert f.attrs.get("encoding-type") == "anndata"
         assert f.attrs.get("encoding-version") == "0.1.0"
+
+
+def test_open_store_read_does_not_warn_for_anndata_0_7s_layout(temp_dir: Path) -> None:
+    """F164: anndata 0.7 never stamped the root, so every command on one of
+    its stores warned that a valid file had 'missing or invalid' attrs. Its
+    obs and var are tagged as that release's 0.1.0 dataframes."""
+    import warnings
+
+    file_path = temp_dir / "anndata_07.h5ad"
+    _make_minimal_h5ad(file_path)
+    with h5py.File(file_path, "a") as f:
+        for key in ("obs", "var"):
+            f[key].attrs.update({"encoding-type": "dataframe", "encoding-version": "0.1.0"})
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with open_store(file_path, "r"):
+            pass

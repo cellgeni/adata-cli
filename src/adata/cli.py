@@ -1,13 +1,12 @@
 """CLI for AnnData stores (.h5ad / .zarr) with export and import subcommands."""
 
 from pathlib import Path
-from typing import Optional, Sequence, List
+from typing import Any, List, Optional, Sequence
 
 from rich.console import Console
 import typer
-from rich.markup import escape
 
-from adata.conversion import FORMATS, Options
+from adata.conversion import FORMATS, Options, writable_formats
 from adata.core.recast import LAYOUTS
 from adata.formats.array import IMPORT_CHUNK_ELEMENTS
 from adata.commands import (
@@ -27,16 +26,51 @@ from adata.commands import (
 )
 
 from adata.commands import export_image as export_image_cmd
+from adata.util.markup import literal
 
+# Help text is Rich markup on every typer the floor allows: typer 0.21 made
+# that the default, but 0.20 printed it raw, so the escaped brackets of
+# `pyadata-cli\[spatial]` showed their backslash there.
 app = typer.Typer(
     help="Streaming CLI for huge AnnData .h5ad and .zarr stores "
-    "(view, ls, create, subset, split, concat, convert, recast, export, import)."
+    "(view, ls, create, subset, split, concat, convert, recast, export, import).",
+    rich_markup_mode="rich",
 )
-# Use stderr for status/progress to keep stdout clean for data output
-# force_terminal=True ensures Rich output is visible even in non-TTY environments
-console = Console(stderr=True, force_terminal=True)
-# Results go to stdout so they can be piped; status and errors stay on stderr.
+
+
+class _MessageConsole(Console):
+    """Rich's console, keeping each message on one line when not on a terminal.
+
+    Rich wraps at the terminal's width, or at 80 columns in a log file, where
+    a wrapped `Error:` line hides the rest of the message from `grep`. A
+    renderable (a progress display) keeps Rich's layout, which would otherwise
+    be cropped rather than wrapped.
+    """
+
+    def print(self, *objects: Any, soft_wrap: Optional[bool] = None, **kwargs: Any) -> None:
+        if soft_wrap is None:
+            soft_wrap = not self.is_terminal and all(isinstance(o, str) for o in objects)
+        super().print(*objects, soft_wrap=soft_wrap, **kwargs)
+
+
+# Status, progress and errors go to stderr, results to stdout, so that stdout
+# pipes cleanly. Rich asks each stream whether it is a terminal: a log file or
+# a pipe gets no colour, no cursor movement and no spinner, so the one line a
+# failure leaves on stderr starts `Error:`.
+console = _MessageConsole(stderr=True)
 out_console = Console()
+
+
+def _fail(error: BaseException) -> typer.Exit:
+    """Print `error` as one `Error:` line on stderr; return the exit to raise.
+
+    A KeyError's str() is the repr of its message, quotes and all, so its
+    message is taken as given. Messages quote names and paths from the store
+    and the command line, which Rich would read as markup: they are escaped.
+    """
+    message = error.args[0] if isinstance(error, KeyError) and error.args else error
+    console.print(f"[bold red]Error:[/] {literal(str(message))}")
+    return typer.Exit(code=1)
 
 
 def _version_callback(value: bool) -> None:
@@ -48,8 +82,8 @@ def _version_callback(value: bool) -> None:
 
 
 # Create sub-apps for export and import
-export_app = typer.Typer(help="Export objects from an AnnData store.")
-import_app = typer.Typer(help="Import objects into an AnnData store.")
+export_app = typer.Typer(help="Export objects from an AnnData store.", rich_markup_mode="rich")
+import_app = typer.Typer(help="Import objects into an AnnData store.", rich_markup_mode="rich")
 app.add_typer(export_app, name="export")
 app.add_typer(import_app, name="import")
 
@@ -140,8 +174,7 @@ def view(
             out_console=out_console,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {escape(str(e))}")
-        raise typer.Exit(code=1)
+        raise _fail(e)
 
 
 @app.command("info", hidden=True)
@@ -236,8 +269,7 @@ def create(
             force=force,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {escape(str(e))}")
-        raise typer.Exit(code=1)
+        raise _fail(e)
 
 
 # ============================================================================
@@ -288,8 +320,7 @@ def ls(
             plain=plain,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {escape(str(e))}")
-        raise typer.Exit(code=1)
+        raise _fail(e)
 
 
 # ============================================================================
@@ -316,7 +347,7 @@ def subset(
     inplace: bool = typer.Option(
         False,
         "--inplace",
-        help="Modify source file directly.",
+        help="Replace the source; the new store is written beside it first",
     ),
     obs: Optional[Path] = typer.Option(
         None,
@@ -344,7 +375,7 @@ def subset(
         help="Keep var matching an expression, e.g. \"highly_variable == True\"",
     ),
     chunk_rows: int = _chunk_option(
-        1024, "Row chunk size for dense matrices", "--chunk-rows", "-r"
+        1024, "Rows per block, of a dense or a sparse matrix", "--chunk-rows", "-r"
     ),
     zarr_format: Optional[int] = typer.Option(
         None,
@@ -392,8 +423,7 @@ def subset(
             space_check=not no_space_check,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {escape(str(e))}")
-        raise typer.Exit(code=1)
+        raise _fail(e)
 
 
 # ============================================================================
@@ -444,7 +474,9 @@ def concat(
         "(default: drop)",
     ),
     fill_value: float = typer.Option(
-        0.0, "--fill-value", help="Value for dense cells introduced by an outer join"
+        0.0, "--fill-value",
+        help="Value for dense cells introduced by an outer join; an integer "
+        "matrix that cannot hold it becomes float64",
     ),
     chunk_rows: int = _chunk_option(1024, "Row chunk size while streaming"),
     zarr_format: Optional[int] = typer.Option(
@@ -458,7 +490,8 @@ def concat(
     Concatenate stores along the obs axis.
 
     Streams each input in turn, so memory use is set by --chunk rather than by
-    the size of the inputs. obsp, varp and raw are not carried over.
+    the size of the inputs. obsp and raw are not carried over; var's columns,
+    varm and varp follow --merge.
 
     Examples:
         adata concat a.h5ad b.h5ad -o merged.h5ad
@@ -499,8 +532,7 @@ def concat(
             space_check=not no_space_check,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {escape(str(e))}")
-        raise typer.Exit(code=1)
+        raise _fail(e)
 
 
 # ============================================================================
@@ -616,7 +648,8 @@ def convert(
     to_format: Optional[str] = typer.Option(
         None,
         "--to",
-        help=f"Output format, if the extension does not say: {', '.join(FORMATS)}",
+        help="Output format, if the extension does not say: "
+        f"{', '.join(writable_formats())}",
     ),
     zarr_format: Optional[int] = typer.Option(
         None,
@@ -681,7 +714,7 @@ def convert(
     gene_names_column: Optional[str] = typer.Option(
         None,
         "--gene-names-column",
-        help="10x output: var column holding gene names (default: var_names)",
+        help="10x output: var column holding gene names (default: gene_symbols, else var_names)",
     ),
     feature_types_column: Optional[str] = typer.Option(
         None,
@@ -833,33 +866,39 @@ def convert(
     """
     Convert a store to another format.
 
-    The output's extension picks the format: .h5ad, .zarr, .loom, or .h5 for
-    a 10x Genomics matrix (Cell Ranger's *_feature_bc_matrix.h5); --to
-    10x-mtx writes a Matrix Market folder. Between h5ad and zarr every element is
-    copied, streamed, keeping the source's chunking and compression where the
-    target can express them. CellBender output keeps its latent variables, as
-    CellBender's own loader names them. A 10x matrix is read as scanpy's
-    read_10x_h5 or read_10x_mtx (gex_only=False) reads it, keeping integer
-    counts, and written as Cell Ranger writes it. A Space Ranger outs/
-    folder keeps its spot positions, images and scale factors where squidpy
-    puts them; a Visium HD one is read at the bin size --bin-size names
-    (needs pyadata-cli[spatial]), or as Space Ranger 4's segmented cells
-    with --cells; and a Xenium bundle its cell table,
-    centroids and Xenium's own clusters, UMAP and PCA. MTX folders from Cell
-    Ranger and STARsolo, velocyto's included, and Parse split-pipe output
-    are read in two streaming passes, as are text tables (.csv, .tsv, .txt,
-    gzipped too), read as anndata's read_csv and read_text read them; a plain
-    HDF5 dataset is read as read_hdf reads it (--key names it); a pycisTopic
-    pickle without pycisTopic (needs pyadata-cli[pickle]). A loom
-    is read as anndata.read_loom reads it; a SCope loom (pySCENIC, SCENIC+,
+    The output's extension picks the format: .h5ad, .zarr, .loom, .h5mu, or
+    .h5 for a 10x Genomics matrix (Cell Ranger's *_feature_bc_matrix.h5);
+    --to 10x-mtx writes a Matrix Market folder. Between h5ad and zarr every
+    element is copied, streamed, keeping the source's chunking and
+    compression where the target can express them.
+
+    Read and written: a 10x matrix, .h5 or an MTX folder (Cell Ranger's, and
+    STARsolo's, velocyto's included), read with the columns scanpy's
+    read_10x_h5 or read_10x_mtx (gex_only=False) gives, keeping integer
+    counts, and written as Cell Ranger writes it; a loom, read as
+    anndata.read_loom reads it, where a SCope loom (pySCENIC, SCENIC+,
     pycistopic) also gives its regulons as dataframes in obsm and varm, its
     embeddings and clusterings named from its MetaData, and the MetaData in
-    uns["scope"]; --scope writes them back as SCope reads them. Features are named by gene id, unique but in probe-level
-    (Flex) matrices; --var-names gene_symbols names them as scanpy does.
+    uns["scope"], and --scope writes them back as SCope reads them; and
+    MuData. Features are named by gene id, unique but in probe-level (Flex)
+    matrices; --var-names gene_symbols names them as scanpy does.
 
-    Nothing is written until every check has passed, and the output is moved
-    into place only once complete: a failed conversion leaves nothing
-    behind. An existing output is refused unless --overwrite is given.
+    Read only: CellBender output, keeping its latent variables as
+    CellBender's own loader names them; a Space Ranger outs/ folder, with its
+    spot positions, images and scale factors where squidpy puts them (Visium
+    HD at the bin size --bin-size names, which needs pyadata-cli\\[spatial],
+    or as Space Ranger 4's segmented cells with --cells); a Xenium bundle,
+    with its cell table, centroids and Xenium's own clusters, UMAP and PCA;
+    Parse split-pipe output; text tables (.csv, .tsv, .txt, gzipped too), as
+    anndata's read_csv and read_text read them; one dataset of a plain HDF5
+    file, as read_hdf reads it (--key names it); and a pycisTopic pickle,
+    without pycisTopic (needs pyadata-cli\\[pickle]).
+
+    The input and the options are checked before anything is written; what
+    only the data shows, such as an index out of range, stops the copy. The
+    output is written beside its destination and moved into place only once
+    complete, so a failed conversion leaves nothing behind. An existing
+    output is refused unless --overwrite is given.
 
     To change a matrix's dtype, layout or density, use `recast`. Until 1.0.0,
     `convert` given recast's flags still forwards to it, with a warning.
@@ -1000,8 +1039,7 @@ def convert(
             space_check=not no_space_check,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {escape(str(e))}")
-        raise typer.Exit(code=1)
+        raise _fail(e)
 
 
 # ============================================================================
@@ -1032,7 +1070,7 @@ def recast(
     inplace: bool = typer.Option(
         False,
         "--inplace",
-        help="Modify source file directly.",
+        help="Replace the source; the new store is written beside it first",
     ),
     convert_all: bool = typer.Option(
         False,
@@ -1120,8 +1158,7 @@ def recast(
             space_check=not no_space_check,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {escape(str(e))}")
-        raise typer.Exit(code=1)
+        raise _fail(e)
 
 
 # ============================================================================
@@ -1160,7 +1197,7 @@ def split(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Show what would be written without writing it"
     ),
-    chunk_rows: int = _chunk_option(1024, "Row chunk size for dense matrices"),
+    chunk_rows: int = _chunk_option(1024, "Rows per block, of a dense or a sparse matrix"),
     zarr_format: Optional[int] = typer.Option(
         None,
         "--zarr-format",
@@ -1202,8 +1239,7 @@ def split(
             space_check=not no_space_check,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {escape(str(e))}")
-        raise typer.Exit(code=1)
+        raise _fail(e)
 
 
 # ============================================================================
@@ -1265,8 +1301,7 @@ def export_dataframe(
             console=console,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {escape(str(e))}")
-        raise typer.Exit(code=1)
+        raise _fail(e)
 
 
 @export_app.command("array")
@@ -1314,8 +1349,7 @@ def export_array(
             console=console,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {escape(str(e))}")
-        raise typer.Exit(code=1)
+        raise _fail(e)
 
 
 @export_app.command("sparse")
@@ -1343,7 +1377,7 @@ def export_sparse(
     ),
     chunk_elements: int = _chunk_option(
         1_000,
-        "Number of rows/columns (depends on compression format) to process per chunk",
+        "Rows of a CSR matrix, or columns of a CSC one, per block",
     ),
     in_memory: bool = typer.Option(
         False,
@@ -1372,8 +1406,7 @@ def export_sparse(
             console=console,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {escape(str(e))}")
-        raise typer.Exit(code=1)
+        raise _fail(e)
 
 
 @export_app.command("dict")
@@ -1399,7 +1432,7 @@ def export_dict(
         help="Maximum array elements for JSON export",
     ),
     include_attrs: bool = typer.Option(
-        False, "--include-attrs", help="Include HDF5 attributes in JSON export"
+        False, "--include-attrs", help="Include the elements' attributes in the JSON"
     ),
 ) -> None:
     """
@@ -1421,8 +1454,7 @@ def export_dict(
             console=console,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {escape(str(e))}")
-        raise typer.Exit(code=1)
+        raise _fail(e)
 
 
 @export_app.command("image")
@@ -1442,24 +1474,32 @@ def export_image(
         "-o",
         help="Output image file (.png, .jpg, .tiff); defaults to PNG on stdout",
     ),
+    scale: bool = typer.Option(
+        False,
+        "--scale",
+        help="Stretch the values onto 0-255 (smallest to 0, largest to 255), "
+        "for values an image cannot keep as they are",
+    ),
 ) -> None:
     """
     Export an image-like array to PNG/JPG/TIFF format.
 
     The array should be 2D (H,W) or 3D (H,W,C) with C in {1,3,4}. The
     format follows the output's extension; without --output the image goes
-    to stdout as PNG.
+    to stdout as PNG. Values are kept as they are: one channel of 16 bits
+    as a 16-bit PNG or TIFF. Values an image cannot keep are refused, not
+    clipped; --scale stretches them onto 0-255.
 
     Examples:
         adata export image data.h5ad uns/spatial/image -o tissue.png
         adata export image data.h5ad uns/spatial/image > tissue.png
+        adata export image data.h5ad uns/spatial/morphology -o morphology.png --scale
     """
 
     try:
-        export_image_cmd(file=file, obj=entry, out=output, console=console)
+        export_image_cmd(file=file, obj=entry, out=output, console=console, scale=scale)
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {escape(str(e))}")
-        raise typer.Exit(code=1)
+        raise _fail(e)
 
 
 # ============================================================================
@@ -1492,7 +1532,7 @@ def import_dataframe(
     inplace: bool = typer.Option(
         False,
         "--inplace",
-        help="Modify source file directly.",
+        help="Replace the source; the new store is written beside it first",
     ),
     no_space_check: bool = _space_check_option(),
     index_column: Optional[str] = typer.Option(
@@ -1509,15 +1549,15 @@ def import_dataframe(
     auto_categorical: bool = typer.Option(
         True,
         "--auto-categorical/--no-auto-categorical",
-        help="Infer categoricals from low-cardinality string columns",
+        help="Make text columns that repeat a value categoricals, as anndata does",
     ),
 ) -> None:
     """
     Import a CSV file as a dataframe.
 
-    String columns with few distinct values become categoricals; pass
-    --no-auto-categorical to keep them as plain strings, or --categorical to
-    force specific ones.
+    A text column that repeats a value becomes a categorical, as anndata
+    makes it; pass --no-auto-categorical to keep text as plain strings, or
+    --categorical to force specific columns.
 
     Examples:
         adata import dataframe data.h5ad obs cells.csv -o out.h5ad -i cell_id
@@ -1550,8 +1590,7 @@ def import_dataframe(
             space_check=not no_space_check,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {escape(str(e))}")
-        raise typer.Exit(code=1)
+        raise _fail(e)
 
 
 @import_app.command("array")
@@ -1581,7 +1620,7 @@ def import_array(
     inplace: bool = typer.Option(
         False,
         "--inplace",
-        help="Modify source file directly.",
+        help="Replace the source; the new store is written beside it first",
     ),
     chunk_elements: int = _chunk_option(
         IMPORT_CHUNK_ELEMENTS, "Number of elements to copy per chunk"
@@ -1614,8 +1653,7 @@ def import_array(
             space_check=not no_space_check,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {escape(str(e))}")
-        raise typer.Exit(code=1)
+        raise _fail(e)
 
 
 @import_app.command("sparse")
@@ -1645,7 +1683,7 @@ def import_sparse(
     inplace: bool = typer.Option(
         False,
         "--inplace",
-        help="Modify source file directly.",
+        help="Replace the source; the new store is written beside it first",
     ),
     no_space_check: bool = _space_check_option(),
 ) -> None:
@@ -1673,8 +1711,7 @@ def import_sparse(
             space_check=not no_space_check,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {escape(str(e))}")
-        raise typer.Exit(code=1)
+        raise _fail(e)
 
 
 @import_app.command("dict")
@@ -1704,7 +1741,7 @@ def import_dict(
     inplace: bool = typer.Option(
         False,
         "--inplace",
-        help="Modify source file directly.",
+        help="Replace the source; the new store is written beside it first",
     ),
     no_space_check: bool = _space_check_option(),
 ) -> None:
@@ -1728,8 +1765,7 @@ def import_dict(
             space_check=not no_space_check,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {escape(str(e))}")
-        raise typer.Exit(code=1)
+        raise _fail(e)
 
 
 @import_app.command("image")
@@ -1757,7 +1793,7 @@ def import_image_cmd(
         file_okay=True,
     ),
     inplace: bool = typer.Option(
-        False, "--inplace", help="Modify source file directly."
+        False, "--inplace", help="Replace the source; the new store is written beside it first"
     ),
     no_space_check: bool = _space_check_option(),
 ) -> None:
@@ -1780,15 +1816,20 @@ def import_image_cmd(
             space_check=not no_space_check,
         )
     except Exception as e:
-        console.print(f"[bold red]Error:[/] {escape(str(e))}")
-        raise typer.Exit(code=1)
+        raise _fail(e)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
+    """Run the CLI on `argv`, or on the command line when it is None.
+
+    Run as the `adata` command, a failed run ends the process at once
+    (`_leave`). Given `argv`, it raises SystemExit as Click does, for the
+    caller, a test or a notebook, to catch.
+    """
     try:
-        app(standalone_mode=True)
+        app(args=list(argv) if argv is not None else None, standalone_mode=True)
     except SystemExit as done:
-        if isinstance(done.code, int) and done.code != 0:
+        if argv is None and isinstance(done.code, int) and done.code != 0:
             _leave(done.code)
         raise
 

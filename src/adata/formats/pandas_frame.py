@@ -9,9 +9,11 @@ written as anndata's writer would write it:
   order kept;
 * pandas' nullable integers and booleans as `nullable-integer` and
   `nullable-boolean`; nullable floats as floats with NaN;
-* text as a `string-array`, or a `nullable-string-array` when a value is
-  missing; in obs and var (`categorize=True`) text with a repeated value
-  becomes a categorical, as anndata's `strings_to_categoricals` makes it;
+* text as a `string-array`, or a categorical when a value is missing (its
+  code -1), which every anndata release from 0.8 reads, where a
+  `nullable-string-array` needs 0.11; in obs and var (`categorize=True`)
+  text with a repeated value becomes a categorical too, as anndata's
+  `strings_to_categoricals` makes it;
 * an `object` column by what it holds (`pd.api.types.infer_dtype`): numbers
   as numbers, text as text, anything mixed as text with a warning;
 * datetimes as ISO text, with a warning. Anything else is left out, with a
@@ -139,18 +141,13 @@ def _missing(value: Any) -> bool:
 
 def _text(parent: Any, name: str, values: List[Optional[str]], *, categorize: bool) -> None:
     present = [v for v in values if v is not None]
-    if categorize:
-        categories = natural_sorted(set(present))
-        if len(categories) < len(values):
-            lookup = {c: i for i, c in enumerate(categories)}
-            write_categorical(parent, name, [lookup.get(v, -1) if v is not None else -1
-                                             for v in values], categories)
-            return
-    if len(present) < len(values):
-        write_masked(
-            parent, name, np.asarray(["" if v is None else v for v in values], dtype=object),
-            np.asarray([v is None for v in values], dtype=bool), spec.NULLABLE_STRING_ARRAY,
-        )
+    categories = natural_sorted(set(present))
+    # A missing value makes a categorical anywhere: as a nullable-string-array
+    # it made a converted file anndata 0.8 to 0.10 refuse whole.
+    if len(present) < len(values) or (categorize and len(categories) < len(values)):
+        lookup = {c: i for i, c in enumerate(categories)}
+        write_categorical(parent, name, [lookup.get(v, -1) if v is not None else -1
+                                         for v in values], categories)
         return
     write_string_array(parent, name, np.asarray(values, dtype=object))
 

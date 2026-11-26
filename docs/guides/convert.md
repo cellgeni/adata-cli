@@ -74,6 +74,9 @@ each against them, with a few deliberate differences, listed below.
   recast out.h5ad X --inplace --dtype float32` if a tool needs floats.
 - **Nothing is dropped**: every feature type unless `--feature-type` picks
   one, the run's metadata in `uns`, a loom's graphs and global attributes.
+- **Text is read as Cell Ranger means it**: the XML character references it
+  writes for text outside ASCII (`&#947;`) become the characters, where
+  scanpy's `read_10x_h5` shows the references.
 
 ## h5ad and Zarr
 
@@ -93,9 +96,12 @@ output's extension names the other backend.
 
 ## Safe by construction
 
-Every check runs before the output exists: an unknown format, a flag that
-does not apply to this pair of formats, a 10x export with no feature ids.
-The output is written beside its destination and moved into place only when
-complete, and an existing output is replaced only with `--overwrite`.
+The input and the options are checked before the output exists: an
+unknown format, a flag that does not apply to this pair of formats, a 10x
+export with no feature ids. What only the data can show, such as a matrix
+entry whose feature index lies outside the features, stops the copy instead.
+Either way the output is written beside its destination and moved into place
+only when complete, so a refusal leaves nothing behind, and an existing
+output is replaced only with `--overwrite`.
 [Troubleshooting](../troubleshooting.md#before-anything-is-written) lists the
 refusals.

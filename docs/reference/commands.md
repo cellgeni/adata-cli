@@ -68,6 +68,12 @@ adata ls data.h5ad uns --depth 2      # only below a path
 adata ls data.h5ad -1 | grep spatial  # bare paths, for piping
 ```
 
+| Flag | Meaning |
+|---|---|
+| `--depth N`, `-d` | Maximum depth to descend |
+| `--long`, `-l` | Show each entry's type, shape, dtype and encoding |
+| `-1`, `--plain` | One bare path per line, with no tree, for piping |
+
 ## `subset`
 
 Write a filtered copy. Select by name list, by expression, or both axes at
@@ -84,15 +90,26 @@ adata subset data.h5ad --inplace --obs barcodes.txt
 | Flag | Meaning |
 |---|---|
 | `--output`, `-o` | Output path. Required unless `--inplace` |
-| `--inplace` | Replace the source (written to a temporary path first) |
+| `--inplace` | Replace the source; the new store is written beside it first |
 | `--obs` / `--var` | File of names to keep, one per line |
 | `--obs-query`, `-q` / `--var-query` | Keep rows matching an [expression](query.md) |
-| `--chunk`, `-C` | Row chunk size for dense matrices (at least 1) |
+| `--chunk`, `-C` | Rows per block, of a dense or a sparse matrix (at least 1) |
 | `--zarr-format` | Zarr version to write; defaults to the source's |
 | `--no-space-check` | Write even if the disk looks too small; see [Writing outputs](#writing-outputs) |
 
 `raw/` is carried over and matched against its **own** var axis, which usually
 holds more genes than the main object.
+
+A name list keeps every row with a listed name, as anndata's
+`obs_names.isin(names)` does: after a `concat` without `--index-unique` a
+barcode names one cell per sample, and all of them are kept. `subset` says
+how many of the names matched more than one row.
+
+Every element is narrowed as anndata's subsetting narrows it: layers, `obsp`
+and `varp` on both their axes, `obsm` and `varm` arrays of any rank on their
+first, and `obsm` and `varm` dataframes as `obs` and `var` are. A store
+holding something `subset` cannot narrow, such as an awkward array in
+`obsm`, is refused before anything is written.
 
 A categorical obs or var column keeps only the categories its rows use, as
 anndata's own subsetting keeps them (on an axis kept whole too), and
@@ -143,7 +160,7 @@ adata convert multiome.h5ad -o multiome.h5mu
 |---|---|
 | `--output`, `-o` | Output path (required) |
 | `--from` | Input format, if it cannot be detected |
-| `--to` | Output format, if the extension does not say |
+| `--to` | Output format, if the extension does not say: one the Write column below allows |
 | `--zarr-format` | Zarr version to write; defaults to the source's, else 3 |
 | `--compression` | `none`, `gzip` or `lzf` for h5ad; `none`, `gzip`, `zstd` or `blosc` for Zarr; `gzip` (default) or `none` for an MTX folder |
 | `--overwrite` | Replace an existing output |
@@ -178,9 +195,11 @@ written to Zarr gets zarr-python's default codec. `--compression` replaces all
 of that with one choice. Elements are not re-encoded, so a store written by
 anndata 0.7 keeps its legacy layout.
 
-Every check runs before anything is written. The output is written beside
-its destination (`out.adata-tmp.zarr`) and moved into place only once
-complete, so a failed conversion leaves nothing behind. An existing output is
+The input and the options are checked before anything is written; what only
+the data can show, such as an index out of range, stops the copy. Either way
+the output is written beside its destination (`out.adata-tmp.zarr`) and
+moved into place only once complete, so a failed conversion leaves nothing
+behind. An existing output is
 refused unless `--overwrite` is given, and is replaced only once its
 successor is finished. `--overwrite` replaces a store, or a Matrix Market
 folder holding only its own files, never a folder holding anything else.
@@ -205,7 +224,7 @@ adata recast data.h5ad layers/counts -o out.h5ad --layout dense --force
 | Flag | Meaning |
 |---|---|
 | `--output`, `-o` | Output path. Required unless `--inplace` |
-| `--inplace` | Replace the source (written to a temporary path first) |
+| `--inplace` | Replace the source; the new store is written beside it first |
 | `--all` | Recast `X`, every layer and `raw/X` |
 | `--dtype` | New dtype for the values, e.g. `float32` |
 | `--indices-dtype` | New dtype for sparse indices: `int32` or `int64` |
@@ -220,13 +239,29 @@ Two things are refused before anything is written. A cast that would not
 round-trip -- checked by casting every value and casting it back, not by
 comparing dtypes -- and a densification that would inflate the store beyond
 four times its size. `--force` overrides either, and the message says how
-many values would change or how large the result would be.
+many values would change or how large the result would be. A dense matrix made
+sparse by a cast that loses values drops the entries the cast turns to zero,
+as scipy would, rather than storing them as explicit zeros; a sparse matrix
+keeps the entries it has, as scipy's `astype` does.
+
+A sparse matrix of **float16 is refused**, whatever `--force` says: scipy has
+no float16 sparse matrix, so neither anndata nor scanpy could read the result.
+Use `--dtype float32`, or `--layout dense`.
 
 The index dtype is **preserved** unless `--indices-dtype` asks otherwise, so
 narrowing the values does not silently widen the indices and leave the file
 bigger than it started. `indices` and `indptr` keep their own widths, which
 can differ: a narrow matrix with more than 2^31 nonzeros needs int64 offsets
-over int32 coordinates, and both are range-checked before writing.
+over int32 coordinates, and both are range-checked before writing. The check
+always runs: `--force` does not waive it, since an offset that overflows is a
+corrupt matrix, not a lossy value. A dense matrix made sparse has its
+coordinates checked before writing and its nonzero count as it is counted.
+
+`--chunk` counts rows of a dense matrix, in every layout: densifying a CSC
+matrix or writing a dense one as CSC goes through a CSR in scratch, so no block
+spans every row. Sparse matrices are read about a million entries at a time.
+The free-space check counts that scratch; a dense matrix written as CSC learns
+its nonzero count only by reading it, so it checks again before its transpose.
 
 The output path may not name the input; use `--inplace`. Either way the new
 store is written beside its destination and moved into place only once the
@@ -256,19 +291,32 @@ adata split data.h5ad --by cluster -o out/ --min-size 50
 | `--output-dir`, `-o` | Where to write the stores |
 | `--axis` | `obs` (default) or `var` |
 | `--min-size` | Skip groups smaller than this |
+| `--suffix` | Output extension, which picks the backend (`.zarr` for Zarr); defaults to the source's, `.h5ad` or `.zarr` |
 | `--dry-run` | Print the plan without writing |
 | `--manifest / --no-manifest` | Write a CSV listing the outputs (default on) |
-| `--chunk`, `-C` | Row chunk size for dense matrices (at least 1) |
+| `--chunk`, `-C` | Rows per block, of a dense or a sparse matrix (at least 1) |
 | `--zarr-format` | Zarr version to write; defaults to the source's |
 | `--no-space-check` | Write even if the disk looks too small; see [Writing outputs](#writing-outputs) |
 
-Labels are sanitised for use as filenames; collisions get a numeric suffix,
-and so do labels that differ only in case (`B`, `b_1`), which would be one
-file on macOS and Windows.
+Labels are sanitised for use as filenames, and a label that is a safe
+filename already keeps it. Collisions get a numeric suffix, and so do labels
+that differ only in case (`B`, `b_1`), which would be one file on macOS and
+Windows: `CD4`, `CD4_1` and `CD4+` give `CD4`, `CD4_1` and `CD4_2`.
+`convert --split-feature-types` and `--all-samples` name their outputs the
+same way.
+Rows whose value is missing (NaN too) go to a store of their own, `NA`, apart
+from rows labelled `NA` or with an empty string (`NA_1`, ...). The manifest
+lists a missing value as empty, as it lists an empty label; their stores
+tell them apart.
 Every store is written beside its destination and moved into place only once
 all of them are complete, and the manifest is written last, so a split that
 fails leaves no partial stores. An output that would land on the input is
 refused, on a case-insensitive filesystem too (a label `A` beside `a.h5ad`).
+
+Each matrix is read once for up to 128 outputs: an open HDF5 file costs
+about 0.6 MB however little it holds, and each output holds rows to write
+its shards and chunks whole. With more groups than that, the matrices are
+read once per 128.
 
 ## `concat`
 
@@ -282,12 +330,13 @@ adata concat a.h5ad b.h5ad -o m.h5ad --keys a,b --index-unique - --uns-merge sam
 
 | Flag | Meaning |
 |---|---|
+| `--output`, `-o` | Output path (required) |
 | `--join`, `-j` | `inner` (shared vars only) or `outer` (their union) |
 | `--label` | Add an obs column recording each cell's source |
 | `--keys` | Names for the inputs; defaults to their filenames |
 | `--index-unique` | Delimiter for suffixing obs names with their key |
 | `--merge` / `--uns-merge` | `drop` (default), `same`, `unique`, `first`, `only` |
-| `--fill-value` | Value for dense cells introduced by an outer join |
+| `--fill-value` | Value for dense cells introduced by an outer join; an integer matrix that cannot hold it becomes float64 |
 | `--chunk`, `-C` | Row chunk size while streaming (at least 1) |
 | `--zarr-format` | Zarr version to write; defaults to the inputs' when they agree, otherwise v3 |
 | `--no-space-check` | Write even if the disk looks too small; see [Writing outputs](#writing-outputs) |
@@ -299,11 +348,21 @@ them; make them unique first (anndata's `var_names_make_unique()`).
 are refused under `--join inner`; inputs with no variables at all
 concatenate to n_obs × 0.
 
+var is in the order `anndata.concat` gives it. Under `--join inner` that is
+the first input's order. Under `--join outer` it is the inputs' own order
+when every input has the same variables in the same order, and the union
+sorted otherwise; an input with no variables has no say.
+
 obs columns keep their dtypes: categoricals union their category sets
 (numeric categories stay numeric, and anndata 0.7's categoricals are read by
 label), and nullable columns keep their masks. Under `--join outer` a column
-missing from one input is padded rather than dropped. Missing values stay
-missing:
+missing from one input is padded rather than dropped. Merged categories are
+ordered as anndata orders them: the first input's order, if its categories
+already include every input's; otherwise the union in natural order (`t2`
+before `t10`, numbers by value). An ordered categorical stays ordered only
+if every input has the same categories in the same order; otherwise it is
+written unordered, with a warning, as anndata keeps no order either.
+Missing values stay missing:
 
 - Text with missing values (from a categorical, a nullable column, or an
   input without the column) is written as a categorical whose missing rows
@@ -324,15 +383,30 @@ obsm entries present in every input are stacked: arrays as they are, sparse
 matrices as X is, and dataframes (a SCope import's `RegulonsAUC`) as obs is,
 their columns following `--join`. Like X, an entry must be stored the same
 way in every input (CSR, CSC or dense); concat refuses a mix before writing,
-and `adata recast` can convert one to match. var's columns and varm (a SCope
-import's `Regulons`, pycisTopic's `topic_region`) follow `--merge`, compared
-on the output's genes: an input lacking some of them, as in an outer join,
-counts as not having the entry. Without `--merge`, varm is dropped with a
-note.
+and `adata recast` can convert one to match. var's columns, varm (a SCope
+import's `Regulons`, pycisTopic's `topic_region`) and varp follow `--merge`,
+compared on the output's genes: an input lacking some of them, as in an
+outer join, counts as not having the entry. Sparse varp entries are compared
+by value, whatever their format (CSR or CSC) and dtype, and stored zeros
+count as absent, as in anndata; a sparse entry never equals a dense one,
+where anndata's answer depends on which input comes first. Without
+`--merge`, varm and varp are dropped with a note.
 
-`obsp`, `varp` and `raw` are **not** carried over — a pairwise value has no
-meaning between cells from different inputs. anndata's own `concat_on_disk`
-refuses these too.
+`obsp` and `raw` are **not** carried over — a value between two cells has no
+meaning when they come from different inputs. anndata's own
+`concat_on_disk` refuses these too.
+
+Dense matrices and obsm arrays keep the first input's chunking and
+compression, as sparse ones do. A dense integer matrix stays integer unless
+an outer join fills cells with a `--fill-value` it cannot hold, such as 0.5
+or NaN; then it becomes float64.
+
+concat opens its inputs as it needs them, at most 64 at once (or a quarter
+of the process's file descriptor limit, `ulimit -n`, if that is fewer), so
+it takes any number of inputs. CSC matrices are read once each, a block of entries at a
+time, and their columns put together through a scratch file beside the
+output, of about 16 bytes plus the value per stored entry of the largest
+one. The free-space check counts it, for a Zarr output too.
 
 ### Merge strategies
 
@@ -358,8 +432,16 @@ adata create out.h5ad --n-obs 5000 --n-var 2000
 adata create out.zarr --obs-names cells.txt --var-names genes.txt
 ```
 
-Give each axis either a size (names are generated as `cell_0000`, `gene_0000`)
-or a file of names. `--force` overwrites an existing store, and only a store:
+| Flag | Meaning |
+|---|---|
+| `--n-obs`, `--n-var` | Number of observations, of variables |
+| `--obs-names`, `--var-names` | A file of names, one per line, which sets the number |
+| `--zarr-format` | Zarr version to write, 2 or 3; 3 by default |
+| `--force`, `-f` | Overwrite an existing store |
+
+Give each axis either a size or a file of names. Generated names are
+zero-padded to the axis length: `--n-obs 5000` gives `cell_0000` to
+`cell_4999`, `--n-obs 3` gives `cell_0` to `cell_2`. `--force` overwrites an existing store, and only a store:
 a folder that is not a Zarr store, or a file that is not HDF5, is refused.
 The new store is written beside the old one and swapped in once complete, so
 a failed `create --force` leaves the old store as it was.
@@ -382,6 +464,17 @@ adata export array data.h5ad obsm/X_umap > umap.npy
 adata export dict data.h5ad uns -o metadata.json
 ```
 
+| Flag | Subcommands | Meaning |
+|---|---|---|
+| `--output`, `-o` | all | Output file; stdout when omitted (`export dict` also takes it as a third argument) |
+| `--columns`, `-c` | `dataframe` | Comma separated columns to include |
+| `--head N`, `-n` | `dataframe`, `sparse` | Only the first N rows, or entries |
+| `--chunk`, `-C` | `dataframe`, `array`, `sparse` | Rows a block (`dataframe`, 10,000; also `--chunk-rows`, `-r`), elements (`array`, 100,000), or rows or columns of the matrix's layout (`sparse`, 1,000); at least 1 |
+| `--in-memory`, `-m` | `sparse` | Load the whole matrix first, which can be faster for a small one |
+| `--max-elements` | `dict` | Refuse an array larger than this (100,000 elements) |
+| `--include-attrs` | `dict` | Write the elements' attributes too |
+| `--scale` | `image` | Stretch the values onto 0-255 (below) |
+
 Omit `--output` to write to stdout; `export image` writes PNG there, and
 otherwise takes its format from the output's extension. `export dataframe`,
 `export array` and `export sparse` stream in chunks, to a file or to stdout
@@ -400,6 +493,20 @@ with `export dataframe`, which writes them as empty fields.
 
 `export dict` writes NaN and infinite values as `null`, since JSON has no
 number for them, and says how many it wrote.
+
+`export image` keeps the values as they are. Whole numbers from 0 to 255
+are an 8-bit image, whatever their dtype. One channel of `uint16`, or of
+whole numbers up to 65,535, is a 16-bit image as `.png` or `.tiff`, the
+formats that keep 16 bits; a colour image keeps 8 bits a channel. Floats
+from 0 to 1 are a normalised image, scaled up to 0-255; booleans become 0
+and 255. Values an image cannot keep (negative, too large for the format,
+not finite) are refused, naming their range, rather than clipped.
+`--scale` stretches them onto 0-255 instead, the smallest to 0 and the
+largest to 255, with anything not finite at 0:
+
+```bash
+adata export image data.h5ad uns/spatial/morphology -o morphology.png --scale
+```
 
 A file output is written beside its destination and renamed into place once
 complete, so an export that fails or is refused leaves an existing file as it
@@ -430,6 +537,16 @@ adata import sparse    data.h5ad X counts.mtx --inplace
 adata import dict      data.h5ad uns/params params.json --inplace
 adata import image     data.h5ad uns/spatial/hires tissue.png --inplace
 ```
+
+| Flag | Subcommands | Meaning |
+|---|---|---|
+| `--output`, `-o` | all | Output path; required unless `--inplace` |
+| `--inplace` | all | Replace the source; the new store is written beside it first |
+| `--no-space-check` | all | Write even if the disk looks too small |
+| `--index-column`, `-i` | `dataframe` | Column that becomes the index; the first by default |
+| `--categorical` | `dataframe` | Comma separated text columns to make categoricals |
+| `--auto-categorical / --no-auto-categorical` | `dataframe` | Make text columns that repeat a value categoricals (default on) |
+| `--chunk`, `-C` | `array` | Elements a block (below) |
 
 Dimensions are validated against the existing obs/var where the path implies
 an axis. For `array` and `sparse` that is done from the file's header,
@@ -547,6 +664,39 @@ skips it.
 
 **`--chunk` is at least 1** wherever it appears. A zero or negative value is
 a usage error (exit 2), where it used to write an all-zero dense matrix.
+
+**Outputs keep the source's chunks and shards**, and are read and written a
+whole one at a time:
+
+- A Zarr v3 output keeps the source's shards and the inner chunks inside
+  them, each clamped to the output. Until 0.17.6, `subset`, `split` and
+  `concat` dropped the shard of a sparse matrix and kept its inner chunk:
+  under anndata 0.13 that is 245 elements, a file each.
+- Each shard, or each chunk of a Zarr or chunked HDF5 output, is written
+  once, whole. A shard is rewritten in full for a write of any part of it,
+  so writing one a `--chunk` block at a time took hundreds of times longer.
+  To write a shard whole, the command holds its rows: a shard, or chunk,
+  whose rows across the matrix come to more than 8 MiB is cut along its
+  rows to fit (anndata aims at 1 GB shards). While zarr encodes a unit it
+  holds about four times that again, so this costs up to about 40 MB.
+  `split` shares 128 MiB among the outputs it writes at once, so with many
+  groups their shards and chunks are cut further. A Zarr output of a store
+  with no chunks of its own (a contiguous h5ad X) takes zarr's own chunks,
+  cut the same way.
+- Zarr v2 has no shards: written from a sharded store, a shard becomes the
+  chunk. An HDF5 output of a sharded store lets HDF5 choose its chunks,
+  rather than taking the shard's inner chunk.
+- A dense matrix is read in whole chunks of the source: `--chunk` rows
+  rounded up to whole chunk heights, up to 32 MiB a read (more if
+  `--chunk` asks for more), in `subset`, `split`, `concat`, `recast`,
+  `convert` and `export array` alike. Where one chunk height across every
+  column is over that, as for chunks of (n_obs, 8), `subset`, `split` and
+  `convert` read a band of columns, whole chunks at a time; `concat`,
+  `recast` and `export` read `--chunk` rows, as before.
+- A sparse matrix in `subset` and `split` is read about as many entries a
+  block as `--chunk` rows hold on average, in either layout; a column of a
+  CSC matrix holding more, a gene expressed in every cell, is read in parts.
+- A Zarr v3 shard's index is read once per command, not once a read.
 
 ## Zarr format selection
 

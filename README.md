@@ -4,9 +4,9 @@ Explore and edit huge AnnData stores (`.h5ad` and `.zarr`) from the command line
 without loading them into memory and without a Python session. `adata` inspects,
 subsets, splits, concatenates, recasts and converts stores, and moves elements in
 and out as CSV, JSON, `.npy`, `.mtx` or images. It implements the AnnData on-disk
-spec directly against h5py and zarr, so it streams stores larger than RAM, and
-converts to and from 10x, STARsolo, Visium, Xenium, CellBender, Parse, loom, MuData
-and more.
+spec directly against h5py and zarr, so it streams stores larger than RAM. It
+reads 10x, STARsolo, Visium, Xenium, CellBender, Parse, loom, MuData and more,
+and writes 10x, loom and MuData.
 
 **Documentation: <https://cellgeni.github.io/adata-cli/>**
 

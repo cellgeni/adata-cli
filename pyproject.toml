@@ -3,7 +3,7 @@
 # so the distribution is published as `pyadata-cli`. The import package
 # and the command are both still `adata`.
 name = "pyadata-cli"
-version = "0.17.3"
+version = "0.17.6"
 description = "Streaming CLI for exploring and editing large AnnData .h5ad and .zarr stores"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -43,7 +43,10 @@ classifiers = [
 # and can break in a minor (0.26 stopped installing click), but a cap at the
 # next minor would turn away each new typer until we release, so it is 1.0.
 dependencies = [
-    "h5py>=3.15.1,<4",
+    # 3.15 leaks 32 to 160 bytes of memory on every dataset read, write and
+    # `.shape`, so streaming used memory in proportion to its blocks. 3.16
+    # brings HDF5 2.0, whose 8 MiB chunk cache `open_store` sets back to 1 MiB.
+    "h5py>=3.16.0,<4",
     # Zarr v2 compressors (storage/__init__.py).
     "numcodecs>=0.14",
     "numpy>=2.3.5,<3",
@@ -52,7 +55,9 @@ dependencies = [
     "pillow>=13.0.0",
     "rich>=14.2.0",
     "typer>=0.20.0,<1",
-    "zarr>=3.1.5,<4",
+    # 3.2.0 reads both spellings of a v3 record dtype (scanpy's
+    # rank_genes_groups); 3.1 cannot open a store newer zarr wrote with one.
+    "zarr>=3.2.0,<4",
 ]
 
 [project.urls]
@@ -72,9 +77,9 @@ pickle = [
     "pandas>=2.2.3",
     "scipy>=1.15",
 ]
-# Reading Visium HD: its bin positions are Parquet only. Imported only by
-# the Visium converter, and only for an HD input. 18 is the first with
-# wheels for Python 3.13.
+# Reading Visium HD: its bin positions are Parquet only. Imported only in
+# formats/parquet.py, which the Visium converter calls for an HD input. 18
+# is the first with wheels for Python 3.13.
 spatial = [
     "pyarrow>=18",
 ]
@@ -92,8 +97,8 @@ dev = [
     # Turns a hang into a failure with a traceback. Without it a stuck test
     # burns the CI job's whole timeout and reports nothing useful.
     "pytest-timeout>=2.3.1",
-    # Used only by tests/test_anndata_roundtrip.py, to check that what this
-    # tool reads and writes matches what anndata itself produces.
+    # The oracle most tests check against: anndata writes their inputs and
+    # reads back what this tool writes. The tool itself never imports it.
     "anndata>=0.13",
 ]
 

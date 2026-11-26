@@ -6,8 +6,10 @@ split-pipe writes, for the combined run and for each sample it was told of:
     <run>/all-sample/DGE_unfiltered/   (every barcode, not only cells)
     <run>/<sample>/DGE_filtered/ ...
 
-(`all-well` rather than `all-sample` in older versions.) The matrix is
-cells x genes, the other way round from 10x, so each file row is a row of X.
+Each file may be gzipped. This is the layout split-pipe 1.6.1 writes, which
+it was checked against; a run laid out otherwise, as older versions' may
+be, is not recognised. The matrix is cells x genes, the other way round
+from 10x, so each file row is a row of X.
 `all_genes.csv` holds `gene_id,gene_name,genome`, and `cell_metadata.csv`
 starts with `bc_wells`, the barcode, followed by the sample, the species and
 per-cell counts.
@@ -40,12 +42,13 @@ from adata.elements.write import ensure_anndata_skeleton
 from adata.formats.mtx import EntryMap, MtxHeader, read_header, read_into, scan, value_dtype
 from adata.formats.table import TableScan, read_small_table, scan_table, write_table
 from adata.storage import COMPRESSIONS, open_store
+from adata.util.markup import literal
 from adata.util.names import unique_names
 from adata.util.path import is_zarr_path
 
 _FILTERED, _UNFILTERED = "DGE_filtered", "DGE_unfiltered"
 
-#: The combined folder, by split-pipe version.
+#: The combined folder's names.
 _COMBINED = ("all-sample", "all-well")
 
 _INDEX = "bc_wells"
@@ -71,16 +74,18 @@ class _Dge:
         return self.path.name != _UNFILTERED
 
 
+def _file(folder: Path, name: str) -> Optional[Path]:
+    """`name` or `name.gz` in `folder`, whichever exists."""
+    return next((p for p in (folder / name, folder / f"{name}.gz") if p.is_file()), None)
+
+
 def _dge(folder: Path) -> Optional[_Dge]:
     """The DGE folder `folder` is, or None."""
     if not folder.is_dir() or is_zarr_path(folder):
         return None
-    matrix = next(
-        (p for p in (folder / "count_matrix.mtx", folder / "count_matrix.mtx.gz") if p.is_file()),
-        None,
-    )
-    genes, cells = folder / "all_genes.csv", folder / "cell_metadata.csv"
-    if matrix is None or not genes.is_file() or not cells.is_file():
+    matrix = _file(folder, "count_matrix.mtx")
+    genes, cells = _file(folder, "all_genes.csv"), _file(folder, "cell_metadata.csv")
+    if matrix is None or genes is None or cells is None:
         return None
     return _Dge(folder, matrix, genes, cells)
 
@@ -152,8 +157,8 @@ def locate(path: Path, options: Options) -> List[_Dge]:
             )
         raise ValueError(
             f"{path} is not split-pipe output: it needs count_matrix.mtx, "
-            "all_genes.csv and cell_metadata.csv, in DGE_filtered/ or "
-            "DGE_unfiltered/ under each sample."
+            "all_genes.csv and cell_metadata.csv (each plain or gzipped), in "
+            "DGE_filtered/ or DGE_unfiltered/ under each sample."
         )
 
     named = [name for name in samples if name not in _COMBINED]
@@ -294,7 +299,7 @@ class ParseImport(Converter):
         # cannot be read must not leave a store holding obs and var alone.
         scans = []
         for item in detail.items:
-            with console.status(f"[cyan]Checking {_label(item)}...[/]"):
+            with console.status(f"[cyan]Checking {literal(_label(item))}...[/]"):
                 scans.append(scan(item.header, item.emap))
 
         for item, scanned, path in zip(detail.items, scans, staged):
@@ -302,7 +307,7 @@ class ParseImport(Converter):
                 root = stack.enter_context(
                     open_store(path, "w", zarr_format=detail.zarr_format)
                 ).root
-                with console.status(f"[cyan]Writing obs and var of {item.dge.sample}...[/]"):
+                with console.status(f"[cyan]Writing obs and var of {literal(str(item.dge.sample))}...[/]"):
                     write_table(root, "obs", item.cells, rows=item.rows)
                     write_var(root, item.target)
                     ensure_anndata_skeleton(root)
@@ -312,13 +317,13 @@ class ParseImport(Converter):
                     data_dtype=value_dtype(item.header, scanned),
                     compression=detail.compression,
                 )
-                with console.status(f"[cyan]Reading {_label(item)}...[/]"):
+                with console.status(f"[cyan]Reading {literal(_label(item))}...[/]"):
                     summed = read_into(item.header, item.emap, scanned, [[appender]], root)
                     appender.finish()
                 if summed:
                     console.print(
                         f"[yellow]Warning:[/] {summed:,} duplicate entries in "
-                        f"{_label(item)} were summed, as scipy does."
+                        f"{literal(_label(item))} were summed, as scipy does."
                     )
 
 

@@ -92,11 +92,11 @@ class TestViewCommand:
         assert "Path:" in output
 
     def test_view_entry_not_found(self, sample_h5ad_file):
-        """Test info command with non-existent object path."""
+        """A missing entry is an error on stderr with exit 1, as `ls` gives (F096)."""
         result = runner.invoke(app, ["view", str(sample_h5ad_file), "nonexistent"])
-        assert result.exit_code == 0  # Doesn't exit with error, just shows message
-        output = result.stdout + (result.stderr or "")
-        assert "not found" in output
+        assert result.exit_code == 1
+        assert result.stdout == ""
+        assert "not found" in result.stderr
 
 
 class TestExportDataframeCommand:

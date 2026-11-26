@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from benchmarks.cases import by_name
 
@@ -109,6 +110,8 @@ def render(payload: Dict, previous: Optional[Dict] = None) -> str:
     versions = ", ".join(f"{k} {v}" for k, v in payload["versions"].items())
     lines.append(f"| Versions | {versions} |")
     lines.append(f"| Generated | {payload['generated']} |")
+    if previous:
+        lines.append(f"| vs previous | `{previous['ref']}` |")
     lines.append("")
 
     grouped: Dict[str, List[Dict]] = {}
@@ -164,7 +167,7 @@ def render(payload: Dict, previous: Optional[Dict] = None) -> str:
 
 
 def _delta(record: Dict, previous: Optional[Dict]) -> str:
-    """Wall time and peak RSS against the last published run."""
+    """Wall time and peak RSS against the previous release's run."""
     if not previous or record.get("status") != "ok" or previous.get("status") != "ok":
         return "-"
     parts = []
@@ -255,7 +258,7 @@ def publish(payload: Dict, results: Path, docs: Path) -> Path:
     ref = payload["ref"].replace("/", "-")
     shutil.copyfile(results, store / f"{ref}.json")
 
-    previous = _previous(store, skip=f"{ref}.json")
+    previous = _previous(store, payload)
     page = docs / "reference" / "benchmarks.md"
     page.parent.mkdir(parents=True, exist_ok=True)
     page.write_text(
@@ -264,17 +267,41 @@ def publish(payload: Dict, results: Path, docs: Path) -> Path:
     return page
 
 
-def _previous(store: Path, *, skip: str) -> Optional[Dict]:
-    candidates = sorted(
-        (p for p in store.glob("*.json") if p.name != skip),
-        key=lambda p: p.stat().st_mtime,
-    )
-    if not candidates:
-        return None
-    try:
-        return json.loads(candidates[-1].read_text())
-    except Exception:  # pragma: no cover
-        return None
+#: A release tag: bare MAJOR.MINOR.PATCH, as publish.yml checks it.
+RELEASE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+
+
+def _release(ref: str) -> Optional[Tuple[int, int, int]]:
+    """A release's version, comparable as numbers, or None for any other ref."""
+    match = RELEASE.fullmatch(ref)
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def _previous(store: Path, payload: Dict) -> Optional[Dict]:
+    """The run that "vs previous" compares with: the release just before.
+
+    Up to 0.17.4 this was the file with the newest mtime. In a fresh checkout
+    that is whichever file git happened to write last, so 0.17.0 was compared
+    with 0.8.0. Releases are ordered by version now, as numbers, so 0.10.0
+    follows 0.9.0. A run that is not a release (a dispatch, named by its
+    commit) compares with the newest release. Only a run at the same tier
+    counts, since the inputs differ between tiers.
+    """
+    this = _release(payload.get("ref", ""))
+    best: Optional[Tuple[Tuple[int, int, int], Dict]] = None
+    for path in store.glob("*.json"):
+        version = _release(path.stem)
+        if version is None or (this is not None and version >= this):
+            continue
+        if best is not None and version < best[0]:
+            continue
+        try:
+            candidate = json.loads(path.read_text())
+        except Exception:  # pragma: no cover
+            continue
+        if candidate.get("tier") == payload.get("tier"):
+            best = (version, candidate)
+    return best[1] if best else None
 
 
 def main() -> int:  # pragma: no cover - CLI entry
@@ -295,7 +322,7 @@ def main() -> int:  # pragma: no cover - CLI entry
         print(f"wrote {page}")
         text = page.read_text()
     else:
-        text = render(payload, _previous(args.docs / "benchmarks", skip=""))
+        text = render(payload, _previous(args.docs / "benchmarks", payload))
         print(text)
     if args.out:
         args.out.write_text(text)

@@ -1,4 +1,4 @@
-"""Compatibility against stores written by real anndata releases, 0.8 to 0.13.
+"""Compatibility against stores written by real anndata releases, 0.7 to 0.13.
 
 The rest of the suite checks this tool against stores it built itself, which
 cannot catch the thing that actually broke it: anndata changing how it writes
@@ -35,9 +35,10 @@ from tests.reference_stores import (
     must_build,
     offline,
     uv_available,
+    with_args,
 )
 
-# Building six environments on a cold uv cache is slow, so these get much
+# Building seven environments on a cold uv cache is slow, so these get much
 # longer than the suite-wide limit.
 pytestmark = [pytest.mark.integration, pytest.mark.timeout(1800)]
 
@@ -197,29 +198,26 @@ def test_encodings_are_recognised_not_guessed(store):
 
 
 @pytest.fixture
-def read_back(release, fmt):
+def read_back(release):
     """Read a store using the same anndata release that wrote the fixture.
 
     Checking our output with the *current* anndata would not show whether an
-    older release can still open what we wrote.
+    older release can still open what we wrote. anndata 0.7 predates the
+    encoding adata writes, so its stores are only read.
     """
     import subprocess
 
-    from tests.reference_stores import Release
+    if not release.reads_back:
+        pytest.skip(f"anndata {release.label} cannot read the current encoding")
 
     def _read(path: Path, expression: str):
         script = (
             "import warnings; warnings.filterwarnings('ignore')\n"
             "import anndata as ad, sys\n"
-            f"a = ad.read_{'zarr' if fmt == 'zarr' else 'h5ad'}(sys.argv[1])\n"
+            f"a = ad.read_{'zarr' if path.suffix == '.zarr' else 'h5ad'}(sys.argv[1])\n"
             f"print('RESULT', {expression})\n"
         )
-        cmd = [
-            "uv", "run", "--no-project", "--python", release.python,
-            "--with", release.spec, "--with", "scipy",
-        ]
-        for extra in release.extras:
-            cmd += ["--with", extra]
+        cmd = ["uv", "run", "--no-project", "--python", release.python, *with_args(release)]
         cmd += ["python", "-c", script, str(path)]
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
         line = [
@@ -260,6 +258,52 @@ def test_subset_preserves_raw_across_versions(store, tmp_path, fmt, read_back):
 
     assert read_back(out, "a.raw is not None") == "True"
     assert read_back(out, "(a.raw.shape)") == "(2, 4)"
+
+
+def _zarr_format(release) -> str:
+    """The Zarr version a release reads: zarr-python 2 reads only v2."""
+    return "2" if any(e.startswith("zarr==2") for e in release.extras) else "3"
+
+
+@pytest.mark.parametrize("target", ["h5ad", "zarr"])
+def test_convert_output_opens_in_the_release_that_wrote_the_input(
+    store, tmp_path, release, target, read_back
+):
+    """F086, F017: the promise that every release from 0.8 reads what adata
+    writes was checked on subset outputs only. A conversion, to the same
+    backend or the other, rank_genes_groups included, is read back here."""
+    out = tmp_path / f"converted.{target}"
+    extra = ["--zarr-format", _zarr_format(release)] if target == "zarr" else []
+    result = runner.invoke(app, ["convert", str(store), "-o", str(out), *extra])
+    assert result.exit_code == 0, _out(result)
+
+    assert read_back(out, "(a.n_obs, a.n_vars)") == f"({N_OBS}, {N_VAR})"
+    assert read_back(out, "list(a.obs_names)") == str(OBS_NAMES)
+    assert read_back(out, "a.obs['cell_type'].cat.ordered") == "True"
+    assert read_back(out, "list(a.raw.var['feature_types'])") == str(
+        ["Gene Expression"] * 3 + ["Antibody Capture"]
+    )
+    assert read_back(
+        out, "[str(v) for v in a.uns['rank_genes_groups']['names']['A']]"
+    ) == "['gene_0', 'gene_2']"
+
+
+def test_split_and_concat_outputs_open_in_the_release_that_wrote_the_input(
+    store, tmp_path, fmt, read_back
+):
+    """F086: split's pieces and concat's merge were read with the current
+    anndata only."""
+    parts = tmp_path / "parts"
+    result = runner.invoke(app, ["split", str(store), "--by", "cell_type", "-o", str(parts)])
+    assert result.exit_code == 0, _out(result)
+    pieces = sorted(parts.glob(f"*.{fmt}"))
+    assert read_back(pieces[0], "sorted(set(a.obs['cell_type']))") == "['A']"
+
+    merged = tmp_path / f"merged.{fmt}"
+    result = runner.invoke(app, ["concat", *map(str, pieces), "-o", str(merged)])
+    assert result.exit_code == 0, _out(result)
+    assert read_back(merged, "sorted(a.obs_names)") == str(sorted(OBS_NAMES))
+    assert read_back(merged, "str(a.obs['cell_type'].dtype)") == "category"
 
 
 @pytest.mark.parametrize("target", ["h5ad", "zarr"])

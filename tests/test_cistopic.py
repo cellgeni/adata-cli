@@ -109,21 +109,136 @@ def test_harmony_topics_are_kept_too(tmp_path):
     assert np.array_equal(got.obsm["X_topic_harmony"], harmony[truth.obj.cell_names].to_numpy().T)
 
 
+@pytest.mark.parametrize("budget", [20, 5], ids=["cells", "features"])
 @pytest.mark.parametrize("dense", [False, True], ids=["csr", "dense"])
-def test_an_imputed_features_pickle_is_cells_by_features(tmp_path, dense, monkeypatch):
+@pytest.mark.parametrize("suffix", [".h5ad", ".zarr2", ".zarr3"])
+def test_an_imputed_features_pickle_is_cells_by_features(tmp_path, dense, suffix, budget, monkeypatch):
+    """Blocks of a few cells (8 features to a cell fit `cells`), or runs of
+    one cell's features (they do not fit `features`), straddling the edges."""
     from adata.conversion import cistopic
 
-    monkeypatch.setattr(cistopic, "DENSE_CELLS", 4)  # blocks straddle the cells
+    monkeypatch.setattr(cistopic, "BLOCK_ENTRIES", budget, raising=False)
     truth = write_imputed_pickle(tmp_path / "imputed_acc_obj.pkl")
-    out = tmp_path / "out.h5ad"
-    result = _ok(truth.path, "-o", out, *(["--dense"] if dense else []))
-    assert "pycisTopic CistopicImputedFeatures → h5ad, 15 cells x 8 features" in _out(result)
+    out = tmp_path / f"out{suffix[:5]}"
+    zarr = ["--zarr-format", suffix[-1]] if suffix != ".h5ad" else []
+    result = _ok(truth.path, "-o", out, *zarr, *(["--dense"] if dense else []))
+    assert f"pycisTopic CistopicImputedFeatures → {suffix[1:5]}, 15 cells x 8 features" in _out(result)
     got = _read(out)
     assert isinstance(got.X, np.ndarray) == dense
     X = got.X if dense else got.X.toarray()
     assert X.dtype == np.float32 and np.array_equal(X, truth.obj.mtx.T)
     assert list(got.var_names) == truth.obj.feature_names
     assert list(got.obs_names) == truth.obj.cell_names
+
+
+@pytest.mark.parametrize("suffix", [".h5ad", ".zarr"])
+def test_dense_output_chunks_are_bounded_in_bytes_however_wide_the_matrix(tmp_path, suffix, monkeypatch):
+    """F007: `--dense` chunked X as (4096 cells, every feature), so a chunk
+    grew with the features: 3.2 GB at 200,000 float32 ones, and past
+    262,144 HDF5 refused it (a chunk must be under 4 GB). A chunk now holds
+    a fixed number of entries, a run of one cell's features when even one
+    cell is wider than that."""
+    import h5py
+    import zarr
+
+    from adata.conversion import cistopic
+
+    monkeypatch.setattr(cistopic, "BLOCK_ENTRIES", 64, raising=False)
+    for n_features, expected in ((16, (4, 16)), (1000, (1, 64))):
+        truth = write_imputed_pickle(tmp_path / f"wide{n_features}.pkl", n_cells=10, n_features=n_features)
+        out = tmp_path / f"wide{n_features}{suffix}"
+        _ok(truth.path, "-o", out, "--dense")
+        if suffix == ".h5ad":
+            with h5py.File(out, "r") as f:
+                chunks = f["X"].chunks
+        else:
+            chunks = zarr.open_group(out, mode="r")["X"].chunks
+        assert chunks == expected, chunks
+        assert np.array_equal(_read(out).X, truth.obj.mtx.T)
+
+
+def _sparse_imputed(tmp_path, fmt):
+    truth = write_imputed_pickle(tmp_path / f"gene_act_{fmt}.pkl", n_cells=15, n_features=8)
+    truth.obj.mtx = getattr(sparse, f"{fmt}_matrix")(truth.obj.mtx)
+    truth.path.write_bytes(pickle.dumps(truth.obj, protocol=4))
+    return truth
+
+
+@pytest.mark.parametrize("fmt", ["csr", "csc", "coo"])
+@pytest.mark.parametrize("suffix", [".h5ad", ".zarr2", ".zarr3"])
+def test_dense_is_honoured_for_a_sparse_imputed_matrix(tmp_path, fmt, suffix, monkeypatch):
+    """F100: gene activity is pickled with a sparse `mtx`, and `--dense` was
+    then ignored: the summary said dense and X came out CSR. It is written
+    dense, a block of cells at a time from the CSR the transpose makes."""
+    from adata.conversion import cistopic
+
+    monkeypatch.setattr(cistopic, "BLOCK_ENTRIES", 20, raising=False)
+    truth = _sparse_imputed(tmp_path, fmt)
+    out = tmp_path / f"out{suffix[:5]}"
+    zarr = ["--zarr-format", suffix[-1]] if suffix != ".h5ad" else []
+    result = _ok(truth.path, "-o", out, "--dense", *zarr)
+    assert ", dense" in _out(result)
+    got = _read(out)
+    assert isinstance(got.X, np.ndarray), type(got.X)
+    assert got.X.dtype == np.float32 and np.array_equal(got.X, truth.obj.mtx.T.toarray())
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted([truth.path.name, out.name])
+    if suffix == ".h5ad":
+        import h5py
+
+        with h5py.File(out, "r") as f:
+            assert not [k for k in f if k.startswith("__cistopic")], "scratch left behind"
+    else:
+        import zarr
+
+        assert not [k for k in zarr.open_group(out, mode="r") if k.startswith("__cistopic")]
+
+
+@pytest.mark.parametrize("fmt", ["csr", "csc", "coo"])
+def test_a_sparse_imputed_matrix_is_csr_without_dense(tmp_path, fmt):
+    truth = _sparse_imputed(tmp_path, fmt)
+    out = tmp_path / "out.h5ad"
+    _ok(truth.path, "-o", out)
+    got = _read(out)
+    assert got.X.format == "csr" and np.array_equal(got.X.toarray(), truth.obj.mtx.T.toarray())
+
+
+def test_an_imputed_matrix_that_is_not_numbers_is_refused(tmp_path):
+    truth = write_imputed_pickle(tmp_path / "imputed.pkl", n_cells=3, n_features=2)
+    truth.obj.mtx = truth.obj.mtx.astype(object)
+    truth.path.write_bytes(pickle.dumps(truth.obj, protocol=4))
+    result = _convert(truth.path, "-o", tmp_path / "out.h5ad")
+    assert result.exit_code == 1
+    assert "its matrix holds object values, not numbers" in _out(result)
+
+
+@pytest.mark.perf
+@pytest.mark.parametrize("dense", [False, True], ids=["csr", "dense"])
+def test_writing_an_imputed_matrix_holds_a_block_not_every_feature_of_4096_cells(tmp_path, dense, monkeypatch):
+    """F025 (and F007's copy): each block was 4096 cells x every feature,
+    and CSR took about 9x its bytes in `np.nonzero`'s int64 coordinates: 3
+    GB for 4096 x 20,000, about 50 GB at 500,000 regions, where loading the
+    pickle took 360 MB. A block now holds a fixed number of entries, so
+    what writing allocates does not grow with the features."""
+    from adata.conversion import cistopic
+    from adata.conversion.base import Options
+    from adata.storage import open_store
+    from tests.perf_counters import FLAT_SIZES, assert_independent_of, count_allocations
+
+    # 256 cells of 64 features are one block; of 4096, 64 blocks of 4 cells.
+    monkeypatch.setattr(cistopic, "BLOCK_ENTRIES", 1 << 14, raising=False)
+
+    def measure(n_features: int) -> int:
+        truth = write_imputed_pickle(tmp_path / f"imputed{n_features}.pkl", n_cells=256, n_features=n_features)
+        out = tmp_path / f"out{n_features}{int(dense)}.h5ad"
+        plan = cistopic.CistopicImport().plan(
+            truth.path, out, "cistopic", "h5ad", Options(dense=dense, given=frozenset())
+        )
+        with open_store(out, "w") as store:
+            with count_allocations() as peak:
+                cistopic._write_imputed(store.root, plan.detail)
+        return peak[0]
+
+    assert_independent_of(measure, what="bytes allocated writing X", axis="n_features", sizes=FLAT_SIZES)
 
 
 def test_a_pickle_that_asks_for_code_is_refused_unrun(tmp_path):
@@ -145,6 +260,19 @@ def test_a_pickle_that_asks_for_code_is_refused_unrun(tmp_path):
     assert result.exit_code == 1
     assert re.search(r"asks for (posix|os|nt)\.system, which a pycisTopic object never holds", _out(result))
     assert not marker.exists(), "the payload ran"
+    assert not out.exists()
+
+
+def test_a_pickle_numpy_or_pandas_cannot_read_is_named_as_such(tmp_path):
+    """A pickle cut short, or one whose contents pandas itself refuses,
+    failed with the library's bare error; the file is named."""
+    truth = write_cistopic_pickle(tmp_path / "obj.pkl", model=False, projections=False)
+    data = truth.path.read_bytes()
+    truth.path.write_bytes(data[: len(data) // 2])
+    out = tmp_path / "out.h5ad"
+    result = _convert(truth.path, "-o", out)
+    assert result.exit_code == 1
+    assert "obj.pkl could not be read as a pycisTopic pickle" in _out(result)
     assert not out.exists()
 
 

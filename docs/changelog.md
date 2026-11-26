@@ -8,6 +8,688 @@ nav_order: 7
 Notable changes to `adata-cli`. Versions are `MAJOR.MINOR.PATCH`; tags carry no
 `v` prefix.
 
+## 0.17.6
+
+The last wave of fixes from the October 2026 audit
+([#87](https://github.com/cellgeni/adata-cli/issues/87)), on streaming, which
+closes it. Reads and writes follow the source's chunks and shards, so
+anndata 0.13's sharded Zarr v3 stores stream at the cost `--chunk` implies
+and each shard is written once; `recast` checks and converts in `--chunk`
+blocks; `split`'s memory no longer grows with its groups. Pickle reading is
+hardened, 16-bit images export as they are, and the CLI's output is plain
+lines in logs and pipes, with names printed as the store spells them.
+h5py 3.16 or later is now required; its Linux wheels need glibc 2.28.
+
+### Changed
+
+- **h5py 3.16.0 or later is required**
+  ([#96](https://github.com/cellgeni/adata-cli/issues/96)). h5py 3.15 kept 32
+  to 160 bytes of memory for good on every dataset read and write, so long
+  streaming runs grew with their number of blocks. h5py 3.16's HDF5 2.0 gives
+  each dataset an 8 MiB chunk cache; stores are opened with 1 MiB, as before.
+  Its Linux wheels need glibc 2.28 or later.
+
+### Fixed
+
+- **Subset, split, concat, recast and convert write each Zarr v3 shard once**
+  ([#97](https://github.com/cellgeni/adata-cli/issues/97)). anndata 0.13 writes
+  Zarr v3 sharded, a whole array in one shard. Commands wrote outputs a
+  `--chunk` block at a time, and zarr rewrites a whole shard for a write of any
+  part of it: subset and concat wrote 15 times the bytes they meant to, split
+  121 times, and a dense subset held 1.7 GB. Outputs are written a whole shard
+  (or chunk) at a time now. A shard is cut along its rows to at most 8 MiB, 128
+  MiB shared across the outputs `split` writes at once, and about four times
+  that is held while zarr encodes it.
+- **Outputs keep a sharded source's shards and inner chunks**
+  ([#97](https://github.com/cellgeni/adata-cli/issues/97)). A sparse matrix's
+  `data` and `indices` dropped the shard and kept the inner chunk, 245 elements
+  a file under anndata 0.13 with zarr 3.1: thousands of files per array. An
+  h5ad output took the inner chunk as its HDF5 chunk, making a file twice
+  anndata's own. Zarr v3 outputs keep the shard. HDF5 outputs let HDF5 choose
+  their chunks, and `--zarr-format 2` takes the shard as the chunk.
+- **Sparse `subset` and `split` follow `--chunk`**
+  ([#97](https://github.com/cellgeni/adata-cli/issues/97)). Blocks were 4,096
+  rows or columns whatever `--chunk` said, so a CSC block (4,096 genes across
+  every cell) grew with the number of cells. A block holds about as many
+  entries as `--chunk` rows do now, and a gene expressed in every cell is read
+  in parts.
+- **Reads follow the source's chunks**
+  ([#97](https://github.com/cellgeni/adata-cli/issues/97)). `subset`, `split`,
+  `concat`, `recast`, `convert` and `export` read a dense matrix in whole
+  chunks of the source, so a chunk taller than `--chunk` is no longer decoded
+  once for every block: 7 to 60 times the matrix for zarr's own chunks or
+  chunks of (n_obs, 8). Past 32 MiB, `subset`, `split` and `convert` read a
+  band of columns, so `convert` no longer reads a column-chunked matrix whole.
+  A Zarr v3 shard's index is read once per command, not once per block.
+- **`split` memory no longer grows with the number of groups**
+  ([#97](https://github.com/cellgeni/adata-cli/issues/97)). An open HDF5 file
+  costs about 0.6 MB whatever is in it, and split held up to 1,024 open at
+  once: 581 MB of RSS at 512 groups, against 143 MB now. It writes at most 128
+  outputs per pass over the matrices, so past 128 groups the matrices are read
+  once per 128. Each output is written a whole chunk at a time, so a chunk 512
+  rows tall is no longer decoded and encoded once for every block.
+- **`recast --dtype` checks a dense matrix a block at a time**
+  ([#96](https://github.com/cellgeni/adata-cli/issues/96)). The round-trip
+  check read the whole matrix at once, and two more copies of it, whatever
+  `--chunk` said. It reads `--chunk` rows now, as the conversion does.
+- **Densifying a CSC matrix, and writing a dense one as CSC, hold `--chunk`
+  rows** ([#96](https://github.com/cellgeni/adata-cli/issues/96)). Each block
+  was `--chunk` columns of every row, so memory followed the number of cells: 8
+  GB a block at 2M cells. Both now go through a CSR in scratch and the
+  streaming transpose.
+- **The streaming transpose reads about a chunk at a time on skewed matrices**
+  ([#96](https://github.com/cellgeni/adata-cli/issues/96)). It stepped by the
+  average row, so a run of genes expressed in every cell was read many chunks
+  at once, and a gene expressed in every cell was sorted whole. It steps by
+  entries now, and streams such a gene from a bucket of its own.
+- **A sparse matrix made from a dense one keeps element-sized chunks**
+  ([#96](https://github.com/cellgeni/adata-cli/issues/96)). `recast --layout
+  csr`/`csc` and the 10x-h5 export gave `data` and `indices` the dense source's
+  chunk height as their chunk, down to 16 elements: hundreds of thousands of
+  chunks and a file three times the size.
+- **`--force` no longer skips the index range check**
+  ([#96](https://github.com/cellgeni/adata-cli/issues/96)). Given to accept a
+  lossy cast, it also let `indptr` overflow `--indices-dtype` and wrap
+  negative, a corrupt matrix with exit 0. A dense matrix made sparse is
+  range-checked too.
+- **float16 is refused for a sparse matrix**
+  ([#96](https://github.com/cellgeni/adata-cli/issues/96)). scipy has no
+  float16 sparse matrix, so the store `recast` wrote could not be read by
+  anndata or scanpy. Use `--dtype float32`, or `--layout dense`.
+- **A dense matrix made sparse by a lossy cast drops the zeros the cast makes**
+  ([#96](https://github.com/cellgeni/adata-cli/issues/96)). Values that became
+  0 were stored as explicit zeros, three times scipy's nnz in one case, which
+  misleads nnz-based QC.
+- **Matrices nested two or more groups deep are converted**
+  ([#96](https://github.com/cellgeni/adata-cli/issues/96)). `recast` of
+  `uns/neighbors/connectivities` reported converting it and copied it
+  unchanged.
+- **Pickle arrays are checked before use**
+  ([#101](https://github.com/cellgeni/adata-cli/issues/101)). Reading a
+  pycisTopic pickle checks each array it rebuilds (dtype, shape, and a sparse
+  matrix's indices) before numpy, scipy or pandas uses it, and refuses a pickle
+  that fails before anything is written, so a crafted pickle can no longer make
+  scipy write out of bounds or have numpy read memory as another type. Dates
+  and times are no longer read from pickles, which also stops a crafted
+  timezone from opening a local file; pycisTopic's objects hold none. Pickles
+  are still trusted input: read them only from a source you would trust with
+  the data. Pickles that pandas 1.5 writes with missing values in a nullable
+  text column now read.
+- **Imputed pycisTopic matrices convert whatever their width**
+  ([#101](https://github.com/cellgeni/adata-cli/issues/101)). `--dense`
+  chunked X as 4096 cells by every feature, which HDF5 refused past 262,144
+  float32 features, and CSR output held 4096 cells' coordinates at once,
+  about 50 GB at 500,000 regions. Both now work about a million entries at
+  a time, and a dense X is chunked the same way.
+- **`--dense` is honoured for gene activity**
+  ([#101](https://github.com/cellgeni/adata-cli/issues/101)). An imputed
+  object holding a sparse matrix was written as CSR although `--dense` was
+  given and the summary said dense.
+- **A Xenium bundle converts into a new folder**
+  ([#101](https://github.com/cellgeni/adata-cli/issues/101)). With only
+  `analysis.tar.gz`, converting to an output whose folder did not exist yet
+  failed with a bare "No such file or directory" naming a temporary path.
+- **`export image` keeps 16-bit images**
+  ([#101](https://github.com/cellgeni/adata-cli/issues/101)). Every value
+  from 255 up was clipped to 255, silently. One channel of 16 bits is now
+  written as a 16-bit PNG or TIFF, and values an image cannot keep are
+  refused, naming their range; the new `--scale` stretches them onto 0-255.
+- **Names with square brackets print as the store spells them**
+  ([#103](https://github.com/cellgeni/adata-cli/issues/103)). Rich read the
+  `[mt]` of scanpy's `pct_counts[mt]` as a style tag. `view`, `ls`, `split` and
+  messages showed `pct_counts`, a name the next command could not find, and a
+  name, label or attribute holding `[/x]` stopped the command. Every name,
+  label, path and value from a store or the command line is escaped now.
+- **`view FILE ENTRY` on a missing entry fails**
+  ([#103](https://github.com/cellgeni/adata-cli/issues/103)). It printed its
+  `Error:` line on stdout and exited 0, so a script took the message for the
+  entry's description. It goes to stderr with exit code 1 now, as `ls` does.
+- **Logs hold plain lines**
+  ([#103](https://github.com/cellgeni/adata-cli/issues/103)). Written to a file
+  or a pipe, stderr held colour and cursor codes and wrapped messages at 80
+  columns, so `grep '^Error:' adata.log` found nothing. Off a terminal there
+  are no codes now and an error is one line. On a terminal nothing changes.
+- **`convert --help` names the extras to install**
+  ([#103](https://github.com/cellgeni/adata-cli/issues/103)):
+  `pyadata-cli[spatial]` and `pyadata-cli[pickle]` showed as `pyadata-cli`.
+- **Help says what the commands do**
+  ([#103](https://github.com/cellgeni/adata-cli/issues/103)):
+  - `--to` lists only the formats `convert` can write;
+  - `--inplace` says the source is replaced by a store written beside it, not
+    modified directly;
+  - `convert --help` says which formats are only read.
+- **`adata.cli.main(argv)` runs `argv`**
+  ([#103](https://github.com/cellgeni/adata-cli/issues/103)). It parsed the
+  process's own command line instead.
+- **The documentation matches the code**
+  ([#103](https://github.com/cellgeni/adata-cli/issues/103)):
+  - the command reference has every option;
+  - troubleshooting and the pipelines guide list everything held whole in
+    memory, images among them;
+  - the testing page maps every test file and CI job;
+  - the 0.17.1 entry below no longer says images are not loaded whole.
+
+## 0.17.5
+
+The second wave of fixes from the October 2026 audit
+([#87](https://github.com/cellgeni/adata-cli/issues/87)), on fidelity. What
+anndata and scanpy write survives every copy path, scanpy's marker genes and
+anndata 0.7 files included; `subset` and `split` keep exactly the rows named
+and subset every element as anndata does; `concat` takes any number of
+inputs and orders an outer join as anndata does; the 10x, MTX, Parse,
+CellBender, loom, SCope and MuData converters round-trip or refuse clearly;
+and a release publishes only what passed. Two changes need attention: zarr
+3.2 or later is required, and the container image runs as an unprivileged
+user, so a Docker run that writes to a mounted folder needs `--user`.
+
+### Changed
+
+- **The container image runs as an unprivileged user**
+  ([#102](https://github.com/cellgeni/adata-cli/issues/102)). It runs as uid
+  10001 rather than root, and its base is pinned by digest. duckdb's download
+  is checked against a pinned SHA-256. Singularity, Apptainer and Docker with
+  `-u` still run it as the caller. A plain `docker run` on a bind mount needs
+  `--user "$(id -u):$(id -g)"`.
+- **zarr 3.2 or later is required**
+  ([#95](https://github.com/cellgeni/adata-cli/issues/95)). zarr 3.1 cannot
+  open a v3 store that newer zarr wrote with a record array, as anndata 0.13
+  does for `rank_genes_groups`.
+- **An outer join's var and merged categories are in anndata's order**
+  ([#93](https://github.com/cellgeni/adata-cli/issues/93)).
+  `concat --join outer` keeps the inputs' var order when they all share it
+  and sorts the union otherwise, as `anndata.concat` does; it used to be the
+  order of first appearance. Merged categories keep the first input's order
+  when it already holds every category, and are natsorted otherwise
+  (accented letters as natsort orders them, "Müller" after "Muscle"). An
+  ordered categorical whose inputs disagree on the order is written
+  unordered, with a warning, where it used to keep the first input's order.
+- **A quoted value in an `in` list is one label**
+  ([#94](https://github.com/cellgeni/adata-cli/issues/94)). `cluster in
+  "1,2,3"` used to be split at the commas. A quoted value is now taken as
+  written, so write `cluster in 1,2,3` or `cluster in ("1", "2", "3")` for
+  three labels.
+- **split names a label that is a filename already after itself**
+  ([#94](https://github.com/cellgeni/adata-cli/issues/94)). `CD4`, `CD4_1` and
+  `CD4+` now give `CD4.h5ad`, `CD4_1.h5ad` and `CD4_2.h5ad`; the label that
+  needed sanitising takes the suffix. Missing values, NaN included, claim `NA`
+  first, so a literal `NA` label moves to `NA_1` when the column also has
+  missing values, and NaN in a float column goes to `NA` rather than `nan`.
+- **Removed the `adata.info` and `adata.read` modules**
+  ([#94](https://github.com/cellgeni/adata-cli/issues/94)). They only
+  re-exported `adata.core.info` and `adata.core.read`. `subset_h5ad` lost its
+  unused `quiet` argument, and `indices_from_name_set` now also returns how
+  many names matched more than one row.
+- **10x export takes feature names from `var["gene_symbols"]` when there is
+  one** ([#99](https://github.com/cellgeni/adata-cli/issues/99)). The ids come
+  from `var["gene_ids"]`, and the var names stand in for the ids when var is
+  laid out as `--var-names gene_ids` leaves it, as the loom export already
+  does. A store with both columns used to export its var names as the names.
+- **A probe-level (Flex) matrix exports its probe ids as the feature ids**
+  ([#99](https://github.com/cellgeni/adata-cli/issues/99)). This holds in 10x
+  HDF5, with the gene ids in `features/gene_id`, and in 10x MTX `features.tsv`.
+- **10x HDF5 imports read Cell Ranger's XML character references as characters,
+  and record which feature datasets they read**
+  ([#99](https://github.com/cellgeni/adata-cli/issues/99)). The record is in
+  `uns["cellranger"]["feature_keys"]`, so an export writes the datasets back.
+  `--var-names gene_ids --make-unique` keeps the ids it had to suffix in
+  `var["gene_ids"]`.
+
+### Fixed
+
+- **Datasets held outside the file are refused**
+  ([#95](https://github.com/cellgeni/adata-cli/issues/95)). An .h5ad whose
+  datasets keep their data in other files (HDF5 external storage or virtual
+  datasets) is refused when it is opened or copied, so a crafted file can no
+  longer pull other local files into an output.
+- **scanpy's marker genes cross backends**
+  ([#95](https://github.com/cellgeni/adata-cli/issues/95)). `rank_genes_groups`
+  (record arrays in `uns`) failed every conversion and subset between h5ad and
+  Zarr, and `convert --compression` of an h5ad holding them crashed the
+  process. They are now copied field by field, as anndata writes them, `concat
+  --uns-merge same` keeps them (it dropped every text one read from an h5ad),
+  and `export dict` writes them as JSON.
+- **anndata 0.7 files copy whole**
+  ([#95](https://github.com/cellgeni/adata-cli/issues/95)). An h5ad copy nulled
+  the references of 0.7 dataframes nested in `raw`, `obsm` or `uns` (anndata
+  could not open the output), every copy made an ordered categorical unordered,
+  and every command warned that such a file's root attributes were invalid. CI
+  now reads stores written by anndata 0.7.8.
+- **Elements other writers leave behind**
+  ([#95](https://github.com/cellgeni/adata-cli/issues/95)). Variable-length
+  numbers and object references were turned into text on their way to Zarr;
+  they are now refused there by name, and copied between h5ad files. An
+  attribute holding nothing, or a 2-D array of bytes, no longer fails a
+  conversion to Zarr, and an untagged empty dataspace is no longer tagged
+  `null` (which anndata 0.8 to 0.11 refuse).
+- **Zarr v2 keeps its compression**
+  ([#95](https://github.com/cellgeni/adata-cli/issues/95)). An uncompressed v2
+  array came out Blosc-compressed, and so could a compressed one when zarr's
+  deprecated API failed.
+- **recast to bool on h5ad**
+  ([#95](https://github.com/cellgeni/adata-cli/issues/95)). It failed on every
+  float matrix with "no appropriate function for conversion path".
+- **float32 exports as written**
+  ([#95](https://github.com/cellgeni/adata-cli/issues/95)). `export dataframe`
+  printed 0.1 in a float32 column as 0.10000000149011612; it now writes what
+  pandas writes.
+- **pycisTopic tables open in older anndata**
+  ([#95](https://github.com/cellgeni/adata-cli/issues/95)). A model table's
+  text with a missing value is a categorical, which anndata 0.8 to 0.10 read,
+  not a `nullable-string-array`, which they refuse.
+- **Name lists keep every row with a listed name**
+  ([#94](https://github.com/cellgeni/adata-cli/issues/94)). `subset
+  --obs`/`--var` kept only the first row with each name, so after a `concat`
+  without `--index-unique`, a barcode list kept only the first sample's cells.
+  It now keeps what anndata's `obs_names.isin(names)` keeps, raw included, and
+  says how many names matched more than one row.
+- **Quoted labels with commas work in `in` lists**
+  ([#94](https://github.com/cellgeni/adata-cli/issues/94)). `cell_type in
+  ("CD4-positive, alpha-beta T cell", "B cell")` split the first label at its
+  comma, missing the CD4 cells and matching others. A quoted value is now one
+  label; bare words are still separated by commas.
+- **Queries compare numbers and booleans by value**
+  ([#94](https://github.com/cellgeni/adata-cli/issues/94)). Equality compared
+  each value's text, so `total_counts != 0` kept the zeros of a float32 column,
+  `is_doublet == true` matched nothing, and float32 values of 0.1 missed
+  `pct_mt <= 0.1`. Values now compare at the column's dtype, as pandas compares
+  them. A missing number equals no value, and `nan` selects it. A value of the
+  wrong type is refused.
+- **Queries need no spaces around operators**
+  ([#94](https://github.com/cellgeni/adata-cli/issues/94)). `n_counts>1000`
+  failed with "Unexpected end of query."; it now parses. A lone `=` or `!` says
+  which operators there are.
+- **obsm and varm arrays of any rank are subset**
+  ([#94](https://github.com/cellgeni/adata-cli/issues/94)). An obsm or varm
+  array that was not 2-D was copied whole, so anndata could not read the
+  output, and with `--inplace` the source became unreadable. They are now
+  subset on their first axis. An element subset cannot narrow, such as an
+  awkward array, is refused before anything is written.
+- **obsm and varm dataframes drop unused categories, as anndata does**
+  ([#94](https://github.com/cellgeni/adata-cli/issues/94)). `subset` and
+  `split` now narrow their categorical columns as they narrow obs and var. A
+  categorical column stored without encoding attributes is now narrowed with
+  the rest of its frame instead of being copied whole.
+- **split keeps missing labels apart from empty ones**
+  ([#94](https://github.com/cellgeni/adata-cli/issues/94)). Rows with no value
+  and rows labelled `""` went into one `NA` store. Missing values, NaN
+  included, now get their own `NA` store, and the manifest lists their value as
+  empty.
+- **Output names never share a file**
+  ([#94](https://github.com/cellgeni/adata-cli/issues/94)). Names for `split`,
+  `convert --split-feature-types` and `--all-samples` could collide: labels
+  `A+`, `A` and `A_1` gave `A`, `A_1` and `A_1`, and labels differing only in
+  case shared a file on macOS and Windows. The conversion then failed with a
+  false "another adata run is writing" message. Each name is now distinct,
+  case-insensitively.
+- **`concat` reads CSC inputs once, not once per column**
+  ([#93](https://github.com/cellgeni/adata-cli/issues/93)).
+  Each column of each input was a separate read that decompressed a whole
+  chunk: 37 times the inputs' size was read on h5ad and 572 times on Zarr,
+  so atlas-sized CSC inputs never finished. Inputs are now read in blocks
+  and the columns put together in a scratch file beside the output, which
+  the free-space check counts.
+- **`concat` takes any number of inputs**
+  ([#93](https://github.com/cellgeni/adata-cli/issues/93)).
+  Every input was held open, so concat failed with "Too many open files" at
+  about 253 h5ad inputs on macOS (1,020 on Linux), and memory grew with the
+  number of inputs. Inputs are now opened as they are needed, at most 64 at
+  once.
+- **Dense matrices keep their compression in `concat`**
+  ([#93](https://github.com/cellgeni/adata-cli/issues/93)).
+  Dense X, layers and obsm arrays were written uncompressed and unchunked,
+  whatever the inputs were: 34 times larger for a matrix of zeros.
+- **`concat --merge` keeps varp**
+  ([#93](https://github.com/cellgeni/adata-cli/issues/93)).
+  varp was always dropped, with a reason that holds only for obsp. It now
+  follows `--merge` as varm does, sparse entries compared by value as
+  anndata compares them.
+- **`--fill-value` no longer makes integer matrices float64 for nothing**
+  ([#93](https://github.com/cellgeni/adata-cli/issues/93)).
+  An integer X became float64 even on an inner join, where nothing is
+  filled. It now widens only when an outer join fills cells with a value
+  the dtype cannot hold.
+- **Less memory per row in `concat` and `recast --layout csr`**
+  ([#93](https://github.com/cellgeni/adata-cli/issues/93)).
+  Row pointers and per-row counts were Python lists, about 36 bytes a row
+  against 8: 400 MB more at 10M cells.
+- **A probe-level (Flex) matrix exports as Cell Ranger writes one**
+  ([#99](https://github.com/cellgeni/adata-cli/issues/99)). The export used to
+  write gene ids (suffixed ones after `--make-unique`) as `features/id` and
+  drop the probe ids. Now:
+  - boolean fields such as `filtered_probes` stay boolean, where they were
+    written as `'True'`/`'False'` strings that read back as always true;
+  - untagged fields, Cell Ranger's tag keys and `filtered_barcodes` are written
+    back, from scanpy-made stores too.
+- **Naming one column on 10x export keeps var names that are ids**
+  ([#99](https://github.com/cellgeni/adata-cli/issues/99)).
+  `--gene-names-column` no longer gives a false "no gene ids" refusal on a
+  store named by id, and `--gene-ids-column` no longer writes ids as names.
+- **float16 counts are written to and read from 10x HDF5 as float32**
+  ([#99](https://github.com/cellgeni/adata-cli/issues/99)). scipy has no
+  float16 sparse matrix, so anndata could not read such an import.
+- **Text outside ASCII is written to 10x HDF5 as Cell Ranger writes it, as XML
+  character references, with a warning**
+  ([#99](https://github.com/cellgeni/adata-cli/issues/99)). UTF-8 bytes in
+  ASCII-typed strings made `scanpy.read_10x_h5` fail.
+- **A malformed 10x matrix is refused wherever it is malformed**
+  ([#99](https://github.com/cellgeni/adata-cli/issues/99)). Every feature
+  array, `filtered_barcodes`, the start, end and order of `indptr`, and each
+  entry's feature index are now checked. Only the ids, names, barcodes and the
+  length of `indptr` were before.
+- **`--genome` with `--feature-type` is refused when that genome has no feature
+  of the type** ([#99](https://github.com/cellgeni/adata-cli/issues/99)). It
+  used to write an output with no features.
+- **CellBender: a `--min-cell-probability` that keeps no droplet is refused**
+  ([#99](https://github.com/cellgeni/adata-cli/issues/99)). It crashed an h5ad
+  output part-way and wrote a Zarr store of no cells.
+- **CellBender: `--from cellbender` refuses a file without latents, and a
+  `--raw` that is not a 10x matrix is refused clearly**
+  ([#99](https://github.com/cellgeni/adata-cli/issues/99)). A plain 10x file
+  used to give a fake "CellBender 0.2" result, and a non-HDF5 `--raw` gave
+  h5py's "file signature not found".
+- **CellBender 0.2: global arrays stay in `uns["cellbender"]` whatever their
+  length** ([#99](https://github.com/cellgeni/adata-cli/issues/99)). The loss
+  per epoch went into var whenever it happened to be as long as the features.
+- **CellBender: `layers["cellranger"]` is laid out as `X`**
+  ([#99](https://github.com/cellgeni/adata-cli/issues/99)). It has the same
+  index dtypes, chunks and compression, where it used to get int32 indices and
+  the defaults.
+- **MTX: matrix folders that are not Cell Ranger 2 genomes are no longer taken
+  for genomes** ([#99](https://github.com/cellgeni/adata-cli/issues/99)). A
+  run's `filtered/` and `raw/` (STARsolo's `Gene/`, Cell Ranger's `outs/`) and
+  Cell Ranger multi's `sample_filtered_feature_bc_matrix/` are refused, and the
+  message names the folder to give.
+- **MTX export refuses names pandas, R or scanpy would misread**
+  ([#99](https://github.com/cellgeni/adata-cli/issues/99)). The checks run
+  before the folder exists. Refused are:
+  - a field starting with a double quote;
+  - an empty id, type or barcode;
+  - a barcode containing a comma.
+- **Parse: gzipped `all_genes.csv` and `cell_metadata.csv` are read**
+  ([#99](https://github.com/cellgeni/adata-cli/issues/99)). A gzipped matrix
+  already was.
+- **Docs no longer claim more than holds**
+  ([#99](https://github.com/cellgeni/adata-cli/issues/99)). The 10x imports
+  match scanpy's columns with `--var-names gene_symbols`, and the differences
+  are listed. The Parse page no longer claims split-pipe's older `all-well`
+  layout.
+- **Loom export keeps anndata 0.7 categoricals' labels**
+  ([#100](https://github.com/cellgeni/adata-cli/issues/100)).
+  A categorical stored as anndata 0.7 wrote it (integer codes pointing at
+  `__categories`) was written to the loom as its codes; it is now written
+  as its labels, as a current categorical is, and left out of a SCope
+  table, which holds numbers only.
+- **`--scope` exports from Zarr stores**
+  ([#100](https://github.com/cellgeni/adata-cli/issues/100)).
+  A SCope loom export from any Zarr store, v2 or v3, failed before writing
+  with `object of type 'Array' has no len()`; it now writes the same loom
+  as from an h5ad.
+- **MuData export reads wide dense matrices in bounded blocks**
+  ([#100](https://github.com/cellgeni/adata-cli/issues/100)).
+  Dense X, layers and raw were read 16,384 rows at a time however wide,
+  so a wide matrix was held whole or nearly; each block now holds at most
+  64 MiB.
+- **Loom import never drops the main matrix**
+  ([#100](https://github.com/cellgeni/adata-cli/issues/100)).
+  When X was a layer (`spliced`) and the loom also had a layer named
+  `matrix`, the main matrix was not written. Such a loom was written from
+  an AnnData, whose X the main matrix holds, so X is now that matrix and
+  every layer keeps its name; a loom round trip gives back the same
+  matrices. With `--layer spliced` the main matrix is `layers["matrix_1"]`.
+- **A float16 loom imports as anndata can read it**
+  ([#100](https://github.com/cellgeni/adata-cli/issues/100)).
+  A float16 loom matrix, or one exported from a float16 X, became a
+  float16 sparse matrix, which anndata cannot read; matrices that go
+  sparse are now float32, with a warning, and `--dense` keeps float16.
+- **Loom export from a store without X**
+  ([#100](https://github.com/cellgeni/adata-cli/issues/100)).
+  `--layer` on a store without X failed half way with an HDF5 error; the
+  layer is now written and X left out. Without `--layer` such a store is
+  refused before anything is written, naming the layers there are. A layer
+  named `X` is written from itself, not from X, which goes beside it as
+  `X_1`.
+- **Loom export warns about every name it leaves out**
+  ([#100](https://github.com/cellgeni/adata-cli/issues/100)).
+  An obs column named `CellID`, or var columns named `Gene` or `Accession`
+  beside the columns those come from, were dropped without a word; they
+  are left out with a warning, as the docs say. An obs column and an obsm
+  entry both named `ClusterID` no longer fail mid-write: the column is
+  kept and the entry left out with a warning.
+- **Loom metadata reading is bounded in size**
+  ([#100](https://github.com/cellgeni/adata-cli/issues/100)). A SCope loom's
+  compressed `MetaData` is decompressed only up to a limit, and a larger one is
+  refused as malformed, so a crafted loom cannot exhaust memory.
+- **The loom page matches the code**
+  ([#100](https://github.com/cellgeni/adata-cli/issues/100)).
+  The flag table gives every default, and the page counts four differences
+  from `anndata.read_loom`, as the code does.
+- **The `py3.13` CI leg runs Python 3.13**
+  ([#102](https://github.com/cellgeni/adata-cli/issues/102)). uv took its
+  interpreter from `.python-version` before the one on `PATH`, so the leg ran
+  the suite on 3.12. Each leg now sets `UV_PYTHON` and checks what it got.
+- **The image is pushed only when the release passed**
+  ([#102](https://github.com/cellgeni/adata-cli/issues/102)). It was built and
+  pushed on any tag, moving `:latest` even when tests failed or the tag named
+  the wrong version. It is now built and smoke-tested with the tests, before
+  PyPI, and pushed after PyPI has the release. `:latest` moves only to the
+  newest final version.
+- **A TestPyPI dispatch no longer publishes to PyPI**
+  ([#102](https://github.com/cellgeni/adata-cli/issues/102)). Run from a tag,
+  it published to both. A PyPI dispatch now has to be run from a tag, and each
+  Publish job asks only for the permissions it uses.
+- **The benchmark's "vs previous" is the release before**
+  ([#102](https://github.com/cellgeni/adata-cli/issues/102)). It compared with
+  an arbitrary earlier run (0.17.0 with 0.8.0); it now takes the previous
+  version at the same tier, and the page names it.
+- **Least privilege in the release workflows**
+  ([#102](https://github.com/cellgeni/adata-cli/issues/102)). The benchmark no
+  longer runs unpinned packages with a token that can push to main. Actions and
+  uv are pinned, and tags reach scripts through `env:`.
+
+## 0.17.4
+
+The first wave of fixes from the October 2026 audit
+([#87](https://github.com/cellgeni/adata-cli/issues/87)), on data safety. No
+command can now lose your data and still exit 0: every writer stages its
+output and checks it first, and a write that fails as the store is closed
+fails the command. Text, MTX and dense imports refuse what they cannot read
+rather than shift values; `concat` refuses repeated var names and keeps
+missing values and column dtypes, as anndata does; `import` and `export` type
+values as pandas does. Pillow moves to 13.0.0 for its decoder advisories.
+
+### Changed
+
+- **Dependencies are declared, capped and tested at their floors**
+  ([#98](https://github.com/cellgeni/adata-cli/issues/98)).
+  numcodecs, which the Zarr v2 compressors import, is declared. h5py,
+  numpy and zarr are capped below their next major, and typer below 1.0.
+  A CI job installs each direct dependency at its floor, on Python 3.12
+  and 3.13, and runs the suite on them. Floors that could not install or
+  work were raised: the `pickle` extra now needs pandas 2.2.3 and scipy
+  1.15, and the `spatial` extra pyarrow 18.
+
+### Fixed
+
+- **A failed final write no longer replaces your data with an unreadable
+  store** ([#89](https://github.com/cellgeni/adata-cli/issues/89)). When the
+  last flush to disk failed as a store was closed (a full disk or quota), the
+  error was swallowed, the unreadable store was moved into place with exit code
+  0, and `--inplace` deleted the source. A Zarr v2 store whose index failed to
+  rewrite hid what had just been imported. Both now fail the command and leave
+  the source and any existing output as they were.
+- **`export`, `import` and `create` write as safely as the other commands**
+  ([#89](https://github.com/cellgeni/adata-cli/issues/89)). `export … -o`
+  naming the input store truncated it; a failed export or import left a partial
+  file or store in place of an existing one, or destroyed elements of the
+  source with `--inplace`; `create --force` deleted the old store before
+  writing. All three now write beside the destination and move the result in
+  only once complete. `import --inplace` therefore copies the store first, and
+  needs the time and the room for that copy.
+- **An output that is not a store is never replaced**
+  ([#89](https://github.com/cellgeni/adata-cli/issues/89)). `subset data.h5ad
+  -o results/` deleted the folder and everything in it; so did recast, `create
+  --force` and `convert --overwrite`. A folder that is not a Zarr store, or a
+  file that is not HDF5, is now refused, and so is an output that is the input
+  under a case-only alias or a hard link.
+- **An empty selection is refused**
+  ([#89](https://github.com/cellgeni/adata-cli/issues/89)). A name list that
+  matched nothing (barcodes without their `-1`, say) wrote an empty store, and
+  with `--inplace` replaced the source with it.
+- **`--chunk` must be at least 1**
+  ([#89](https://github.com/cellgeni/adata-cli/issues/89)). A zero or negative
+  value wrote an all-zero dense matrix with exit code 0; it is now a usage
+  error on every command.
+- **`--inplace` with `-o` is refused**
+  ([#89](https://github.com/cellgeni/adata-cli/issues/89)). `-o` was silently
+  ignored and the source rewritten.
+- **`--inplace` keeps symlinks and permissions**
+  ([#89](https://github.com/cellgeni/adata-cli/issues/89)). A symlinked store
+  had its link replaced by a private copy, leaving the real store unchanged,
+  and a `0640` store came back world-readable.
+- **Two runs writing one output can no longer mix their data**
+  ([#89](https://github.com/cellgeni/adata-cli/issues/89)). Each run now claims
+  its output with a lock file (`out.h5ad.adata-lock`); a second run is refused
+  while the first writes.
+- **A scheduler's SIGTERM cleans up**
+  ([#89](https://github.com/cellgeni/adata-cli/issues/89)). A time limit,
+  `scancel` or `bkill` left a partial `*.adata-tmp.*` that blocked the next
+  run; the run now removes it and exits with code 143. When leftovers do remain
+  (after SIGKILL), the refusal names all of them at once.
+- **Free space is checked before writing**
+  ([#89](https://github.com/cellgeni/adata-cli/issues/89)). A disk that fills
+  during an HDF5 write can stop the process inside the HDF5 library, past any
+  cleanup. Commands that write a store now refuse to start when the output's
+  filesystem has less free space than the estimated output; `--no-space-check`
+  skips the check. A replaced output is also synced to disk before the old one
+  is deleted.
+- **`concat` refuses inputs whose var names repeat**
+  ([#92](https://github.com/cellgeni/adata-cli/issues/92)). Two columns with
+  one name were merged into one target column: CSR summed them into the second,
+  dense kept the last, an outer join lost a variable, and the command exited 0.
+  The error names the repeated names; make them unique first, as anndata.concat
+  also requires.
+- **`concat` reads anndata 0.7 categoricals by label**
+  ([#92](https://github.com/cellgeni/adata-cli/issues/92)). They were
+  concatenated as their integer codes, so code 0 could mean a different label
+  in each input.
+- **A text column with missing values opens in anndata 0.8, 0.9 and 0.10**
+  ([#92](https://github.com/cellgeni/adata-cli/issues/92)). An outer join wrote
+  a text column that an input lacked as a nullable-string-array, which those
+  releases cannot read at all. It is now a categorical with the missing rows
+  coded -1, as anndata writes it, unless an input already used a
+  nullable-string-array.
+- **`concat` keeps missing values, and the dtypes of mixed columns**
+  ([#92](https://github.com/cellgeni/adata-cli/issues/92)). Missing values in a
+  column that is categorical or nullable in one input and plain text in another
+  became empty strings. A column plain in one input and nullable in another
+  (int64 and Int64, bool and boolean) was dropped; it is now nullable. A
+  nullable integer with a nullable boolean is a nullable integer, not text. A
+  boolean column an input lacks is nullable-boolean, not float. Integer
+  categories stay integers.
+- **`concat` stacks sparse obsm entries**
+  ([#92](https://github.com/cellgeni/adata-cli/issues/92)). They were dropped.
+  An entry stored differently across inputs is refused before writing, as X is.
+- **`--uns-merge` merges nested mappings as anndata does**
+  ([#92](https://github.com/cellgeni/adata-cli/issues/92)). `first` and `only`
+  now decide key by key inside nested mappings, `same` and `unique` no longer
+  leave empty mappings behind, and text matches across an h5ad and a Zarr input
+  under `--merge`/`--uns-merge same` and `unique`.
+- **CSR output stays sorted, and inputs without variables concatenate**
+  ([#92](https://github.com/cellgeni/adata-cli/issues/92)). An input whose var
+  order differed from the output's left column indices unsorted within rows.
+  Inputs with no variables were refused with "Use --join outer" even under
+  `--join outer`.
+- **Text import refuses an empty field instead of shifting the values after
+  it**
+  ([#90](https://github.com/cellgeni/adata-cli/issues/90)). pandas writes NaN
+  as an
+  empty field, and GEO tables often end every line with a tab. Such a file was
+  read with every later value of its block one column to the left, and the
+  block's last values taken from uninitialised memory, and the command exited
+  0.
+  It is now refused with the field's line and column, as anndata refuses it.
+- **Text import keeps a fraction that ends a block**
+  ([#90](https://github.com/cellgeni/adata-cli/issues/90)). When a block's only
+  non-integer was its last value, the block was read as integers, so 4.5
+  became 4.
+- **Text import drops a UTF-8 byte order mark**
+  ([#90](https://github.com/cellgeni/adata-cli/issues/90)). It stayed in the
+  first name, and before a number it made the first column read as row names.
+- **MTX import checks each line's field count**
+  ([#90](https://github.com/cellgeni/adata-cli/issues/90)). A line a field
+  short
+  and a later one a field long were paired up silently, putting values at the
+  wrong coordinates. The first wrong line is now refused by number, counted
+  past any blank lines in the header. Blank lines among the entries are
+  skipped, as scipy skips them; before, one was refused unless a block
+  happened to end on it.
+- **HDF5 and loom import keep memory bounded whatever the chunking**
+  ([#90](https://github.com/cellgeni/adata-cli/issues/90)). A dataset chunked
+  one
+  gene to a chunk, or with every cell in one chunk, was read whole in one slab.
+  It is now read a few chunks at a time and its entries sorted into cells on
+  disk. Chunks a little wider than a slab are cut into slabs. The on-disk
+  buckets that sort entries (also used by shuffled MTX files and
+  `--transpose` text) no longer hold a chunk cache each, which made their
+  memory grow with the number of buckets.
+- **`import dataframe` typed columns unlike pandas, and held the whole CSV**
+  ([#91](https://github.com/cellgeni/adata-cli/issues/91)). A number column
+  with a gap was stored as strings, True/False as a categorical of strings, and
+  a row with too few fields was taken with NaN in its missing cells. The CSV is
+  now read in two streaming passes and typed as `pandas.read_csv` types it, so
+  a gap makes a number column float64. A short row, a repeated or missing
+  column name, and a `--categorical` name the file does not have are refused
+  before the store is touched.
+- **CSV labels such as `1_1` were read as numbers**
+  ([#91](https://github.com/cellgeni/adata-cli/issues/91)). `1_1`, `1_10` and
+  `11_0` became 11, 110 and 110, in `import dataframe` and in the obs `convert`
+  writes from Parse, Visium and Xenium tables. A value is now a number only
+  when pandas reads it as one. Whole numbers past int64 are uint64 instead of
+  rounded floats, and a column of True/False followed by integers is text
+  instead of crashing the import.
+- **`import array`, `sparse` and `dict` could replace `obs`, `obsm` or `layers`
+  with an array** ([#91](https://github.com/cellgeni/adata-cli/issues/91)). The
+  command exited 0 and anndata could then not read the store; with `--inplace`,
+  that store was the source. An element of the wrong kind for its path is now
+  refused before anything is written. Name an entry inside the group, such as
+  `obsm/X_pca`.
+- **A JSON `null` made a store unreadable to anndata 0.8 to 0.11**
+  ([#91](https://github.com/cellgeni/adata-cli/issues/91)). `import dict`, and
+  `convert` of a Space Ranger scale factors file that holds one, wrote
+  `encoding-type: null`. A key holding null is now left out with a warning, as
+  those releases leave out `None`.
+- **`import dict` turned mixed arrays into strings value by value**
+  ([#91](https://github.com/cellgeni/adata-cli/issues/91)). `[1, null]` became
+  `['1', 'None']`, and an integer past 64 bits made the store unreadable. An
+  array whose values share a type is now typed, with NaN for a null among
+  numbers; any other array is kept as its JSON text. Integers past 64 bits, and
+  keys that are empty, hold `/` or are named like Zarr's metadata files, are
+  refused.
+- **`import array` held the whole `.npy` in memory**
+  ([#91](https://github.com/cellgeni/adata-cli/issues/91)). The file is now
+  mapped and copied a block of rows at a time.
+- **`export array` dropped missing values, could not export text, and held its
+  output in memory** ([#91](https://github.com/cellgeni/adata-cli/issues/91)).
+  A nullable integer or boolean array with gaps is now float64 with NaN in
+  them, and text is written as fixed-width unicode. The output streams to a
+  file or to stdout, instead of going through a memory map or a copy of the
+  whole array.
+- **An export piped into `head` reported an error**
+  ([#91](https://github.com/cellgeni/adata-cli/issues/91)). `adata export ... |
+  head` now ends quietly with exit code 0. `export dataframe` also checks
+  `--columns` before creating its output and ends lines in `\n`, not `\r\n`.
+  `--head 0` there and in `export sparse` writes only the header.
+- **`export dict` wrote `NaN` and `Infinity`, which are not JSON**
+  ([#91](https://github.com/cellgeni/adata-cli/issues/91)). They are now
+  written as `null`, with a note that says how many.
+- **Pillow 13.0.0, for the image decoder advisories**
+  ([#98](https://github.com/cellgeni/adata-cli/issues/98)).
+  `adata import image` and the Visium and Xenium tissue images open
+  user-supplied files with Pillow. 12.1.0, which the lock and the container
+  image pinned, has published heap-overflow and out-of-bounds-write
+  advisories in its decoders. The floor is now `pillow>=13.0.0`, and the
+  lock also takes pygments 2.20.0 and pytest 9.0.3 (dev) for theirs.
+
 ## 0.17.3
 
 Standard Visium spots and Visium HD's 8 and 16 µm bins now bring in Space
@@ -122,9 +804,9 @@ Parquet positions.
 
 ### Changed
 
-- **Images are written a strip of rows at a time**, as they are read, rather
-  than loaded before the write starts: Visium HD's hires image is 6,000
-  pixels, some 100 MB.
+- **Images are copied into the store a strip of rows at a time**, rather
+  than as a second whole copy: Visium HD's hires image is 6,000 pixels, some
+  100 MB. The image itself is still decoded whole, as a PNG can only be.
 - **Barcodes are matched as bytes**, a quarter of the memory of numpy's
   unicode, for Visium, Visium HD and Xenium alike.
 

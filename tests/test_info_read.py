@@ -1,10 +1,10 @@
-"""Tests for info.py and read.py modules."""
+"""Tests for core/info.py and core/read.py."""
 
 import pytest
 import h5py
 import numpy as np
-from adata.info import axis_len, get_axis_group, get_entry_type, format_type_info
-from adata.read import decode_str_array, read_categorical_column, col_chunk_as_strings
+from adata.core.info import axis_len, get_axis_group, get_entry_type, format_type_info
+from adata.core.read import decode_str_array, read_categorical_column, col_chunk_as_strings
 
 
 class TestGetEntryType:

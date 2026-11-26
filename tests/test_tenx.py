@@ -206,7 +206,7 @@ def test_a_probe_barcode_matrix_names_genes_and_probes(tmp_path):
         tmp_path / "flex.h5", _counts(n_features=4), barcodes=_barcodes(),
         ids=["p1", "p2", "p3", "p4"], names=["G1", "G1", "G2", "G3"],
         probe_gene_ids=["E1", "E1", "E2", "E3"],
-        extra={"filtered_probes": [True, False, True, True]},
+        untagged={"filtered_probes": [True, False, True, True]},
         filtered_barcodes=[i % 2 == 0 for i in range(N_CELLS)],
     )
     out = tmp_path / "flex.h5ad"
@@ -278,6 +278,113 @@ def test_an_inconsistent_matrix_is_refused_before_writing(tenx, tmp_path):
     assert not out.exists()
 
 
+def _spoil(path: Path, how: str) -> None:
+    with h5py.File(path, "a") as f:
+        m = f["matrix"]
+        if how == "feature_type":
+            del m["features/feature_type"]
+            m["features/feature_type"] = np.array([b"Gene Expression"] * 3)
+        elif how == "a tag":
+            del m["features/pattern"]
+            m["features/pattern"] = np.array([b""] * 5)
+        elif how == "gene_id":
+            m["features/gene_id"] = np.array([b"E1"] * 2)
+        elif how == "filtered_barcodes":
+            m["filtered_barcodes"] = np.ones(N_CELLS - 1, dtype=bool)
+        elif how == "indptr end":
+            indptr = m["indptr"][...]
+            indptr[-1] -= 1
+            m["indptr"][...] = indptr
+        elif how == "indptr start":
+            indptr = m["indptr"][...]
+            indptr[0] = 1
+            m["indptr"][...] = indptr
+        elif how == "indptr order":
+            indptr = m["indptr"][...]
+            indptr[1], indptr[2] = indptr[2] + 1, indptr[1]
+            m["indptr"][...] = indptr
+
+
+@pytest.mark.parametrize(
+    "how,message",
+    [
+        ("feature_type", "3 feature feature_type"),
+        ("a tag", "5 feature pattern"),
+        ("gene_id", "2 feature gene_id"),
+        ("filtered_barcodes", f"{N_CELLS - 1} filtered_barcodes"),
+        ("indptr end", "an indptr that ends at"),
+        ("indptr start", "an indptr that does not start at 0"),
+        ("indptr order", "an indptr that goes back"),
+    ],
+)
+def test_a_matrix_inconsistent_anywhere_is_refused_before_writing(tenx, tmp_path, how, message):
+    """F109: only the ids, names, barcodes and indptr length were checked, so
+    a file malformed anywhere else was copied into a store anndata and
+    scanpy cannot read, or failed deep in the copy."""
+    _spoil(tenx, how)
+    out = tmp_path / "out.h5ad"
+    result = _convert(tenx, "-o", out)
+    assert result.exit_code == 1
+    assert "Inconsistent 10x matrix" in _out(result) and message in _out(result)
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("bad", [len(IDS), -1])
+@pytest.mark.parametrize("extra", [[], ["--feature-type", "Gene Expression"]])
+def test_an_entry_outside_the_features_is_refused(tenx, tmp_path, bad, extra):
+    """F109: an index past the features was copied into X unchecked, which
+    scipy then reads out of bounds; under a feature filter a negative one
+    was quietly taken from the end of the lookup."""
+    with h5py.File(tenx, "a") as f:
+        indices = f["matrix/indices"][...]
+        indices[3] = bad
+        f["matrix/indices"][...] = indices
+    out = tmp_path / "out.h5ad"
+    result = _convert(tenx, "-o", out, *extra)
+    assert result.exit_code == 1
+    assert f"an entry has feature index {bad}, outside its {len(IDS)} features" in _out(result)
+    assert not out.exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == [tenx.name]
+
+
+def test_a_feature_type_absent_from_the_genome_is_refused(tmp_path):
+    """F101: --genome G with --feature-type T, where T exists but not in G,
+    wrote an output of no features at all."""
+    h5 = write_10x_h5(
+        tmp_path / "barnyard.h5", _counts(n_features=4), barcodes=_barcodes(),
+        ids=list("abcd"), names=list("ABCD"),
+        types=["Gene Expression", "Gene Expression", "Antibody Capture", "Gene Expression"],
+        genomes=["GRCh38", "mm10", "mm10", "mm10"],
+    )
+    out = tmp_path / "out.h5ad"
+    result = _convert(h5, "-o", out, "--genome", "GRCh38", "--feature-type", "Antibody Capture")
+    assert result.exit_code == 1
+    assert (
+        "No features of type 'Antibody Capture' in genome 'GRCh38'; "
+        "its types are: Gene Expression"
+    ) in _out(result)
+    assert not out.exists()
+
+    _ok(h5, "-o", out, "--genome", "mm10", "--feature-type", "Antibody Capture")
+    assert list(_read(out).var_names) == ["c"]
+
+
+@pytest.mark.parametrize("suffix", [".h5ad", ".zarr"])
+def test_text_cell_ranger_escaped_reads_as_the_characters(tmp_path, suffix):
+    """F110: Cell Ranger writes text outside ASCII as XML character
+    references; they are read back as the characters they stand for. Found
+    in review: a reference to a character no store can hold (a NUL, a lone
+    surrogate) failed the import part-way; it stays as written."""
+    names = ["IFN&#947;", "Gr&#xE9;", "A&B", "nul&#0;", "half&#55296;"]
+    h5 = write_10x_h5(
+        tmp_path / "escaped.h5", _counts(n_features=5), barcodes=_barcodes(),
+        ids=list("abcde"), names=names,
+    )
+    out = tmp_path / f"out{suffix}"
+    _ok(h5, "-o", out, "--var-names", "gene_symbols")
+    assert list(_read(out).var_names) == ["IFNγ", "Gré", "A&B", "nul&#0;", "half&#55296;"]
+
+
 def test_a_10x_file_is_recognised_by_its_content(tenx, tmp_path):
     renamed = tenx.rename(tmp_path / "counts.dat")
     _ok(renamed, "-o", tmp_path / "out.h5ad")
@@ -327,6 +434,80 @@ def test_a_round_trip_reproduces_the_cell_ranger_file(tenx, tmp_path):
     assert {k: np.asarray(v).tolist() for k, v in before["/attrs"].items()} == {
         k: np.asarray(v).tolist() for k, v in after["/attrs"].items()
     }
+
+
+def _flex(path: Path) -> Path:
+    """A probe-barcode matrix laid out as Cell Ranger's (see conftest)."""
+    genes = ["ENSG1", "ENSG1", "ENSG2", "ENSG3"]
+    symbols = ["G1", "G1", "G2", "G3"]
+    return write_10x_h5(
+        path, _counts(n_features=4), barcodes=_barcodes(),
+        ids=[f"{g}|{n}|h{i}" for i, (g, n) in enumerate(zip(genes, symbols))],
+        names=[f"{n}|h{i}" for i, n in enumerate(symbols)],
+        probe_gene_ids=genes,
+        extra={"gene_name": symbols, "probe_region": ["spliced", "unspliced", "spliced", "none"]},
+        untagged={"filtered_probes": [True, False, True, True]},
+        filtered_barcodes=[i % 2 == 0 for i in range(N_CELLS)],
+    )
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [[], ["--var-names", "gene_symbols"], ["--make-unique"], ["--var-names", "gene_symbols", "--make-unique"]],
+    ids=["ids", "symbols", "ids-unique", "symbols-unique"],
+)
+@pytest.mark.parametrize("suffix", [".h5ad", ".zarr"])
+def test_a_probe_level_matrix_round_trips_to_the_same_file(tmp_path, flags, suffix):
+    """F045, F048: an imported Flex matrix exported its gene ids -- or, after
+    --make-unique, suffixed ones -- as features/id, dropped the probe ids and
+    gene_id, and wrote filtered_probes as 'True'/'False' strings, which read
+    back as always true."""
+    flex, h5ad, back = _flex(tmp_path / "flex.h5"), tmp_path / f"x{suffix}", tmp_path / "back.h5"
+    _ok(flex, "-o", h5ad, *flags)
+    _ok(h5ad, "-o", back)
+
+    before, after = _datasets(flex), _datasets(back)
+    assert sorted(before) == sorted(after)
+    for key in before:
+        if key.startswith("/"):
+            continue
+        assert np.array_equal(before[key][0], after[key][0]), key
+        assert before[key][1] == after[key][1], key
+
+
+@pytest.mark.parametrize("dtype", ["bool", "boolean"])
+def test_a_boolean_field_rewritten_by_anndata_exports_as_bool(tmp_path, dtype):
+    """F048: a boolean field went out as 'True'/'False' strings. Read and
+    written again by anndata, as numpy bool or pandas' nullable boolean, it
+    must still go out as bool."""
+    flex, h5ad, back = _flex(tmp_path / "flex.h5"), tmp_path / "x.h5ad", tmp_path / "back.h5"
+    _ok(flex, "-o", h5ad)
+    obj = ad.read_h5ad(h5ad)
+    obj.var["filtered_probes"] = obj.var["filtered_probes"].astype(dtype)
+    obj.write_h5ad(h5ad)
+    _ok(h5ad, "-o", back)
+    with h5py.File(flex) as before, h5py.File(back) as after:
+        expected = before["matrix/features/filtered_probes"]
+        got = after["matrix/features/filtered_probes"]
+        assert got.dtype == expected.dtype == bool
+        assert list(got[...]) == list(expected[...])
+
+
+def test_make_unique_keeps_the_gene_ids_it_suffixes(tmp_path):
+    """F045: naming a Flex matrix's features by gene id with --make-unique
+    suffixed the ids, and nothing kept the real ones."""
+    out = tmp_path / "x.h5ad"
+    _ok(_flex(tmp_path / "flex.h5"), "-o", out, "--make-unique")
+    var = _read(out).var
+    assert list(var.index) == ["ENSG1", "ENSG1-1", "ENSG2", "ENSG3"]
+    assert list(var["gene_ids"]) == ["ENSG1", "ENSG1", "ENSG2", "ENSG3"]
+    assert list(var.columns[:2]) == ["gene_symbols", "gene_ids"]
+
+    plain = tmp_path / "plain.h5ad"
+    _ok(write_10x_h5(
+        tmp_path / "genes.h5", _counts(), barcodes=_barcodes(), ids=IDS, names=NAMES, types=TYPES,
+    ), "-o", plain, "--make-unique")
+    assert "gene_ids" not in _read(plain).var, "unique ids need nothing kept"
 
 
 @pytest.mark.parametrize("layout", ["csr", "csc", "dense"])
@@ -433,6 +614,159 @@ def test_var_names_that_are_ids_export_with_their_symbols(tmp_path):
     with h5py.File(out) as f:
         assert [v.decode() for v in f["matrix/features/id"][...]] == IDS
         assert [v.decode() for v in f["matrix/features/name"][...]] == NAMES
+
+
+def _ids_named_source(tmp_path: Path) -> Path:
+    """var named by gene id, as `convert` imports by default, with more columns."""
+    source = _anndata_source(
+        tmp_path, gene_symbols=NAMES, feature_types=TYPES,
+        alias=[n.lower() for n in NAMES], ensembl=[f"v2.{i}" for i in IDS],
+    )
+    obj = ad.read_h5ad(source)
+    obj.var_names = IDS
+    obj.write_h5ad(source)
+    return source
+
+
+@pytest.mark.parametrize(
+    "flags,ids,names",
+    [
+        ([], IDS, NAMES),
+        (["--gene-names-column", "alias"], IDS, [n.lower() for n in NAMES]),
+        (["--gene-ids-column", "ensembl"], [f"v2.{i}" for i in IDS], NAMES),
+    ],
+    ids=["default", "names-column", "ids-column"],
+)
+def test_naming_one_column_keeps_var_names_that_are_ids(tmp_path, flags, ids, names):
+    """F046: --gene-names-column turned off reading the var names as ids, so
+    an export of a store named by id was refused for having no gene ids;
+    --gene-ids-column made the ids the feature names."""
+    source = _ids_named_source(tmp_path)
+    out = tmp_path / "out.h5"
+    _ok(source, "-o", out, *flags)
+    with h5py.File(out) as f:
+        assert [v.decode() for v in f["matrix/features/id"][...]] == ids
+        assert [v.decode() for v in f["matrix/features/name"][...]] == names
+
+
+def test_var_names_that_are_symbols_are_not_taken_for_ids(tmp_path):
+    """Found in review: with F046's fix first written, naming any column for
+    the names made the var names ids, so a store named by symbol exported its
+    symbols as ids without the refusal that asks for --force."""
+    source = _anndata_source(tmp_path, alias=[n.lower() for n in NAMES], feature_types=TYPES)
+    out = tmp_path / "out.h5"
+    result = _convert(source, "-o", out, "--gene-names-column", "alias")
+    assert result.exit_code == 1
+    assert "var has no gene ids" in _out(result)
+    assert not out.exists()
+
+
+def test_a_flex_store_with_nothing_recorded_exports_cell_ranger_s_fields(tmp_path):
+    """F045, F048: a Flex store whose fields were not recorded -- an older
+    import, or scanpy's read_10x_h5 written out -- dropped filtered_probes,
+    gene_name and probe_region, and listed only genome and gene_id as tags."""
+    flex, h5ad, back = _flex(tmp_path / "flex.h5"), tmp_path / "x.h5ad", tmp_path / "back.h5"
+    _ok(flex, "-o", h5ad, "--var-names", "gene_symbols")
+    obj = ad.read_h5ad(h5ad)
+    del obj.uns["cellranger"]
+    obj.write_h5ad(h5ad)
+    _ok(h5ad, "-o", back)
+
+    before, after = _datasets(flex), _datasets(back)
+    for key in before:
+        if key.startswith("matrix/"):
+            assert np.array_equal(before[key][0], after[key][0]), key
+            assert before[key][1] == after[key][1], key
+
+
+def test_a_missing_boolean_is_written_as_false_with_a_warning(tmp_path):
+    """F048: a nullable boolean with a missing value went out as strings,
+    where 'False' reads back as true. A 10x file has no missing booleans."""
+    flex, h5ad, back = _flex(tmp_path / "flex.h5"), tmp_path / "x.h5ad", tmp_path / "back.h5"
+    _ok(flex, "-o", h5ad)
+    obj = ad.read_h5ad(h5ad)
+    obj.var["filtered_probes"] = pd.array([True, None, True, False], dtype="boolean")
+    obj.write_h5ad(h5ad)
+    result = _ok(h5ad, "-o", back)
+    assert "var['filtered_probes'] has 1 missing values, written as False" in _out(result)
+    with h5py.File(back) as f:
+        got = f["matrix/features/filtered_probes"]
+        assert got.dtype == bool
+        assert list(got[...]) == [True, False, True, False]
+
+
+def test_float16_counts_export_as_float32(tmp_path):
+    """F049: float16 data was written as it was, and imported back into a
+    float16 CSR that scipy, and so anndata, cannot read."""
+    counts = _counts()
+    source = tmp_path / "half.h5ad"
+    var = pd.DataFrame({"gene_ids": IDS, "feature_types": TYPES}, index=NAMES)
+    ad.AnnData(X=counts.astype(np.float16), obs=pd.DataFrame(index=_barcodes()), var=var).write_h5ad(source)
+    obj = ad.read_h5ad(source)
+    obj.X = sparse.csr_matrix(counts.astype(np.float32))
+    obj.layers["csc"] = sparse.csc_matrix(counts.astype(np.float32))
+    obj.write_h5ad(tmp_path / "wide.h5ad")
+    # Narrow the sparse matrices' data on disk: anndata cannot write float16 sparse.
+    with h5py.File(tmp_path / "wide.h5ad", "a") as f:
+        for path in ("X/data", "layers/csc/data"):
+            data = f[path][...].astype(np.float16)
+            del f[path]
+            f[path] = data
+
+    for src, layer in ((source, "X"), (tmp_path / "wide.h5ad", "X"), (tmp_path / "wide.h5ad", "csc")):
+        out = tmp_path / f"{src.stem}.{layer}.h5"
+        result = _ok(src, "-o", out, "--layer", layer)
+        assert "float16 values are written as float32" in _out(result)
+        with h5py.File(out) as f:
+            assert f["matrix/data"].dtype == np.float32
+        got = _read(_ok_import(out, tmp_path))
+        assert got.X.dtype == np.float32
+        assert np.array_equal(got.X.toarray(), counts)
+
+
+@pytest.mark.parametrize("extra", [[], ["--feature-type", "Gene Expression"]])
+def test_a_float16_matrix_imports_as_float32(tenx, tmp_path, counts, extra):
+    """F049: a 10x file holding float16 data -- as this export wrote one --
+    was imported into a float16 CSR, which anndata cannot read."""
+    with h5py.File(tenx, "a") as f:
+        data = f["matrix/data"][...].astype(np.float16)
+        del f["matrix/data"]
+        f["matrix/data"] = data
+    out = tmp_path / "out.h5ad"
+    _ok(tenx, "-o", out, *extra)
+    got = _read(out)
+    keep = slice(None) if not extra else slice(0, 6)
+    assert got.X.dtype == np.float32
+    assert np.array_equal(got.X.toarray(), counts[:, keep])
+
+
+def test_text_outside_ascii_exports_as_cell_ranger_writes_it(tmp_path):
+    """F110: names and barcodes were written as UTF-8 bytes in strings typed
+    ASCII, which scanpy decodes as ASCII and fails on. Cell Ranger writes
+    XML character references; written so, they also read back as written."""
+    names = ["IFNγ", "Gré", "A&B", "C", "D", "E", "F", "G"]
+    barcodes = [f"é{b}" for b in _barcodes()]
+    source = tmp_path / "text.h5ad"
+    ad.AnnData(
+        X=sparse.csr_matrix(_counts().astype(np.int32)),
+        obs=pd.DataFrame(index=barcodes),
+        var=pd.DataFrame({"gene_ids": IDS, "feature_types": TYPES}, index=names),
+    ).write_h5ad(source)
+    out = tmp_path / "out.h5"
+    result = _ok(source, "-o", out)
+    assert "2 feature ids and names are not ASCII (such as 'IFNγ')" in _out(result)
+    assert f"{N_CELLS} barcodes are not ASCII" in _out(result)
+    assert "scanpy shows the references" in _out(result)
+    with h5py.File(out) as f:
+        for key in ("features/name", "barcodes"):
+            assert h5py.check_string_dtype(f[f"matrix/{key}"].dtype).encoding == "ascii"
+        stored = [v.decode("ascii") for v in f["matrix/features/name"][...]]
+        assert stored == [n.encode("ascii", "xmlcharrefreplace").decode() for n in names]
+        assert stored[0] == "IFN&#947;"
+
+    got = _read(_ok_import(out, tmp_path))
+    assert list(got.var["gene_symbols"]) == names
+    assert list(got.obs_names) == barcodes
 
 
 def test_columns_can_be_named_for_export(tmp_path):

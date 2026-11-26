@@ -343,8 +343,15 @@ def write_10x_h5(
     extra: Optional[dict] = None,
     probe_gene_ids: Optional[Sequence[str]] = None,
     filtered_barcodes: Optional[Sequence[bool]] = None,
+    untagged: Optional[dict] = None,
 ) -> Path:
-    """A Cell Ranger 3+ `*_feature_bc_matrix.h5`."""
+    """A Cell Ranger 3+ `*_feature_bc_matrix.h5`.
+
+    `extra` features are tags, listed in `_all_tag_keys`; `untagged` ones
+    are not. With `probe_gene_ids` it is a probe-barcode (Flex) matrix, whose
+    `id` and `name` are the probe's: Cell Ranger then lists `gene_id` among
+    the tags, sorted, and keeps `filtered_probes` untagged.
+    """
     n = counts.shape[1]
     with h5py.File(path, "w") as f:
         # As Cell Ranger writes them: a single string variable-length, an
@@ -365,15 +372,17 @@ def write_10x_h5(
         )
         features.create_dataset("genome", data=_fixed(genomes or ["GRCh38"] * n))
         tag_keys = ["genome"]
-        for key, values in (extra or {}).items():
+        for key, values in [*(extra or {}).items(), *(untagged or {}).items()]:
             values = list(values)
             if isinstance(values[0], (bool, np.bool_)):
                 features.create_dataset(key, data=np.array(values, dtype=bool))
             else:
                 features.create_dataset(key, data=_fixed(values))
-            tag_keys.append(key)
+            if key in (extra or {}):
+                tag_keys.append(key)
         if probe_gene_ids is not None:
             features.create_dataset("gene_id", data=_fixed(probe_gene_ids))
+            tag_keys = sorted([*tag_keys, "gene_id"])
         features.create_dataset("_all_tag_keys", data=_fixed(tag_keys))
         if filtered_barcodes is not None:
             group.create_dataset(

@@ -109,15 +109,23 @@ def _bundle(source: Path) -> Path:
     return bundle
 
 
-def _unpack_analysis(archive: Path, beside: Path) -> tempfile.TemporaryDirectory:
+def _unpack_analysis(archive: Path, output: Path) -> tempfile.TemporaryDirectory:
     """The analysis tables this reads, out of Xenium's analysis.tar.gz.
 
     Only those members, each copied to a path built here rather than the
     one the archive names, so the archive cannot write anywhere else. Into
     a folder beside the output rather than the system's temporary one,
-    which on a cluster node is often too small for a large run's PCA.
+    which on a cluster node is often too small for a large run's PCA: the
+    nearest of the output's folders that exists, since this runs while
+    planning and the output's own is made only once every check has passed.
     """
-    holder = tempfile.TemporaryDirectory(prefix=".adata-xenium-", dir=beside)
+    beside = Path(output).resolve().parent
+    while not beside.exists() and beside != beside.parent:
+        beside = beside.parent
+    try:
+        holder = tempfile.TemporaryDirectory(prefix=".adata-xenium-", dir=beside)
+    except OSError as exc:
+        raise ValueError(f"Cannot unpack {archive.name} in {beside}: {exc.strerror or exc}.") from None
     wanted = {str(Path("analysis") / p): p for p in analysis_paths()}
     with tarfile.open(archive, "r:*") as tar:
         for member in tar:
@@ -156,7 +164,7 @@ class XeniumImport(Converter):
         unpacked = None
         packed_but_empty = False
         if not analysis.is_dir() and (bundle / "analysis.tar.gz").is_file():
-            unpacked = _unpack_analysis(bundle / "analysis.tar.gz", Path(output).resolve().parent)
+            unpacked = _unpack_analysis(bundle / "analysis.tar.gz", Path(output))
             analysis = Path(unpacked.name)
             packed_but_empty = not any(analysis.rglob("*.csv"))
         warnings: List[str] = []

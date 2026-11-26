@@ -12,22 +12,46 @@ redirect_from:
 uv sync --extra dev
 uv run pytest                      # everything
 uv run pytest -m "not integration" # no environment building, ~2.5 min
-uv run pytest -m perf              # just the tracing complexity guards
+uv run pytest -m perf              # just the cost guards
 uv run pytest -m integration       # anndata releases, scanpy and PyTables
 ```
 
-CI runs the unit suite on Python 3.12 and 3.13 with a **90% coverage floor**,
-and the anndata compatibility suite and the 10x external-reader suite as
-separate jobs. A fresh-install job installs the package alone from a fresh
-resolution, without `uv.lock`, as `pip install pyadata-cli` would. It
-imports every module on the base dependencies alone, runs `adata convert`
-with and without click beside typer, and runs the docs-accuracy suite with no
-click installed. The locked suite cannot see a dependency the lock brings in
-by accident: 0.7.0 to 0.17.2 imported click, which typer had stopped
-installing, so `convert` crashed on every fresh install. A floors job runs
-the unit suite once more, on both interpreters, with each direct dependency
-at the lowest version `pyproject.toml` allows, after checking that each one
-is at its floor and imports.
+CI (`.github/workflows/tests.yml`) runs these jobs on every pull request, under
+the names GitHub shows:
+
+| Job | What it runs |
+|---|---|
+| `tests (py3.12)`, `tests (py3.13)` | The unit suite, `-m "not integration and not perf"`, with a **90% coverage floor** |
+| `cost guards (py3.12)`, `cost guards (py3.13)` | The cost guards, `-m perf`, in parallel with the unit suite: what each operation reads, writes and holds, counted (see below) |
+| `fresh install, no lock` | The package alone from a fresh resolution, without `uv.lock`, as `pip install pyadata-cli` would install it: every module imported on the base dependencies, `adata convert` with and without click beside typer, and the docs-accuracy suite with no click installed |
+| `tests at the dependency floors (py3.12)`, `(py3.13)` | The unit suite and the cost guards once more, with each direct dependency at the lowest version `pyproject.toml` allows, after checking that each one is at its floor and imports |
+| `anndata 0.8-0.13 compatibility` | `test_anndata_versions.py`: every anndata release from 0.7.8 to 0.13 (see below) |
+| `10x h5 against scanpy and PyTables` | `test_external_readers.py`: every converter checked by the reader people use for that format, not only 10x's (see the table below) |
+| `workflow lint` | [actionlint](https://github.com/rhysd/actionlint) and [zizmor](https://docs.zizmor.sh) over the workflows |
+| `container image` | Builds the Docker image and runs `.github/scripts/smoke-image.sh` against it |
+
+The compatibility and external-reader jobs' names are older than what they
+check, and renaming a job renames the check a branch rule requires, so they
+stay. `test_concat_versions.py`
+is an `integration` test that no job runs; run it locally.
+
+The fresh-install job exists because the locked suite cannot see a
+dependency the lock brings in by accident: 0.7.0 to 0.17.2 imported click,
+which typer had stopped installing, so `convert` crashed on every fresh
+install.
+
+Each leg of the unit suite checks that it runs the Python it is named after
+before testing anything. uv takes its interpreter from `.python-version`
+(3.12) ahead of the one on `PATH`, so up to 0.17.4 the 3.13 leg ran the
+suite on 3.12; the workflow now sets `UV_PYTHON` for each leg.
+
+The workflows are tested too. Publishing, the image and the benchmark run
+only on a tag, so a pull request never runs them. `test_release_pipeline.py`
+reads them, works out which jobs publish in each kind of run, and runs their
+scripts against stand-ins. The `workflow lint` job runs on every pull
+request, though not inside a release, where an advisory published that day
+would stop it. The `container image` job runs on every pull request and
+inside every release before PyPI has it.
 
 ## How the suite is organised
 
@@ -35,14 +59,25 @@ is at its floor and imports.
 |---|---|
 | `test_elements.py` | The element layer — encodings, string dtypes, readers and writers — run against HDF5, Zarr v2 and Zarr v3 |
 | `test_storage.py` | Backend detection, copying, Zarr versions, consolidated metadata |
+| `test_storage_root_attrs.py` | The root's AnnData attributes: written when a store is opened for writing, and a warning on reading a store that lacks them, though not for anndata 0.7's layout, which never had them |
+| `test_staging.py` | `util/staging.py` on its own: write beside and rename into place, several outputs together, a failed swap put back, leftovers refused rather than deleted |
+| `test_write_safety.py` | Every way a command used to destroy or corrupt a store while reporting success, or leave a half-written one: outputs that alias the input, failed selections, `--inplace`, failed closes, a full disk, two runs on one output, SIGTERM |
 | `test_formats.py` | `.npy`, `.mtx`, image and JSON export/import, including their failure modes |
+| `test_cli_output.py` | What the CLI prints: names, labels and paths with square brackets or a trailing backslash as the store spells them (`util/markup.literal`), a failure as one plain `Error:` line in a log file, help text that keeps its brackets, `main(argv)` raising rather than ending the process |
 | `test_validate.py` | Dimension validation for every axis-bearing path, including `raw/` |
 | `test_invariants.py` | Relationships that must hold for any data: subsetting everything is the identity, split partitions exactly, concat undoes split |
 | `test_anndata_roundtrip.py` | anndata writes the fixtures, reads back our output |
-| `test_anndata_versions.py` | Compatibility with six real anndata releases (see below) |
+| `test_anndata_versions.py` | Compatibility with seven real anndata releases (see below) |
+| `test_element_fidelity.py` | Elements anndata and scanpy write through every copy path (HDF5 to HDF5, HDF5 to Zarr, Zarr to HDF5, Zarr v2 and v3): scanpy's `rank_genes_groups` record arrays, the stores anndata 0.7.8 wrote (nested 0.1.0 frames, `ordered` on the labels), variable-length numbers and references, unusual attributes, Zarr v2 codecs, empty dataspaces and fill values; read back by anndata |
 | `test_commands_phase2.py`, `test_commands_coverage.py`, `test_cli.py` | Command surfaces and error paths |
 | `test_convert.py` | `convert` between every backend pair, read back by anndata; its refusals, staging, and the forwarding of recast's old flags |
 | `test_recast.py` | `recast` against scipy: casts, transposes, density changes and every refusal |
+| `test_recast_streaming.py` | `recast` on HDF5, Zarr v2 and Zarr v3 in blocks of a few rows and entries: every layout to every other, every dtype in every layout, matrices at any depth, index ranges with and without `--force`; against scipy and read back by anndata |
+| `test_concat_correctness.py` | `concat` against `anndata.concat`, on inputs whose encodings each test sets: plain strings, nullable columns, legacy categoricals, missing values, joins and merges |
+| `test_concat_scale.py` | `concat` on the paths that scale, against `anndata.concat`: CSC matrices rebuilt through buckets on disk, and more inputs than can be open at once |
+| `test_concat_versions.py` | `concat` outputs read back by the anndata release that wrote the inputs, 0.8 to 0.13 (`integration`) |
+| `test_subset_fan_out.py` | The streamed sparse writers of `subset`, `split` and `concat`: index dtypes and compression kept as the source has them, and `split` reading each matrix once for all groups; against anndata and scipy |
+| `test_scatter.py` | `core/scatter.py`: rows read in one order written in another through scratch |
 | `test_tenx.py` | 10x HDF5 import and export against Cell Ranger-shaped fixtures (v2, v3, multimodal, probe-based): mapping, filters, round trips, refusals |
 | `test_mtx.py` | 10x / STARsolo MTX folders against hand-written fixtures (Cell Ranger 2 and 3, STARsolo, velocyto, GEO prefixes): mapping, entry orders, refusals that leave nothing, round trips |
 | `test_cellbender.py` | CellBender 0.2 and 0.3+ output, full and filtered: each latent at its barcode, `--min-cell-probability`, `--raw` alignment, refusals |
@@ -50,7 +85,12 @@ is at its floor and imports.
 | `test_loom.py` | loom import and export against loompy- and velocyto-shaped fixtures (spec 2 and 3): X choice, names, attributes, graphs, `--dense`, round trips |
 | `test_text.py` | Text matrices in every layout anndata's `read_text` tells apart (corner, short and comment headers, no header, no row names), each delimiter, gzip, `--transpose` CSR and dense, dtypes, refusals by line, small blocks |
 | `test_hdf5.py` | One dataset of a plain HDF5 file: the listing without `--key`, `read_hdf`'s `row_names` / `col_names` and other names, `--transpose` CSR and dense, slabs of chunks, `--from hdf5` on `.h5` |
+| `test_dense.py` | `conversion/dense.py`, which the loom and HDF5 importers read a dense matrix through: datasets chunked every way that changes how it reads them, on each output backend, read back by anndata |
 | `test_cistopic.py` | pycisTopic pickles read through the allowlist: a CistopicObject's matrices, frames, model and projections, an imputed-features pickle, a pickle naming `os.system` refused unrun, the missing-extra hint |
+| `test_pickled.py` | The restricted unpickler against crafted pickles that name only allowlisted globals, each loaded in a child process so a crash cannot take the run down |
+| `test_visium.py` | Space Ranger output: standard Visium (Space Ranger 1 to 4) laid out as `squidpy.read.visium` lays it out, Visium HD bins at each size, segmented cells, Space Ranger's analysis, images, refusals |
+| `test_xenium.py` | Xenium bundles (XOA 1 to 4): the cell table in or out of the matrix's order, cells the matrix lacks, Xenium's analysis with gaps |
+| `test_geojson.py` | `formats/geojson.py`: Space Ranger 4's cell outlines read a feature at a time, centroids and areas against shapely |
 | `test_pandas_frame.py` | Each pandas dtype written as anndata writes it, on every backend |
 | `test_concat_axis_elements.py` | `concat` on obsm dataframes and varm, against `anndata.concat` for each join and merge strategy |
 | `test_legacy_copies.py` | anndata 0.7's dataframes (categoricals as codes with an object reference into `__categories`) copied by `subset` (h5ad and Zarr), `convert` to Zarr v2/v3 and a MuData import: written as current `categorical` groups in a 0.2.0 frame, read back by anndata with their categories |
@@ -59,9 +99,14 @@ is at its floor and imports.
 | `test_scope.py` | SCope looms, read as pySCENIC's `export2loom` writes them and written with `--scope` (round trips, plain AnnData, refusals, markers): regulons as dataframes, embeddings and clusterings named from `MetaData`, plain or compressed `MetaData`, region looms, R's logicals and factors, renamed fields, small blocks |
 | `test_table.py` | The streaming CSV reader against pandas: column types, quoting, row subsets, blocks, refusals |
 | `test_mtx_codec.py`, `test_csr_build.py` | The streaming Matrix Market reader and writer against scipy, and the bucket sort they and `recast` share |
-| `test_external_readers.py` | 10x conversions, HDF5 and MTX, Parse runs and looms, checked by scanpy (Parse's own recipe for Parse), anndata with loompy (the pySCENIC tutorial's recipe for SCope looms), anndata's `read_csv`, `read_text` and `read_hdf`, a pandas 1.5 pycisTopic pickle read back there, mudata (a file it writes read as it reads it; ours read by it), and PyTables in their own uv environments (`integration`) |
-| `test_performance.py` | Complexity guards -- what an operation costs, not how long it takes (see below) |
-| `test_benchmark_harness.py` | That the benchmark's measurement is trustworthy |
+| `test_external_readers.py` | Every converter checked by the reader people use, each in its own uv environment pinned in `reference_stores.ORACLES` (`integration`): 10x HDF5 and MTX and CellBender by scanpy, and our 10x export by PyTables; Parse runs by Parse's own scanpy recipe; looms by anndata with loompy (the pySCENIC tutorial's recipe for SCope looms); anndata's `read_csv`, `read_text` and `read_hdf`; a pandas 1.5 pycisTopic pickle read back there; mudata (a file it writes read as it reads it; ours read by it); Visium by squidpy, Visium HD by scanpy with pandas and pyarrow, its segmented cells by 10x's geopandas recipe, Xenium by 10x's scanpy recipe; scanpy's `rank_genes_groups` through h5ad to Zarr v2 and v3, Zarr to h5ad and a recompressed h5ad |
+| `test_performance.py` | Complexity guards -- what an operation costs, not how long it takes (see below); its fixtures are in `perf_fixtures.py` |
+| `test_benchmark_harness.py` | That the benchmark's measurement is trustworthy, and that each run compares with the release before it |
+| `test_release_pipeline.py` | The workflows and the Dockerfile: which jobs publish in each kind of run, which hold a write token and what they run, pinned actions and base image, no untrusted value pasted into a script, each Python leg on its own Python |
+| `test_docs_are_accurate.py` | The docs against the code: every `adata ...` line in the README, the site and the `--help` examples uses real commands and options; each command has a section in the reference; links resolve; every page has its front matter; every test file is in this table |
+| `test_subset_oracle.py` | `subset` and `split` against anndata's `adata[obs, var]`, element by element: X, every layer layout, obsm and varm of any rank and as dataframes, obsp, varp, raw; on HDF5, Zarr v2 and Zarr v3 |
+| `test_block_layout.py` | Outputs keep their source's chunks and shards and are written a whole unit at a time, and still equal anndata's own subsetting, on HDF5, Zarr v2, Zarr v3 and anndata 0.13's sharded layout under zarr 3.1, at blocks small enough to cross every boundary |
+| `test_subset_selection.py`, `test_select.py`, `test_split_names.py` | Name lists that repeat a name, queries on every column layout against pandas, missing labels apart from empty ones, and output names that never share a file |
 | `test_subset.py`, `test_export.py`, `test_import.py`, `test_info_read.py`, `test_zarr.py`, `test_query.py` | Per-feature unit tests |
 
 ## Writing a test
@@ -80,9 +125,12 @@ def test_something(new_store):
 ```
 
 For CLI surfaces, use the module-level `CliRunner` and assert on
-`result.stdout + (result.stderr or "")`, since status goes to stderr. Strip
-ANSI before matching message text — Rich also wraps long lines, so collapse
-whitespace.
+`result.stdout` for results and `result.stderr` for status and errors. Off a
+terminal, as under `CliRunner`, Rich writes no colour codes and keeps each
+stderr message on one line, but `FORCE_COLOR` in the environment brings the
+codes back and help text and stdout's trees still wrap at Rich's width: strip
+ANSI and collapse whitespace before matching text, as the `_out(result)`
+helpers of the CLI test files do.
 
 ## Performance
 
@@ -109,15 +157,16 @@ be rather than only that it did not grow.
 
 ### What is counted
 
-`tests/perf_counters.py` patches four seams, all verified against the pinned
-h5py 3.15.1 and zarr 3.1.5:
+`tests/perf_counters.py` patches these seams, all verified against the pinned
+h5py 3.16.0 and zarr 3.4.1:
 
 | Hook | Sees |
 |---|---|
 | `h5py.Dataset.__getitem__` | HDF5 reads |
 | `h5py.Dataset.__setitem__` | HDF5 writes |
 | `h5py.Group.create_dataset` | HDF5 writes made at creation |
-| `zarr.Array.__getitem__` | Zarr reads, v2 and v3 alike |
+| `zarr.Array.__getitem__`, `.oindex[...]` | Zarr reads, v2 and v3 alike |
+| `zarr.Array.__setitem__`, `zarr.Group.create_array` | Zarr writes (bytes only) |
 | `zarr.storage.LocalStore.get` | chunk and metadata fetches |
 | `LocalStore.set` / `.delete` | write storms |
 
@@ -138,9 +187,45 @@ Elements are counted, not just calls: the `--merge` bug was n calls each
 reading n elements, and counting calls alone would miss a vectorised variant
 that reads n elements n times in one call.
 
+**Bytes, three ways.** Elements alone hid a 70x read amplification and a
+shard rewritten on every block, so `IOCounts` also counts bytes:
+
+| Field | Counts | Catches |
+|---|---|---|
+| `read_bytes`, `largest_read`, `largest_by_name` | bytes the reads returned; the largest one read | a block that `--chunk` does not bound, with no allocator involved |
+| `decoded_bytes` | bytes of every whole chunk the reads touched | reads that decode a chunk to use a row of it |
+| `written_bytes`, `largest_write` | bytes handed to writes | |
+| `encoded_bytes` | bytes of every whole chunk the writes touched, and every whole shard of a sharded Zarr array | writes smaller than the unit, each rewriting all of it |
+| `written_by_name`, `encoded_by_name` | the two above, per array | a writer's own output apart from its scratch |
+| `store_get_bytes`, `store_set_bytes` | bytes Zarr's store fetched and stored | |
+
+Decoded and encoded bytes are a model worked out from the selection, the chunk
+grid and the codecs, not a measurement of the library, which is what keeps them
+deterministic. It follows HDF5's chunk cache (per dataset, least recently used,
+at the dataset's own size: 1 MiB in the stores `open_store` opens, 8 MiB by
+default since HDF5 2.0), so appending a block at a time to a growing dataset
+costs each chunk once. A chunk is read into the cache whole, filtered or not;
+only an unfiltered chunk too big for the cache is read and written in place,
+just the bytes asked for. Zarr caches nothing, and writing part of a shard
+rewrites the shard.
+`test_the_byte_counters_see_whole_chunks_decoded_and_rewritten` checks the
+model against numbers worked out by hand.
+
+**Resident memory.** `count_allocations` uses tracemalloc, which sees numpy's
+buffers but not what HDF5, blosc or zarr's codecs allocate in C.
+`peak_rss(argv)` runs `adata <argv>` in a fresh interpreter and returns how far
+the command raised the operating system's high-water mark (`ru_maxrss`, read
+once the CLI is imported and again when the command ends; on Linux `VmHWM`,
+since `ru_maxrss` there starts at the parent's peak). A subprocess, because
+the high-water mark only rises. It has a few megabytes of noise, so
+guard it with generous ratios against inputs of tens of megabytes, as
+`test_a_dense_cast_adds_a_block_of_resident_memory_not_the_matrix` does;
+`test_peak_rss_sees_a_command_that_holds_the_matrix` checks that it sees
+`--in-memory` hold the matrix.
+
 **Known bypasses.** `Dataset.read_direct`, `np.asarray(dataset)` (it goes via
-`__array__`), `dataset.asstr()[...]` and `.fields()` reach the file without
-passing any hook. None are used today. If you add one, the counters will
+`__array__`), `dataset.asstr()[...]`, `.fields()` and Zarr's `vindex` reach
+the file without passing any hook. None are used today. If you add one, the counters will
 quietly report less work than happened -- which is why every guard also
 asserts a lower bound, and why there are two canary tests with known absolute
 counts. If a canary fails, fix the hooks before trusting anything else here.
@@ -184,7 +269,8 @@ accept a 64x increase in a command that is supposed to read nothing.
 |---|---|---|
 | `assert_grows_linearly` | no worse than linear in one axis | most commands |
 | `assert_grows_slower_than_input` | grows at least N times slower than the input | streaming at a fixed chunk |
-| `assert_independent_of` | does not grow at all | inspection, and grouping work per row |
+| `assert_memory_is_a_fraction_of_the_input` | adds at most a share (half) of what the input adds, in bytes | memory, along either axis |
+| `assert_independent_of` | does not grow at all | inspection, grouping work per row, the largest read |
 
 **Inspection is free, and that is an exact number.** `view` and `ls` reach only
 `.shape`, `.dtype` and `.attrs`: `axis_len` goes through `element_len`, which reads a
@@ -210,6 +296,39 @@ materialised one at a time — a known gap that `benchmarks/` reports rather tha
 guards conceal. Streamed `export sparse` is separately asserted to stay under a
 quarter of what `--in-memory` costs, both measured in the same run so the factor holds
 on any machine.
+
+### Memory along every axis and layout
+
+The guards above grow n_obs of an eight-column CSR store, the one shape every
+path handles well. A CSC densify holding n_obs x `--chunk` values, a dense cast
+check reading the whole matrix and a transpose stepping by the average major
+all passed them. `tests/perf_fixtures.py` builds stores the way users have
+them -- every layout, written by anndata as h5ad, Zarr v2 and anndata 0.13's
+default sharded Zarr v3 -- and `test_peak_memory_is_a_small_share_of_the_input` runs
+`recast` (each dtype and layout change), `subset` and `concat` over each
+layout, growing n_obs and then n_var. zarr 3.4 gives anndata's shards inner
+chunks of about a megabyte; `zarr31_layout` rewrites a store's X as zarr 3.1
+laid it out, inner chunks of a kilobyte in shards of the whole array, which
+is what users' stores hold and where a read or write that splits a unit
+costs most.
+
+A growth ratio cannot be the claim along n_var: widen a matrix and a block of
+`--chunk` rows widens with it, as fast as the input, so a ratio cannot tell it
+from the whole matrix. Peak memory added per byte of input added can: a block
+of 32 rows of a matrix thousands of rows tall adds a few hundredths, and a path
+holding the matrix adds a whole byte and more for each copy. The limit is half;
+bounded paths came to at most 0.21. Growing n_obs, `--chunk` is 256 rows, so a
+block of `--chunk` columns over every row (CSC densify before F030) is plain.
+Each fixture is built once and shared by the commands.
+
+Sparse `subset` was the known gap, read 4,096 majors a block whatever
+`--chunk` said (F032); 0.17.6 closed it, and `GRID_GAPS` is empty.
+
+The recast guards beside it pin each block in bytes, on h5ad and sharded Zarr
+v3 (Zarr v2 is covered by the correctness tests): the cast
+check reads `--chunk` rows of a dense matrix, CSC densify and sparsify read
+blocks set by the chunk, and a skewed transpose never reads more than about two
+buckets of entries at once.
 
 ### Where counting is not enough
 
@@ -277,9 +396,29 @@ should scale with, scale only that, and hold everything else fixed.
 | `convert` to 10x MTX | n_obs | **flat** read calls |
 | `convert` CellBender (plain, `--min-cell-probability`, `--raw` full and filtered) | n_barcodes | linear; **flat** write calls |
 | `recast --dtype`, `--layout csc`, `--layout dense` | nnz, n_obs | linear; the streaming transpose's **peak memory** is bounded |
+| `recast` (every dtype and layout change), `subset`, `concat` | n_obs, n_var; CSR, CSC, dense | **peak memory** a small share of the input |
+| `recast --dtype` (dense), a skewed transpose | n_obs; h5ad, sharded Zarr v3 | the **largest read** set by the chunk |
+| CSC `--layout dense`, dense `--layout csc` | n_obs; h5ad | the **largest read** set by the chunk, and memory per row |
+| `subset`, `split`, `concat`, `recast`, `convert` into anndata 0.13's shards | Zarr v3 as zarr 3.1 wrote it | each shard **encoded once** |
+| dense `subset`, `concat`, `recast`, `export array` | tall gzip chunks, zarr's own chunks | each chunk **decoded once** |
+| `subset` into a sharded output | 1 MiB units; dense, CSR | **peak allocation** a few units, not the shard |
+| `split` into chunked HDF5 | eight groups | each output chunk **encoded once** |
+| `subset`, `concat` of a sharded store | Zarr v3 as zarr 3.1 wrote it | each shard index **fetched once** |
+| sparse `subset` | n_obs; CSR, CSC, a gene in every cell | the **largest read** about `--chunk` rows of entries |
+| `convert` of a matrix chunked (n_obs, 8) | n_obs | the **largest read** a tile within the budget |
+| `split` | 128 against 512 groups | **resident memory** flat past 128 outputs a pass |
 
-The `slow` marker is on the three guards that build a 65,536-row store; they still gate
-merges, and `-m "not slow"` skips them locally. `perf` is on the tracing guards.
+The `slow` marker is on the guards that build a 65,536-row store or run `peak_rss`;
+they still gate merges, and `-m "not slow"` skips them locally. `perf` is on
+every guard in the file, and on the few beside the code they guard; CI runs
+them as a job of their own, beside the unit suite's coverage job.
+
+h5py 3.15 kept 32 to 160 bytes of every dataset read, write and `.shape` for good, so
+any long streaming loop grew with its block count;
+`test_h5py_calls_keep_no_memory_once_they_return` keeps the floor at 3.16.0, which
+does not. 3.16.0 brings HDF5 2.0, whose chunk cache is 8 MiB a dataset rather than 1;
+`open_store` keeps 1 MiB, which
+`test_stores_give_each_hdf5_dataset_a_one_mebibyte_chunk_cache` checks.
 
 ### Reading a failure
 
@@ -331,7 +470,14 @@ rather than to assert a claim the code does not yet meet.
 
 Results are published to [Benchmarks](benchmarks.md) and `docs/benchmarks/<tag>.json`
 on every tag, and appended to the GitHub release notes if a release exists.
-Artifacts expire; the docs page is the durable series.
+Artifacts expire; the docs page is the durable series. The "vs previous"
+column compares with the release just before, at the same tier; a run that
+is not a release compares with the newest one.
+
+The job that measures holds a read-only token, because the baselines are the
+newest anndata, scanpy, dask and geopandas from PyPI rather than anything
+`uv.lock` pins. A second job, which installs nothing, renders the results
+with the standard library and commits them.
 
 ### How it measures
 
@@ -391,20 +537,45 @@ decays fastest.
 `test_anndata_versions.py` does not trust this repo's idea of the format. For
 each release below it builds an environment with `uv`, writes a reference
 store with that exact anndata, and then checks that the CLI reads it, and that
-what the CLI writes can be reopened **by that same release**.
+what the CLI writes can be reopened **by that same release**: the output of
+`subset`, of `convert` (to the same backend and to the other, `--zarr-format
+2` for the releases on zarr-python 2), of `split` and of `concat` over its
+pieces. The reference store holds a categorical in `raw/var` and scanpy's
+`rank_genes_groups` record arrays besides the common encodings.
 
-| Release | Interpreter | Pins | Why it is in the list |
+| Release | Interpreter | Pins (exact) | Why it is in the list |
 |---|---|---|---|
-| 0.8.0 | 3.11 | `pandas<2`, `numpy<2`, `zarr<3` | Introduced `encoding-type`/`encoding-version` |
-| 0.9.2 | 3.11 | `pandas<2`, `numpy<2`, `zarr<3` | |
-| 0.10.9 | 3.12 | `pandas<3`, `numpy<2`, `zarr<3` | |
-| 0.11.4 | 3.12 | `pandas<3`, `zarr<3` | The index became a `nullable-string-array` group |
-| 0.12.2 | 3.12 | `pandas<3`, `zarr>=3` | Zarr v3 |
-| 0.13.3 | 3.12 | `zarr>=3` | Zarr v3 by default |
+| 0.7.8 | 3.10 | pandas 1.3.5, numpy 1.23.5, zarr 2.10.3, h5py 3.7.0 | The legacy layout: no root attributes, categoricals as codes with a reference, `ordered` on `__categories`. Read only: it predates the encoding `adata` writes |
+| 0.8.0 | 3.11 | pandas 1.5.3, numpy 1.26.4, zarr 2.18.7 | Introduced `encoding-type`/`encoding-version`; the oldest release that reads what `adata` writes |
+| 0.9.2 | 3.11 | pandas 1.5.3, numpy 1.26.4, zarr 2.18.7 | |
+| 0.10.9 | 3.12 | pandas 2.3.3, numpy 1.26.4, zarr 2.18.7 | |
+| 0.11.4 | 3.12 | pandas 2.3.3, numpy 2.5.4, zarr 2.18.7 | The first that reads a `nullable-string-array` (it still writes text as `string-array`) |
+| 0.12.2 | 3.12 | pandas 2.3.3, numpy 2.5.4, zarr 3.4.2 | Zarr v3; the first that reads a `null` |
+| 0.13.4 | 3.12 | pandas 3.1.0, numpy 2.5.4, zarr 3.4.2 | Zarr v3 by default; with pandas 3, text as `nullable-string-array` |
 
-The pins matter: a modern pandas makes string columns a type the older
-releases cannot write, and pandas 1.x has no wheels for Python 3.12. To add a
-release, append to `RELEASES` in `tests/reference_stores.py`.
+Every release runs on exact versions (scipy and h5py too). A modern pandas
+makes string columns a type the older releases cannot write, pandas 1.x has
+no wheels for Python 3.12, and a floating pin would change what the job
+checks, or turn it red, without a change here. To add a release, append to
+`RELEASES` in `tests/reference_stores.py`. The readers
+`test_external_readers.py` compares against (scanpy, PyTables, loompy,
+mudata, squidpy and the rest) are pinned the same way, in `ORACLES` there.
+
+The unit suite needs no network to read anndata 0.7's layout:
+`tests/fixtures/anndata-0.7.8/` holds the two stores the 0.7.8 environment
+wrote (the Zarr one zipped), which `test_element_fidelity.py` copies through
+every path. To write them again, run the fixture writer in that environment:
+
+```bash
+uv run --no-project --python 3.10 --with anndata==0.7.8 --with scipy==1.9.3 --with pandas==1.3.5 --with numpy==1.23.5 --with zarr==2.10.3 --with h5py==3.7.0 --with numcodecs==0.13.1 tests/fixtures/write_reference_store.py <dir> h5ad
+```
+
+and the same with `zarr` for the Zarr store.
+
+Under pandas 3 anndata 0.13 writes every text column as a
+`nullable-string-array`, while most files in the wild hold `string-array`
+datasets. `test_anndata_roundtrip.py` builds its fixtures both ways, and
+concatenates one of each against `anndata.concat`.
 
 First run downloads those environments; afterwards `uv` serves them from cache
 and the suite takes about a minute. To skip it without the marker:
@@ -416,7 +587,7 @@ ADATA_SKIP_VERSION_FIXTURES=1 uv run pytest
 ## Coverage
 
 ```bash
-uv run pytest -m "not integration" --cov=adata --cov-report=term-missing
+uv run pytest -m "not integration and not perf" --cov=adata --cov-report=term-missing
 ```
 
 The floor is 90%. What remains uncovered is mostly defensive `except` branches

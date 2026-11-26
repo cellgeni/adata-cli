@@ -11,19 +11,28 @@ Grammar::
     or_expr := and_expr ( "or" and_expr )*
     and_expr:= term ( "and" term )*
     term    := "not" term | "(" expr ")" | comparison
-    comparison := IDENT OP VALUE
-    OP      := == | != | < | <= | > | >= | in | not in
+    comparison := IDENT OP VALUE | IDENT ["not"] "in" LIST
+    OP      := == | != | < | <= | > | >=
+    LIST    := "(" VALUE ( [","] VALUE )* ")" | VALUE ( "," VALUE )*
 
-Values are bare words, quoted strings, or comma-separated lists for `in`.
-Comparison against a column is done on its string form for equality and
-membership, and numerically for the ordering operators.
+A value is a bare word or a quoted string. A bare word ends at a space, a
+parenthesis, a comma or an operator character, so `n_counts>1000` is three
+tokens; a value holding any of those is quoted, and a quoted value is taken
+literally, commas and all.
+
+A column is compared at the type it is stored as. Numbers and booleans
+compare by value, at the column's dtype, as pandas compares them: a float32
+column meets `0.1` as float32 0.1. A missing number equals no value, so
+`!=` keeps it, and `nan` names it. Text compares by its string, and a
+missing text entry reads as "". The ordering operators parse text entries
+as numbers, and an entry that will not parse does not match.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 import numpy as np
 
@@ -32,14 +41,17 @@ _TOKEN = re.compile(
     \s*(?:
         (?P<lparen>\()
       | (?P<rparen>\))
+      | (?P<comma>,)
       | (?P<op>==|!=|<=|>=|<|>)
-      | (?P<word>"[^"]*"|'[^']*'|[^\s()]+)
+      | (?P<word>"[^"]*"|'[^']*'|[^\s()=!<>,"'][^\s()=!<>,]*)
     )
     """,
     re.VERBOSE,
 )
 
 _KEYWORDS = {"and", "or", "not", "in"}
+
+_OPERATORS = "==, !=, <, <=, > or >="
 
 
 class QueryError(ValueError):
@@ -58,16 +70,23 @@ def tokenize(expr: str) -> List[Token]:
     while pos < len(expr):
         match = _TOKEN.match(expr, pos)
         if match is None:
-            if expr[pos:].strip() == "":
+            rest = expr[pos:].strip()
+            if rest == "":
                 break
-            raise QueryError(f"Cannot parse query at {expr[pos:]!r}")
+            if rest[0] in "=!":
+                raise QueryError(f"Unknown operator at {rest!r}: use {_OPERATORS}.")
+            if rest[0] in "\"'":
+                raise QueryError(f"Unclosed quote at {rest!r}.")
+            raise QueryError(f"Cannot parse query at {rest!r}")
         pos = match.end()
-        for kind in ("lparen", "rparen", "op", "word"):
+        for kind in ("lparen", "rparen", "comma", "op", "word"):
             text = match.group(kind)
             if text is None:
                 continue
             if kind == "word" and text.lower() in _KEYWORDS:
-                tokens.append(Token(text.lower(), text.lower()))
+                # The text as typed: where a value belongs, a keyword is
+                # one (`state in (OR, WA)`).
+                tokens.append(Token(text.lower(), text))
             else:
                 tokens.append(Token(kind, text))
             break
@@ -80,8 +99,41 @@ def _unquote(text: str) -> str:
     return text
 
 
-#: A predicate maps a column reader to a boolean mask over the chunk.
-Predicate = Callable[[Dict[str, List[str]]], np.ndarray]
+@dataclass
+class Column:
+    """One chunk of a column, at the type it is stored as.
+
+    `values` holds numbers, booleans or text (numpy `U`). `missing` is True
+    where an entry is missing: masked in a nullable column, NaN, or a
+    category code of -1; a missing text entry holds "". `text`, where set,
+    is how the entries read as text, when that is not `values` rendered by
+    `str` (a categorical's numeric categories, as stored).
+    """
+
+    values: np.ndarray
+    missing: Optional[np.ndarray] = None
+    text: Optional[np.ndarray] = None
+
+    def labels(self) -> np.ndarray:
+        """The entries as text, as `split` names its outputs."""
+        if self.text is not None:
+            return self.text
+        if self.values.dtype.kind == "U":
+            return self.values
+        return np.asarray([str(v) for v in self.values.tolist()], dtype=str)
+
+    def is_missing(self) -> np.ndarray:
+        missing = np.zeros(len(self.values), dtype=bool)
+        if self.missing is not None:
+            missing |= self.missing
+        if self.values.dtype.kind == "f":
+            missing |= np.isnan(self.values)
+        return missing
+
+
+#: A predicate maps a chunk of columns to a boolean mask over its rows. A
+#: column is a `Column`, or a plain sequence (read as one with no gaps).
+Predicate = Callable[[Dict[str, Any]], np.ndarray]
 
 
 class _Parser:
@@ -101,8 +153,14 @@ class _Parser:
 
     def parse(self) -> Predicate:
         node = self.parse_or()
-        if self.peek() is not None:
-            raise QueryError(f"Unexpected {self.peek().text!r} in query.")
+        token = self.peek()
+        if token is not None and token.kind == "comma":
+            raise QueryError(
+                "Unexpected ',' in query: a value holding a comma needs quotes, "
+                "as in label == \"a, b\"."
+            )
+        if token is not None:
+            raise QueryError(f"Unexpected {token.text!r} in query.")
         return node
 
     def parse_or(self) -> Predicate:
@@ -161,38 +219,56 @@ class _Parser:
                 f"got {op_token.text!r}."
             )
 
-        value_token = self.take()
-        if value_token.kind != "word":
-            raise QueryError(f"Expected a value, got {value_token.text!r}.")
-        return _comparison(column, op_token.text, _unquote(value_token.text))
+        return _comparison(column, op_token.text, self._take_value())
+
+    def _take_value(self) -> str:
+        token = self.take()
+        return self._value(token, "Expected a value")
+
+    @staticmethod
+    def _value(token: Token, expected: str) -> str:
+        if token.kind == "word":
+            return _unquote(token.text)
+        if token.kind in _KEYWORDS:
+            return token.text
+        raise QueryError(f"{expected}, got {token.text!r}.")
 
     def _take_list(self) -> List[str]:
-        token = self.take()
-        if token.kind == "lparen":
+        """The values after `in`: in parentheses, separated by commas or
+        spaces, or bare and separated by commas. Each is one token, so a
+        quoted value keeps its commas."""
+        token = self.peek()
+        if token is not None and token.kind == "lparen":
+            self.take()
             items: List[str] = []
             while True:
                 nxt = self.take()
                 if nxt.kind == "rparen":
-                    break
-                items.extend(
-                    v.strip() for v in _unquote(nxt.text).split(",") if v.strip()
-                )
-            return items
-        if token.kind != "word":
-            raise QueryError(f"Expected a value list, got {token.text!r}.")
-        return [v.strip() for v in _unquote(token.text).split(",") if v.strip()]
+                    return items
+                if nxt.kind == "comma":
+                    continue
+                items.append(self._value(nxt, "Expected a value in the list"))
+        items = [self._take_value()]
+        while self.peek() is not None and self.peek().kind == "comma":
+            self.take()
+            items.append(self._take_value())
+        return items
 
 
 def _combine(left: Predicate, right: Predicate, op: Any) -> Predicate:
     return lambda cols: op(left(cols), right(cols))
 
 
-def _column(cols: Dict[str, List[str]], name: str) -> np.ndarray:
+def _column(cols: Dict[str, Any], name: str) -> Column:
     if name not in cols:
         raise QueryError(
             f"Column {name!r} not found. Available: {', '.join(sorted(cols))}"
         )
-    return np.asarray(cols[name], dtype=str)
+    column = cols[name]
+    if isinstance(column, Column):
+        return column
+    values = np.asarray(column)
+    return Column(values.astype(str) if values.dtype.kind in "OST" else values)
 
 
 def _as_float(values: np.ndarray, column: str) -> np.ndarray:
@@ -206,40 +282,121 @@ def _as_float(values: np.ndarray, column: str) -> np.ndarray:
     return out
 
 
+_INTEGER = re.compile(r"[+-]?\d+")
+_NUMBER = re.compile(
+    r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|[+-]?(?:inf|infinity|nan)",
+    re.IGNORECASE,
+)
+
+
+def _number(text: str) -> Optional[Union[int, float]]:
+    """`text` as a number, or None. An integer stays an int, so it compares
+    exactly with an int64 column; Python-only spellings such as `1_000` are
+    not numbers here."""
+    text = text.strip()
+    if _INTEGER.fullmatch(text):
+        return int(text)
+    if _NUMBER.fullmatch(text):
+        return float(text)
+    return None
+
+
+def _boolean(text: str) -> Optional[bool]:
+    folded = text.strip().lower()
+    if folded in ("true", "1"):
+        return True
+    if folded in ("false", "0"):
+        return False
+    return None
+
+
+def _is_nan(text: str) -> bool:
+    return text.strip().lower() in ("nan", "+nan", "-nan")
+
+
+def _kind(column: Column) -> str:
+    kind = column.values.dtype.kind
+    if kind == "b":
+        return "boolean"
+    if kind in "iuf":
+        return "number"
+    return "text"
+
+
+def _equal(column: Column, name: str, value: str) -> np.ndarray:
+    """Where `column` equals `value`: at its stored type, and never where an
+    entry is missing, unless `value` is `nan`."""
+    values = column.values
+    kind = _kind(column)
+    if kind == "text":
+        return values == value
+    if _is_nan(value):
+        return column.is_missing()
+    if kind == "boolean":
+        target = _boolean(value)
+        if target is None:
+            raise QueryError(
+                f"Column {name!r} holds true/false values; compare it with "
+                f"true or false, not {value!r}."
+            )
+    else:
+        target = _number(value)
+        if target is None:
+            raise QueryError(
+                f"Column {name!r} holds numbers, so it compares with a number, "
+                f"not {value!r}."
+            )
+    # A Python number meets a numpy array at the array's dtype, so a float32
+    # column compares with float32(0.1), not with the float64 0.1.
+    with np.errstate(over="ignore", invalid="ignore"):
+        result = values == target
+    return result & ~column.is_missing()
+
+
+_ORDERING = {
+    "<": np.less,
+    "<=": np.less_equal,
+    ">": np.greater,
+    ">=": np.greater_equal,
+}
+
+
 def _comparison(column: str, op: str, value: str) -> Predicate:
-    def run(cols: Dict[str, List[str]]) -> np.ndarray:
+    def run(cols: Dict[str, Any]) -> np.ndarray:
         values = _column(cols, column)
         if op == "==":
-            return values == value
+            return _equal(values, column, value)
         if op == "!=":
-            return values != value
+            return np.logical_not(_equal(values, column, value))
 
-        try:
-            threshold = float(value)
-        except ValueError as exc:
-            raise QueryError(
-                f"Operator {op!r} needs a number, but got {value!r}."
-            ) from exc
-
-        numeric = _as_float(values, column)
-        with np.errstate(invalid="ignore"):
-            if op == "<":
-                return numeric < threshold
-            if op == "<=":
-                return numeric <= threshold
-            if op == ">":
-                return numeric > threshold
-            return numeric >= threshold
+        threshold = _number(value)
+        if threshold is None:
+            raise QueryError(f"Operator {op!r} needs a number, but got {value!r}.")
+        kind = _kind(values)
+        if kind == "text":
+            numeric = _as_float(values.values, column)
+        elif kind == "boolean":
+            numeric = values.values.astype(np.int8)
+        else:
+            numeric = values.values
+        with np.errstate(over="ignore", invalid="ignore"):
+            result = _ORDERING[op](numeric, threshold)
+        return result & ~values.is_missing() if kind != "text" else result
 
     return run
 
 
 def _membership(column: str, options: Sequence[str], negate: bool) -> Predicate:
-    wanted = set(options)
+    wanted = list(dict.fromkeys(options))
 
-    def run(cols: Dict[str, List[str]]) -> np.ndarray:
+    def run(cols: Dict[str, Any]) -> np.ndarray:
         values = _column(cols, column)
-        mask = np.isin(values, list(wanted))
+        if _kind(values) == "text":
+            mask = np.isin(values.values, wanted)
+        else:
+            mask = np.zeros(len(values.values), dtype=bool)
+            for option in wanted:
+                mask |= _equal(values, column, option)
         return np.logical_not(mask) if negate else mask
 
     return run
