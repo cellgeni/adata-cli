@@ -621,10 +621,11 @@ def _import(kind, store, entry, source, *extra):
     return result, out
 
 
-def _pandas_frame(csv: Path, index: str):
+def _pandas_frame(csv: Path, index: str, text=()):
     """What anndata writes for `pd.read_csv`'s frame: text that repeats a
-    value becomes a categorical."""
-    frame = pd.read_csv(csv).set_index(index)
+    value becomes a categorical. Columns in `text` are read as strings
+    (`dtype=str`), as `--categorical` reads them."""
+    frame = pd.read_csv(csv, dtype={name: str for name in text}).set_index(index)
     frame.index.name = None
     frame.index = frame.index.astype(str)
     obj = ad.AnnData(obs=frame)
@@ -738,16 +739,26 @@ def test_the_export_of_a_dataframe_imports_back_as_pandas_reads_it(temp_dir, bac
 
 
 def test_categorical_overrides_still_apply(written, temp_dir):
-    """--categorical makes a text column a categorical whatever its values,
-    and --no-auto-categorical keeps the others as strings."""
+    """--categorical makes a column a categorical of its text whatever its
+    values, and --no-auto-categorical keeps the others as strings."""
     csv = temp_dir / "cells.csv"
     csv.write_text(CELLS, encoding="utf-8")
 
-    forced, out = _import("dataframe", written, "obs", csv, "-i", "cell", "--categorical", "note,count")
+    forced, out = _import(
+        "dataframe", written, "obs", csv, "-i", "cell", "--categorical", "note,gappy,score,flag"
+    )
     assert forced.exit_code == 0, _out(forced)
-    assert "'count' holds int64 values, so it stays as it is" in _out(forced)
+    assert "(6 categorical)" in _out(forced)  # the four forced, label and flags
     got = _read(out).obs
-    assert got["note"].dtype == "category" and got["count"].dtype == "int64"
+    # Every value of `note` differs, so pandas' frame has no categorical to
+    # compare it with; the others repeat a value, as the oracle needs.
+    assert got["note"].dtype == "category"
+    assert _labels(got["note"]) == ["one", "two", "three", "four", "five", "six"]
+    expected = _pandas_frame(csv, "cell", text=["gappy", "score", "flag"])
+    assert all(expected[c].dtype == "category" for c in ("gappy", "score", "flag"))
+    _same_frame(got.drop(columns="note"), expected.drop(columns="note"))
+    assert list(got["score"].cat.categories) == ["1.5", "2.5", "3.5", "4.5"]
+    assert _labels(got["gappy"]) == ["1", "<na>", "3", "4", "5", "6"]
 
     plain, out = _import("dataframe", written, "obs", csv, "-i", "cell", "--no-auto-categorical")
     assert plain.exit_code == 0, _out(plain)
@@ -758,6 +769,58 @@ def test_categorical_overrides_still_apply(written, temp_dir):
     unknown, _ = _import("dataframe", written, "obs", csv, "-i", "cell", "--categorical", "nope")
     assert unknown.exit_code == 1
     assert "--categorical names 'nope', which cells.csv does not have" in _out(unknown)
+
+
+def test_numeric_labels_named_categorical_survive_a_round_trip(temp_dir, backend):
+    """#124: a column named in --categorical whose values looked like
+    numbers (leiden's "0", "1", "10") stayed int64, with only a note, so an
+    export, edit and import lost the clusters' labels and "007" its zeros."""
+    obs = pd.DataFrame(
+        {
+            "leiden": pd.Categorical(["0", "1", "0", "2", "1", "10"]),
+            "code": pd.Categorical(["007", "7", "007", None, "7", "0"]),
+            "celltype": pd.Categorical(["T", "B", "T", "NK", "B", "T"]),
+            "n_genes": [10, 20, 30, 40, 50, 60],
+        },
+        index=[f"c{i}" for i in range(6)],
+    )
+    path = backend_path(temp_dir, backend, "clusters")
+    obj = ad.AnnData(obs=obs)
+    obj.write_h5ad(path) if backend == "h5ad" else obj.write_zarr(path)
+    csv = temp_dir / "obs.csv"
+    exported = runner.invoke(app, ["export", "dataframe", str(path), "obs", "-o", str(csv)])
+    assert exported.exit_code == 0, _out(exported)
+
+    plain, _ = _import("dataframe", path, "obs", csv)
+    forced, out = _import("dataframe", path, "obs", csv, "--categorical", "leiden,code,celltype")
+
+    assert plain.exit_code == 0, _out(plain)
+    assert forced.exit_code == 0, _out(forced)
+    got = _read(out).obs
+    _same_frame(got, _pandas_frame(csv, "_index", text=["leiden", "code"]))
+    assert list(got["leiden"].cat.categories) == ["0", "1", "2", "10"]
+    assert _labels(got["leiden"]) == list(obs["leiden"])
+    assert _labels(got["code"]) == ["007", "7", "007", "<na>", "7", "0"]
+    assert got["n_genes"].dtype == "int64"
+
+
+def test_a_forced_numeric_column_past_the_cap_is_written_as_strings(written, temp_dir, monkeypatch):
+    """Past the cap of distinct values a forced column is written as text,
+    as the warning says, numbers included."""
+    from adata.formats import table
+
+    monkeypatch.setattr(table, "CATEGORY_CAP", 3)
+    csv = temp_dir / "cells.csv"
+    csv.write_text(CELLS, encoding="utf-8")
+
+    result, out = _import("dataframe", written, "obs", csv, "-i", "cell", "--categorical", "count")
+
+    assert result.exit_code == 0, _out(result)
+    # The message names the cap the module was imported with, not the patch.
+    assert re.search(r"'count' has more than [\d,]+ distinct values, so it is written as strings", _out(result))
+    got = _read(out).obs
+    assert pd.api.types.is_string_dtype(got["count"]) and got["count"].dtype != "category"
+    assert _labels(got["count"]) == ["1", "2", "3", "4", "5", "6"]
 
 
 def test_a_dataframe_import_holds_a_block_not_the_file(temp_dir, monkeypatch):

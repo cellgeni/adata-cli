@@ -124,9 +124,10 @@ def import_dataframe(
     not by the file: the first types each column as `pd.read_csv` would
     (missing numbers are NaN, True/False is bool) and checks every row's
     width; the second writes the frame as anndata writes it, a text column
-    that repeats a value as a categorical. `categorical` names text columns
-    to make categoricals whatever their values, and `auto_categorical=False`
-    keeps every other text column as strings.
+    that repeats a value as a categorical. `categorical` names columns to
+    read as text and make categoricals whatever their values, numbers
+    included, and `auto_categorical=False` keeps every other text column as
+    strings.
     """
     obj = check_target(obj, "dataframe")
     input_file = Path(input_file)
@@ -158,16 +159,17 @@ def import_dataframe(
     for column in scan.columns:
         kind = scan.dtype_of(column)
         if column.name in forced:
-            if kind not in ("str", "category"):
-                console.print(
-                    f"[yellow]Note:[/] {literal(repr(column.name))} holds {kind} values, so it "
-                    "stays as it is rather than a categorical."
-                )
-            elif column.seen is None:
+            # A forced column is read as text whatever its values look like:
+            # leiden's "0", "1", "10" are labels, and "007" keeps its zeros.
+            # The scan kept every column's distinct values as written, so
+            # numbers and True/False have their text to hand; what pandas
+            # reads as missing stays a gap, as `dtype=str` leaves it.
+            if column.seen is None:
                 console.print(
                     f"[yellow]Warning:[/] {literal(repr(column.name))} has more than "
                     f"{CATEGORY_CAP:,} distinct values, so it is written as strings."
                 )
+                scan.overrides[column.name] = "str"
             else:
                 scan.overrides[column.name] = "category"
         elif kind == "category" and not auto_categorical:

@@ -26,13 +26,23 @@ The conversion epic's sub-issues (#21–#30) are all done and ticked in #20.
 
 ## In progress
 
-Nothing. The fixes from the October 2026 audit (epic #87, 164 findings in
-16 batches) finished with 0.17.6; the sub-issues (#88–#103) are all done
-and ticked in #87. The batch names in the follow-ups below (B1 to B10) are
+- #124: `import dataframe --categorical` reads numeric-looking labels as
+  text (#125), for 0.17.7.
+
+The fixes from the October 2026 audit (epic #87, 164 findings in 16
+batches) finished with 0.17.6; the sub-issues (#88–#103) are all done and
+ticked in #87. The batch names in the follow-ups below (B1 to B10) are
 theirs.
 
 ## Follow-ups noticed
 
+- From #124 (`--categorical` now reads numeric-looking labels as text):
+  - `import dataframe --keep-dtypes`, to keep the encodings the existing
+    frame has for columns of the same name (category order, `ordered`,
+    numeric dtypes), so a pipeline need not list every categorical.
+  - An import that adds or replaces only the CSV's columns, joined on the
+    index, and leaves the frame's other columns as they are ("attach
+    metadata" without a round trip of the whole frame).
 - GitHub releases stopped at 0.11.1: they were cut by hand, and the release
   checklist never said so. PyPI, quay and the benchmark page were unaffected.
   `publish.yml` now creates the release from the changelog section (#114).
