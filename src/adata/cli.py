@@ -1544,8 +1544,8 @@ def import_dataframe(
     categorical: Optional[str] = typer.Option(
         None,
         "--categorical",
-        help="Comma separated columns to read as text and make categoricals, "
-        "numeric-looking labels such as leiden's 0, 1, 10 included",
+        help="Comma separated columns to make categoricals of their text, "
+        "even numeric-looking ones (leiden's 0, 1, 10)",
     ),
     auto_categorical: bool = typer.Option(
         True,

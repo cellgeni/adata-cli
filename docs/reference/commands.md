@@ -588,11 +588,11 @@ them categoricals whatever their values: leiden clusters `0`, `1`, `10` stay
 labels rather than becoming int64, and `007` keeps its zeros. Missing values
 (as pandas reads them) are gaps, and a column with more than 65,536 distinct
 values is written as `string-array`. Use `--no-auto-categorical` to keep
-all other text as `string-array`. A row with more
-or fewer fields than the header, a header that repeats a name, a column with
-no name (as pandas writes an unnamed index) or named `_index` besides the
-index, and a `--categorical` name the file does not have are refused before
-the store is touched.
+all other text as `string-array`. A row with more or fewer fields than the
+header, a header that repeats a name, a column with no name (as pandas
+writes an unnamed index) or named `_index` besides the index, and a
+`--categorical` name the file does not have are refused before the store is
+touched.
 
 For `dict`: an object becomes a mapping, and an array a typed array where its
 values share a type: strings, booleans, whole numbers (int64, or uint64 past
