@@ -375,14 +375,6 @@ def plan_matrix_import(
     check_import_options(options)
     matrix = _read_matrix(handle, options.genome)
 
-    if matrix.version == 2 and (
-        options.feature_type is not None or options.split_feature_types
-    ):
-        raise ValueError(
-            "This is a Cell Ranger 2 file, which records no feature types; "
-            "--feature-type and --split-feature-types need a v3 file."
-        )
-
     keep = np.ones(matrix.n_features, dtype=bool)
     if options.genome is not None and matrix.version == 3:
         genomes = matrix.columns.get("genome")
@@ -397,7 +389,7 @@ def plan_matrix_import(
 
     outputs, targets, warnings = plan_targets(
         output, matrix.names, matrix.columns, matrix.feature_types, keep, options,
-        noun="file",
+        noun="file", untyped="Cell Ranger 2 files record no feature types",
     )
     return matrix, outputs, targets, warnings
 

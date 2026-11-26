@@ -28,6 +28,9 @@ The conversion epic's sub-issues (#21–#30) are all done and ticked in #20.
 
 - #124: `import dataframe --categorical` reads numeric-looking labels as
   text (#125), for 0.17.7.
+- #127: `convert --feature-type` and `--split-feature-types` take a 10x
+  input that records no feature types (Cell Ranger 2, two-column features
+  files) as gene expression, for 0.17.7.
 
 The fixes from the October 2026 audit (epic #87, 164 findings in 16
 batches) finished with 0.17.6; the sub-issues (#88–#103) are all done and
@@ -36,6 +39,10 @@ theirs.
 
 ## Follow-ups noticed
 
+- From #127: `convert` from h5ad refuses `--feature-type` and
+  `--split-feature-types`; they could filter on var's `feature_types`
+  column, so one h5ad converted from a multiome `.h5` splits as the `.h5`
+  would.
 - From #124 (`--categorical` now reads numeric-looking labels as text):
   - `import dataframe --keep-dtypes`, to keep the encodings the existing
     frame has for columns of the same name (category order, `ordered`,

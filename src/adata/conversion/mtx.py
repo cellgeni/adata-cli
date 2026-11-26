@@ -351,15 +351,10 @@ class MtxImport(Converter):
         if width >= 3 and not folder.legacy:
             types = np.array([row[2] for row in rows], dtype=object)
             columns["feature_types"] = types
-        if types is None and (options.feature_type is not None or options.split_feature_types):
-            raise ValueError(
-                f"{folder.features.name} records no feature types; "
-                "--feature-type and --split-feature-types need a third column."
-            )
-
         keep = np.ones(n_features, dtype=bool)
         outputs, targets, warnings = plan_targets(
-            output, names, columns, types, keep, options, noun="folder"
+            output, names, columns, types, keep, options, noun="folder",
+            untyped=f"{folder.features.name} records no feature types",
         )
         if width > 3:
             warnings.append(

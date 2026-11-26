@@ -364,8 +364,16 @@ def test_a_broken_folder_writes_nothing(tmp_path, counts, spoil, message):
 @pytest.mark.parametrize(
     "layout,args,message",
     [
-        ("starsolo2col", ["--feature-type", "Gene Expression"], "records no feature types"),
-        ("cr2", ["--split-feature-types"], "records no feature types"),
+        (
+            "starsolo2col", ["--feature-type", "Peaks"],
+            "No features of type 'Peaks'; features.tsv records no feature types, "
+            "so this folder holds gene expression only.",
+        ),
+        (
+            "cr2", ["--feature-type", "Antibody Capture"],
+            "No features of type 'Antibody Capture'; genes.tsv records no feature "
+            "types, so this folder holds gene expression only.",
+        ),
         ("cr3", ["--genome", "hg19"], "no genome per feature"),
         ("cr3", ["--var-names", "symbols"], "--var-names must be one of"),
         ("cr3", ["--compression", "zstd"], "not available for h5ad"),
@@ -381,6 +389,45 @@ def test_options_that_do_not_fit_are_refused(tmp_path, counts, layout, args, mes
     assert result.exit_code == 1
     assert message in _out(result)
     assert not (tmp_path / "out.h5ad").exists()
+
+
+@pytest.mark.parametrize("layout, features", [("cr2", "genes.tsv"), ("starsolo2col", "features.tsv")])
+@pytest.mark.parametrize(
+    "flags, written",
+    [
+        (["--feature-type", "Gene Expression"], "out.h5ad"),
+        (["--split-feature-types"], "out.Gene_Expression.h5ad"),
+    ],
+    ids=["feature-type", "split"],
+)
+def test_the_type_flags_take_an_untyped_folder_as_gene_expression(
+    tmp_path, counts, layout, features, flags, written
+):
+    """#127: --feature-type and --split-feature-types were refused on a
+    folder whose features file has no type column, so a pipeline had to
+    look inside each 10x input before it chose its flags. Such a folder
+    (Cell Ranger 2, older STARsolo) holds gene expression alone."""
+    folder = write_10x_mtx(
+        tmp_path / "in", counts, barcodes=_barcodes(), ids=IDS, names=NAMES, layout=layout
+    )
+    plain = tmp_path / "plain.h5ad"
+    _ok(folder, "-o", plain)
+
+    result = _ok(folder, "-o", tmp_path / "out.h5ad", *flags)
+
+    assert sorted(p.name for p in tmp_path.glob("out*.h5ad")) == [written]
+    got, expected = _read(tmp_path / written), _read(plain)
+    assert list(got.obs_names) == list(expected.obs_names)
+    assert list(got.var_names) == list(expected.var_names)
+    assert list(got.var.columns) == list(expected.var.columns)
+    assert "feature_types" not in got.var.columns
+    assert got.X.dtype == expected.X.dtype
+    assert np.array_equal(got.X.toarray(), expected.X.toarray())
+    assert (
+        f"Warning: {features} records no feature types; every feature is taken "
+        "as 'Gene Expression', the only type such a folder holds."
+    ) in _out(result)
+    assert _debris(tmp_path) == []
 
 
 def test_a_single_mtx_file_points_to_its_folder(tmp_path, counts):
