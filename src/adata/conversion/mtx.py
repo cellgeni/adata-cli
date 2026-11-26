@@ -351,6 +351,18 @@ class MtxImport(Converter):
         if width >= 3 and not folder.legacy:
             types = np.array([row[2] for row in rows], dtype=object)
             columns["feature_types"] = types
+        if types is None and width >= 3 and (
+            options.feature_type is not None or options.split_feature_types
+        ):
+            # Not untyped, though not read: GEO often serves a Cell Ranger 3
+            # features.tsv renamed genes.tsv for old Seurat, antibodies and
+            # all, and taking it as gene expression would keep them.
+            raise ValueError(
+                f"{folder.features.name} has a third column, which is not read: "
+                "Cell Ranger 2's genes.tsv records no feature types, and scanpy "
+                "ignores it. If it holds Cell Ranger 3's feature types, name the "
+                "file features.tsv to filter on them."
+            )
         keep = np.ones(n_features, dtype=bool)
         outputs, targets, warnings = plan_targets(
             output, names, columns, types, keep, options, noun="folder",

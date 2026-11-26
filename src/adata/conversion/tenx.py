@@ -389,7 +389,7 @@ def plan_matrix_import(
 
     outputs, targets, warnings = plan_targets(
         output, matrix.names, matrix.columns, matrix.feature_types, keep, options,
-        noun="file", untyped="Cell Ranger 2 files record no feature types",
+        noun="file", untyped="Cell Ranger 2's layout records no feature types",
     )
     return matrix, outputs, targets, warnings
 

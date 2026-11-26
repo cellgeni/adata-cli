@@ -42,12 +42,14 @@ given. A folder whose features file has no type column (Cell Ranger 2's
 `genes.tsv`, older STARsolo's two-column `features.tsv`) holds gene
 expression alone, so `--feature-type "Gene Expression"` keeps every feature,
 with a warning, any other type is refused, and `--split-feature-types`
-writes one `OUT.Gene_Expression.h5ad`, as for a Cell Ranger 2 `.h5`. Features are named by gene id unless `--var-names gene_symbols` is
-given; with it, reading gives the var names and columns
-`scanpy.read_10x_mtx(gex_only=False)` gives, checked against scanpy in CI,
-except that integer counts stay integers (int32, int64 when a value needs
-it) where scanpy converts them to float32; a `real` matrix is read as
-float64. Duplicate entries are summed, as scipy does.
+writes one `OUT.Gene_Expression.h5ad` (or `.zarr`), as for a Cell Ranger 2
+`.h5`. A `genes.tsv` with a third column refuses them: Cell Ranger 2's
+records no types, and scanpy ignores the column. Features are named by gene
+id unless `--var-names gene_symbols` is given; with it, reading gives the
+var names and columns `scanpy.read_10x_mtx(gex_only=False)` gives, checked
+against scanpy in CI, except that integer counts stay integers (int32, int64
+when a value needs it) where scanpy converts them to float32; a `real`
+matrix is read as float64. Duplicate entries are summed, as scipy does.
 
 The matrix is read in two streaming passes, so its size is not a limit: the
 first checks the whole folder -- barcode and feature counts against the

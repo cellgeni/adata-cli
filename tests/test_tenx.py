@@ -260,8 +260,8 @@ def test_a_cell_ranger_2_file_with_one_genome_needs_no_flag(tmp_path):
         (["--genome", "dm6"], "No genome 'dm6' in this file; it has: hg19, mm10"),
         (
             ["--genome", "hg19", "--feature-type", "Peaks"],
-            "No features of type 'Peaks'; Cell Ranger 2 files record no feature "
-            "types, so this file holds gene expression only.",
+            "No features of type 'Peaks'; Cell Ranger 2's layout records no "
+            "feature types, so this file holds gene expression only.",
         ),
     ],
 )
@@ -269,7 +269,7 @@ def test_bad_cell_ranger_2_options_are_refused(tmp_path, extra, message):
     result = _convert(_v2(tmp_path), "-o", tmp_path / "o.h5ad", *extra)
     assert result.exit_code == 1
     assert message in _out(result)
-    assert not (tmp_path / "o.h5ad").exists()
+    assert list(tmp_path.glob("o*")) == []
 
 
 def _same_conversion(got, expected) -> None:
@@ -303,8 +303,8 @@ def test_the_type_flags_take_a_cell_ranger_2_file_as_gene_expression(tmp_path, f
     assert sorted(p.name for p in tmp_path.glob("o*.h5ad")) == [written]
     _same_conversion(_read(tmp_path / written), _read(plain))
     assert (
-        "Warning: Cell Ranger 2 files record no feature types; every feature is "
-        "taken as 'Gene Expression', the only type such a file holds."
+        "Warning: Cell Ranger 2's layout records no feature types; every feature "
+        "is taken as 'Gene Expression', the only type such a file holds."
     ) in _out(result)
 
 

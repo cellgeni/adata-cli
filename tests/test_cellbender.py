@@ -192,6 +192,27 @@ def test_cellbender_0_2_on_cell_ranger_2_input(tmp_path):
     assert "genome" not in got.uns["cellranger"], "background_removed is not a genome"
 
 
+def test_cellbender_on_cell_ranger_2_input_takes_the_type_flags_as_gene_expression(tmp_path):
+    """#127: the type flags work on any input in Cell Ranger 2's layout,
+    which records no feature types; CellBender 0.2 keeps that layout."""
+    truth = _cellbender(tmp_path, version="0.2", cellranger_v2=True)
+    plain, typed = tmp_path / "plain.h5ad", tmp_path / "typed.h5ad"
+    _ok(truth.path, "-o", plain)
+
+    result = _ok(truth.path, "-o", typed, "--feature-type", "Gene Expression")
+
+    got, expected = _read(typed), _read(plain)
+    assert list(got.var_names) == list(expected.var_names)
+    assert np.array_equal(got.X.toarray(), expected.X.toarray())
+    assert list(got.obs.columns) == list(expected.obs.columns)
+    assert "Cell Ranger 2's layout records no feature types" in _out(result)
+
+    refused = _convert(truth.path, "-o", tmp_path / "peaks.h5ad", "--feature-type", "Peaks")
+    assert refused.exit_code == 1
+    assert "so this file holds gene expression only" in _out(refused)
+    assert not (tmp_path / "peaks.h5ad").exists()
+
+
 # ---------------------------------------------------------------------------
 # sniffing
 
