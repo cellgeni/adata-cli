@@ -109,7 +109,8 @@ jobs:
     # not ask must not overwrite that release's results with another tier.
     if: needs.benchmark.outputs.measured == 'true' && (github.event_name == 'push' || inputs.publish)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 15 for the commit, and the 30 the notes step may wait for the release.
+    timeout-minutes: 45
     continue-on-error: true
     permissions:
       contents: write   # push to main, and edit the release notes
@@ -147,10 +148,12 @@ jobs:
           done
           echo "could not push benchmark results"; exit 1
 
-      # Best effort, and last: publish.yml creates the release once PyPI has
-      # the version, which is normally long before this job gets here (13
-      # minutes for 0.17.6), but a failed publish leaves none. The docs page
-      # is authoritative either way.
+      # Best effort, and last. publish.yml creates the release once PyPI has
+      # the version, normally before this job gets here, but only by 7 to 13
+      # minutes (0.17.4 to 0.17.6): slow tests or a re-run in Publish would
+      # leave no release yet. So it waits up to 30 minutes for one; a failed
+      # publish leaves none. The docs page is authoritative either way, and
+      # re-running this job appends the summary later.
       - name: Append to the release notes
         if: github.ref_type == 'tag'
         continue-on-error: true
@@ -158,8 +161,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
+          for _ in $(seq 30); do
+            gh release view "$TAG" >/dev/null 2>&1 && break
+            sleep 60
+          done
           gh release view "$TAG" >/dev/null 2>&1 || {
-            echo "no release for $TAG yet; skipping"; exit 0
+            echo "no release for $TAG after 30 minutes; skipping"; exit 0
           }
           gh release view "$TAG" --json body -q .body > "$RUNNER_TEMP/body.md"
           # Idempotent: replace any block this job wrote before.

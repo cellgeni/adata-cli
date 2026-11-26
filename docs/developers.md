@@ -263,9 +263,9 @@ It reports and never gates; the complexity guards gate.
 4. Merge, then push a tag with no `v` prefix. The tag runs `publish.yml`,
    which checks the tag against `pyproject.toml` and `docs/changelog.md`,
    tests (`tests.yml`, including a build and smoke test of the image),
-   publishes to PyPI, then calls `quay-on-tag.yml` to build the image, check
-   that it runs, and push that image, and creates the GitHub release from
-   the changelog section. If the tests fail or a check does not pass,
+   publishes to PyPI. Then, side by side, it calls `quay-on-tag.yml` to
+   build the image, check that it runs, and push that image, and creates
+   the GitHub release from the changelog section. If the tests fail or a check does not pass,
    nothing is published. `:latest` moves only to the highest `X.Y.Z` tag.
    Don't create the release by hand. The tag also runs `benchmark.yml` (the
    benchmark page, which it also appends to the release notes), whose
@@ -273,8 +273,8 @@ It reports and never gates; the complexity guards gate.
    installs nothing.
 
 A manual `Publish` dispatch to TestPyPI publishes there alone, from any ref;
-one to PyPI publishes, and pushes the image, only when run from a tag, and
-fails from a branch.
+one to PyPI publishes, pushes the image and creates the release, only when
+run from a tag, and fails from a branch.
 Workflows pin third-party actions by commit SHA, with the version in a
 comment, and pass tags and inputs to scripts through `env:`.
 `tests/test_release_pipeline.py` and the `workflow lint` job check both.

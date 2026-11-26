@@ -62,12 +62,19 @@ jobs:
           fi
           echo "version=$declared" >> "$GITHUB_OUTPUT"
       # The GitHub release's notes are this section, so check it before
-      # anything is published rather than after.
+      # anything is published rather than after: once PyPI has the version
+      # the tag cannot change, and no re-run could mend the notes. The
+      # extraction is the one github-release uses.
       - name: The changelog must have a section for the tag
         id: changelog
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
-          if ! grep -qxF "## ${GITHUB_REF_NAME}" docs/changelog.md; then
-            echo "::error::docs/changelog.md has no '## ${GITHUB_REF_NAME}' section"
+          awk -v tag="$TAG" \
+            '$0 == "## " tag { on = 1; next } on && /^## / { exit } on' \
+            docs/changelog.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::docs/changelog.md has no '## $TAG' section with text"
             exit 1
           fi
 
@@ -169,7 +176,7 @@ jobs:
           awk -v tag="$TAG" \
             '$0 == "## " tag { on = 1; next } on && /^## / { exit } on' \
             docs/changelog.md > notes.md
-          test -s notes.md
+          grep -q '[^[:space:]]' notes.md
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}

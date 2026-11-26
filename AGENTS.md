@@ -311,11 +311,12 @@ an item to Released when its tag is out.
   triggers:
   - `publish.yml`, which checks that the tag matches pyproject and has a
     changelog section, tests (`tests.yml`, including a build and smoke test
-    of the Docker image), builds and publishes to PyPI, then calls
-    `quay-on-tag.yml` to build the image, check that it runs, and push that
-    image to `quay.io/cellgeni/adata-cli`, and creates the GitHub release
-    with the changelog section as its notes. If the tests fail or a check
-    does not pass, nothing is published. `:latest` moves only to the
+    of the Docker image), builds and publishes to PyPI. Then, side by side,
+    it calls `quay-on-tag.yml` to build the image, check that it runs, and
+    push that image to `quay.io/cellgeni/adata-cli`, and creates the GitHub
+    release with the changelog section as its notes (a failed image does
+    not hold it back). If the tests fail or a check does not pass, nothing
+    is published. `:latest` moves only to the
     highest `X.Y.Z` tag. Don't create the release by hand: that step was
     missed from 0.12.0 on, and releases had to be backfilled;
   - `benchmark.yml`, which reruns `benchmarks/` and commits the results to
@@ -323,8 +324,8 @@ an item to Released when its tag is out.
     appends a summary to the release notes. The job that measures has a
     read-only token; the one that commits installs nothing.
 - A manual `Publish` dispatch to `testpypi` publishes there alone, from any
-  ref. One to `pypi` publishes, and pushes the image, only when run from a
-  tag; from a branch it fails.
+  ref. One to `pypi` publishes, pushes the image and creates the release,
+  only when run from a tag; from a branch it fails.
 - Workflows pin third-party actions by commit SHA, with the version in a
   comment, and pass tags and inputs to scripts through `env:`.
   `tests/test_release_pipeline.py` and the `workflow lint` job check both.

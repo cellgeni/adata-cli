@@ -117,11 +117,14 @@ TAG = "refs/tags/0.17.5"
         ("push", TAG, None, ("check-version",), set()),
         ("push", TAG, None, ("build",), set()),
         ("push", TAG, None, ("publish-pypi",), set()),
+        # PyPI has the version by then, so the release still announces it.
+        ("push", TAG, None, ("image",), {"publish-pypi", "github-release"}),
     ],
     ids=[
         "tag", "testpypi-dispatch-from-tag", "pypi-dispatch-from-tag",
         "testpypi-dispatch-from-branch", "pypi-dispatch-from-branch",
         "tests-fail", "tag-is-not-the-version", "build-fails", "pypi-upload-fails",
+        "image-fails",
     ],
 )
 def test_each_run_publishes_exactly_what_passed(event, ref, target, failing, published):
@@ -184,17 +187,23 @@ def test_check_version_passes_only_a_tag_that_names_the_version(
 
 @pytest.mark.parametrize(
     "heading, ok",
-    [("## 0.17.5", True), ("## 0.17.4", False), ("## 0.17.5 (soon)", False)],
-    ids=["has-the-section", "no-section", "heading-is-not-the-tag"],
+    [
+        ("## 0.17.5\n\nText.\n", True),
+        ("## 0.17.4\n\nText.\n", False),
+        ("## 0.17.5 (soon)\n\nText.\n", False),
+        ("## 0.17.5\n\n## 0.17.4\n\nText.\n", False),
+        ("## 0.17.5\n", False),
+    ],
+    ids=["has-the-section", "no-section", "heading-is-not-the-tag", "section-is-empty", "heading-ends-the-file"],
 )
 def test_check_version_refuses_a_tag_the_changelog_does_not_cover(tmp_path, heading, ok):
     """The release's notes are the tag's changelog section, so a tag with
-    none is refused before anything is published, not after PyPI has it."""
+    none, or with no text in it, is refused before anything is published:
+    once PyPI has the version the tag cannot change to mend the notes."""
     (tmp_path / "docs").mkdir()
-    (tmp_path / "docs" / "changelog.md").write_text(f"# Changelog\n\n{heading}\n\nText.\n")
+    (tmp_path / "docs" / "changelog.md").write_text(f"# Changelog\n\n{heading}")
     done = _bash(
-        _script("publish.yml", "check-version", "changelog"), tmp_path,
-        GITHUB_REF_NAME="0.17.5",
+        _script("publish.yml", "check-version", "changelog"), tmp_path, TAG="0.17.5",
     )
     assert (done.returncode == 0) == ok, done.stdout + done.stderr
 
