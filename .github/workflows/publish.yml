@@ -4,14 +4,16 @@ name: Publish
 #
 # What a run publishes, by how it started:
 #
-#   a pushed tag                            PyPI, then the image
+#   a pushed tag                            PyPI, then the image and the
+#                                           GitHub release
 #   workflow_dispatch, target testpypi      TestPyPI only, from any ref
-#   workflow_dispatch, target pypi          PyPI, then the image; from a tag
-#                                           only, as check-version refuses a
-#                                           branch
+#   workflow_dispatch, target pypi          PyPI, then the image and the
+#                                           release; from a tag only, as
+#                                           check-version refuses a branch
 #
-# Nothing publishes unless the suite passed, and nothing reaches PyPI or
-# quay.io unless the tag matches pyproject.toml.
+# Nothing publishes unless the suite passed, and nothing reaches PyPI,
+# quay.io or the releases page unless the tag matches pyproject.toml and
+# docs/changelog.md has a section for it.
 on:
   push:
     tags: ["*"]
@@ -59,6 +61,22 @@ jobs:
             exit 1
           fi
           echo "version=$declared" >> "$GITHUB_OUTPUT"
+      # The GitHub release's notes are this section, so check it before
+      # anything is published rather than after: once PyPI has the version
+      # the tag cannot change, and no re-run could mend the notes. The
+      # extraction is the one github-release uses.
+      - name: The changelog must have a section for the tag
+        id: changelog
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          awk -v tag="$TAG" \
+            '$0 == "## " tag { on = 1; next } on && /^## / { exit } on' \
+            docs/changelog.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::docs/changelog.md has no '## $TAG' section with text"
+            exit 1
+          fi
 
   test:
     uses: ./.github/workflows/tests.yml # zizmor: ignore[self-repository] actionlint 1.7 predates $/
@@ -135,3 +153,37 @@ jobs:
     secrets:
       QUAY_USERNAME: ${{ secrets.QUAY_USERNAME }}
       QUAY_TOKEN: ${{ secrets.QUAY_TOKEN }}
+
+  # Releases were cut by hand with `gh release create` until 0.11.1. The
+  # checklist never named that step, so later tags were published with no
+  # release page and backfilled by hand. Running after PyPI means a release
+  # never announces a version pip cannot install. A release already cut by
+  # hand is left alone.
+  github-release:
+    needs: [check-version, publish-pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Notes from the changelog
+        id: notes
+        env:
+          TAG: ${{ needs.check-version.outputs.version }}
+        run: |
+          awk -v tag="$TAG" \
+            '$0 == "## " tag { on = 1; next } on && /^## / { exit } on' \
+            docs/changelog.md > notes.md
+          grep -q '[^[:space:]]' notes.md
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.check-version.outputs.version }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists"; exit 0
+          fi
+          gh release create "$TAG" --verify-tag --title "$TAG" --notes-file notes.md

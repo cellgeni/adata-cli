@@ -43,6 +43,14 @@ theirs.
   - An import that adds or replaces only the CSV's columns, joined on the
     index, and leaves the frame's other columns as they are ("attach
     metadata" without a round trip of the whole frame).
+- GitHub releases stopped at 0.11.1: they were cut by hand, and the release
+  checklist never said so. PyPI, quay and the benchmark page were unaffected.
+  `publish.yml` now creates the release from the changelog section (#114).
+  0.12.0 to 0.17.6 were backfilled by hand from the changelog plus each
+  tag's benchmark artifact; the next tag is the first end-to-end check.
+  GitHub renders each newline in a release body as a line break, so the
+  changelog's wrapped lines show ragged there; unwrapping paragraphs when
+  the notes are extracted would fix it (review of #114).
 - From waves 3 and 4 of the audit fixes:
   - The streaming transpose and other users of `csr_build.BucketSorter`
     append every input block to every bucket, (nnz/chunk)² appends, and
